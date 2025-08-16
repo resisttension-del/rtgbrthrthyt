@@ -1,0 +1,2471 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <title>VOID</title>
+    <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-check-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/Detect.js/2.2.2/detect.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+    <script src="https://cdn.jsdelivr.net/npm/fuse.js@6.6.2"></script>
+    
+    
+<script type="module">
+  // Aho–Corasick (modern-ahocorasick) — jsDelivr ESM entry
+  import AhoCorasick from "https://cdn.jsdelivr.net/npm/modern-ahocorasick@2.0.4/dist/index.js";
+  // leo-profanity (best to import from an ESM CDN if you need it in the browser)
+  import leoProfanity from "https://esm.sh/leo-profanity@1.8.0";
+  
+</script>
+    <link rel="icon" type="image/x-icon" href="https://codehs.com/uploads/d131cd60050601ba14a5191093e72161">
+
+
+
+    
+    <style>
+  html, body { margin:0; padding:0; }
+  canvas {
+    display: block;        /* remove inline‑block whitespace */
+    width: 100vw;          /* viewport width */
+    height: 100vh;         /* viewport height */
+    background: transparent;
+  }
+</style>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        /* ====================
+           styles.css (full)
+           ==================== */
+
+        /* Basic reset */
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: Arial, sans-serif;
+        }
+
+        /* Fullscreen game container */
+        html,
+        body {
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background: #111;
+        }
+
+        /* HIDE CURSOR WHEN IN-GAME POINTER LOCKED */
+        body.game-active {
+            cursor: none;
+        }
+
+        /* MENU OVERLAY */
+        #menu-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            display: flex; /* Ensure flex for centering its content */
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            z-index: 10; /* Keep it above the canvas/background */
+            background-color: rgba(0, 0, 0, 0.0); /* Semi-transparent overlay */
+        }
+
+        .menu-panel {
+            background: #222;
+            padding: 20px;
+            margin: 10px;
+            border-radius: 8px;
+            text-align: center;
+        }
+
+        .menu-panel input,
+        .menu-panel button {
+            margin-top: 10px;
+            padding: 8px 12px;
+            font-size: 1rem;
+            border: none;
+            border-radius: 4px;
+        }
+
+        .menu-panel button {
+            background: #555;
+            color: #fff;
+            cursor: pointer;
+        }
+
+        .menu-panel button:hover {
+            background: #666;
+        }
+
+
+        /* BUY MENU */
+        #buy-menu {
+            z-index: 5;
+        }
+
+
+        /* HUD ELEMENTS */
+        #hud {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            z-index: 10;
+        }
+        
+:root{
+  --scale: 0.85;                  /* change this to 0.7 / 0.6 for even smaller */
+  --chat-bg: rgba(12,8,20,0.65);
+  --chat-border: rgba(255,255,255,0.06);
+  --accent: #8b5cf6;
+  --accent-2: #6d28d9;
+  --muted: #bfb8d9;
+  --incoming-bg: rgba(255,255,255,0.04);
+  --outgoing-bg: linear-gradient(90deg, rgba(139,92,246,0.95), rgba(109,40,217,0.95));
+  --radius-base: 8px;
+  --radius: calc(var(--scale) * var(--radius-base));
+  --shadow: 0 calc(var(--scale) * 6px) calc(var(--scale) * 16px) rgba(15,6,30,0.48);
+  --glass-blur: calc(var(--scale) * 3px);
+  --max-width-base: 360px;
+  --max-width: calc(var(--scale) * var(--max-width-base));
+  --avatar-size-base: 28px;
+  --avatar-size: calc(var(--scale) * var(--avatar-size-base));
+}
+
+/* Container */
+#chat-box{
+  position: absolute;
+  top: calc(var(--scale) * 12px);
+  left: calc(var(--scale) * 12px);
+  width: min(var(--max-width), 78vw);
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--scale) * 6px);
+  background: var(--chat-bg);
+  border: 1px solid var(--chat-border);
+  border-radius: calc(var(--radius) + 2px);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(var(--glass-blur)) saturate(120%);
+  z-index: 2;
+  overflow: hidden;
+  pointer-events: auto;
+}
+
+/* Header */
+#chat-header{
+  display:flex;
+  align-items:center;
+  justify-content:flex-start;
+  padding: calc(var(--scale) * 6px) calc(var(--scale) * 8px);
+  gap: calc(var(--scale) * 6px);
+  background: linear-gradient(180deg, rgba(255,255,255,0.02), transparent);
+  border-bottom: 1px solid rgba(255,255,255,0.02);
+}
+#chat-title{
+  font-weight:600;
+  color: #8b5cf6;
+  font-family: "Segoe UI", "Inter", system-ui, Arial, sans-serif;
+  font-size: calc(var(--scale) * 12px);
+  letter-spacing:0.2px;
+}
+
+/* Messages area */
+#chat-messages{
+  padding: calc(var(--scale) * 8px);
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--scale) * 6px);
+  max-height: calc(52vh);
+  overflow-y: auto;
+  scroll-behavior: smooth;
+  box-sizing: border-box;
+}
+
+/* Custom scrollbar (WebKit) */
+#chat-messages::-webkit-scrollbar{ width: calc(var(--scale) * 8px); }
+#chat-messages::-webkit-scrollbar-track{ background: transparent; }
+#chat-messages::-webkit-scrollbar-thumb{
+  background: linear-gradient(180deg, rgba(139,92,246,0.22), rgba(109,40,217,0.16));
+  border-radius: calc(var(--scale) * 6px);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+/* Message bubble base */
+.chat-message{
+  display: inline-flex;
+  gap: calc(var(--scale) * 6px);
+  align-items: flex-end;
+  max-width: 92%;
+  padding: calc(var(--scale) * 5px) calc(var(--scale) * 7px);
+  font-size: calc(var(--scale) * 0.82rem);
+  line-height: 1.15;
+  box-sizing: border-box;
+  word-break: break-word;
+  white-space: pre-wrap;
+  border-radius: var(--radius);
+  transition: transform .12s ease, box-shadow .12s ease;
+}
+
+/* Incoming bubble (left) */
+.chat-message.incoming{
+  align-self: flex-start;
+  background: var(--incoming-bg);
+  color: #efe9ff;
+  border: 1px solid rgba(255,255,255,0.02);
+  box-shadow: 0 calc(var(--scale) * 3px) calc(var(--scale) * 10px) rgba(10,8,15,0.34);
+  border-bottom-left-radius: calc(var(--scale) * 4px);
+}
+
+/* Outgoing bubble (right) */
+.chat-message.outgoing{
+  align-self: flex-end;
+  background: var(--outgoing-bg);
+  color: white;
+  box-shadow: 0 calc(var(--scale) * 4px) calc(var(--scale) * 12px) rgba(109,40,217,0.14);
+  border-bottom-right-radius: calc(var(--scale) * 4px);
+}
+
+/* Small meta line (name / time) inside message */
+.chat-meta{
+  display:block;
+  font-size: calc(var(--scale) * 0.6rem);
+  color: rgba(255,255,255,0.65);
+  margin-bottom: calc(var(--scale) * 3px);
+  opacity:0.9;
+}
+
+/* Optional avatar circle if you want to show one */
+.chat-avatar{
+  width: var(--avatar-size);
+  height: var(--avatar-size);
+  border-radius:50%;
+  background: linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0.02));
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  color: var(--accent);
+  font-weight:700;
+  font-size: calc(var(--scale) * 11px);
+  flex-shrink:0;
+}
+
+/* Input row (no send button) */
+#chat-form{
+  display:flex;
+  gap: calc(var(--scale) * 6px);
+  padding: calc(var(--scale) * 6px);
+  border-top:1px solid rgba(255,255,255,0.02);
+  background: linear-gradient(0deg, rgba(0,0,0,0.12), transparent);
+  align-items:center;
+}
+#chat-input{
+  flex:1;
+  border: none;
+  padding: calc(var(--scale) * 6px) calc(var(--scale) * 8px);
+  font-size: calc(var(--scale) * 0.86rem);
+  border-radius: calc(var(--scale) * 8px);
+  outline: none;
+  background: rgba(255,255,255,0.03);
+  color: #fff;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.02);
+}
+#chat-input::placeholder{ color: rgba(255,255,255,0.35); }
+
+/* Responsive: collapse to bottom-right small pill on tiny screens */
+@media (max-width:420px){
+  #chat-box{
+    left: calc(var(--scale) * 10px);
+    top: calc(var(--scale) * 10px);
+    width: calc(100vw - calc(var(--scale) * 20px));
+    border-radius: calc(var(--scale) * 8px);
+  }
+  #chat-messages{ max-height: 36vh; padding: calc(var(--scale) * 6px); }
+  .chat-avatar{ width: calc(var(--scale) * 24px); height: calc(var(--scale) * 24px); font-size: calc(var(--scale) * 10px); }
+}
+
+#kill-feed {
+  position: absolute;
+  bottom: 30px;
+  left: 30px;
+  pointer-events: none;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: 450px;
+}
+
+.kill-entry {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  background: rgba(0, 0, 0, 0.7);
+  padding: 6px 18px;
+  color: #fff;
+  font-size: 1.35rem;
+  border-radius: 6px;
+}
+
+.kill-entry::before,
+.kill-entry::after {
+  content: "";
+  position: absolute;
+  width: 0;
+  height: 0;
+  border-top: 18px solid transparent;
+  border-bottom: 18px solid transparent;
+}
+
+.kill-entry::before {
+  left: -18px;
+  border-right: 18px solid rgba(0, 0, 0, 0.7);
+}
+
+.kill-entry::after {
+  right: -18px;
+  border-left: 18px solid rgba(0, 0, 0, 0.7);
+}
+
+.kill-entry .kill-icon {
+  width: 24px;
+  height: 24px;
+  margin: 0 9px;
+  flex-shrink: 0;
+}
+
+.kill-entry .weapon-img {
+  height: 30px;
+  width: auto;
+  object-fit: contain;
+  margin: 0 9px;
+}
+
+/* Icons for headshot / penetration (square, auto-scale to height) */
+.kill-entry .icon {
+  height: 24px;
+  width: 24px;
+  object-fit: contain;
+  margin-left: 6px;
+}
+
+.kill-entry .name {
+  margin: 0 9px;
+  white-space: nowrap;
+}
+
+        /* DAMAGE OVERLAY */
+        #damage-overlay {
+            pointer-events: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(255, 0, 0, 1);
+            opacity: 0;
+            transition: opacity 0.2s ease-out;
+            z-index: 99999;
+            /* ← super high so nothing can cover it */
+        }
+
+        /* PLAYER BODY RECTANGLE */
+        #body-rect {
+            position: absolute;
+            width: 200px;
+            height: 400px;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background-color: rgba(0, 0, 255, 0.5);
+            /* default body color */
+            z-index: 3;
+            pointer-events: none;
+        }
+
+
+/* ===== HUD Container (No Background) ===== */
+:root{
+  --slot-size: clamp(48px, 7.4vw, 64px);
+  --inventory-gap: 10px;
+  --hud-bottom: 20px; /* distance from bottom of viewport */
+}
+
+/* Container just groups things visually */
+#hud-container {
+  position: fixed; /* keep the whole HUD visible relative to viewport */
+  left: 0; top: 0; right: 0; bottom: 0;
+  pointer-events: none;
+  font-family: Inter, Arial, sans-serif;
+  z-index: 10;
+}
+
+/* Inventory — locked to the CENTER X of the SCREEN using fixed positioning */
+#inventory {
+  position: fixed;
+  bottom: var(--hud-bottom);
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: var(--inventory-gap);
+  align-items: center;
+  pointer-events: none;
+}
+
+/* Make slots clickable (override pointer-events) */
+.inventory-slot {
+  pointer-events: auto;
+  width: var(--slot-size);
+  height: var(--slot-size);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  border-radius: 8px;
+  background: transparent; /* no background as requested */
+  transition: transform 180ms cubic-bezier(.2,.9,.2,1), box-shadow 180ms;
+  outline: none;
+}
+.inventory-slot img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  transition: transform 180ms, filter 180ms;
+  display: block;
+  user-select: none;
+}
+.inventory-slot.selected img,
+.inventory-slot:hover img,
+.inventory-slot:focus img {
+  transform: scale(1.22);
+  filter: drop-shadow(0 6px 18px rgba(0,255,150,0.12));
+}
+
+
+#ammo-display {
+  position: fixed;
+  bottom: var(--hud-bottom);
+  /* Place ammo 10px to the right of the inventory’s right edge */
+  left: calc(45% +  calc((var(--slot-size) * 3) + (var(--inventory-gap) * 2) / 2) + 10px);
+  pointer-events: none;
+  white-space: nowrap;
+  user-select: none;
+}
+#ammo-display .ammo {
+  font-weight: 700;
+  font-size: 1.25rem;
+  text-shadow: 0 2px 8px rgba(0,0,0,0.9);
+  display: inline-block;
+  padding: 2px 6px;
+  border-radius: 6px;
+  /* subtle background so it reads on busy scenes; remove if you don't want it */
+  color: #fff;
+}
+
+:root {
+    --hud-bottom: 20px;
+    --health-color: #4ed147;
+    --shield-color: #4755d1;
+}
+
+
+#health-shield-display {
+    pointer-events: none;
+    position: fixed;
+    left: 50%;
+    transform: translateX(-50%);
+    bottom: calc(var(--hud-bottom) + 100px);
+    width: clamp(180px, 28vw, 280px);
+}
+
+.combined-bar {
+    width: 100%;
+    height: 22px;
+    border-radius: 8px;
+    position: relative;
+    overflow: hidden;
+    background: rgba(0,0,0,0.25);
+    box-shadow: inset 0 0 8px rgba(0,0,0,0.8);
+}
+
+.filled-bar {
+    height: 100%;
+    width: 100%;
+    transition: width 160ms cubic-bezier(0.2, 0.9, 0.2, 1);
+    position: absolute;
+    left: 0;
+    top: 0;
+    border-radius: 8px;
+}
+
+/* The text labels are positioned absolutely within the container */
+.segment-text {
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
+    color: #fff;
+    font-weight: 700;
+    text-shadow: 0 1px 6px rgba(0,0,0,0.9);
+    pointer-events: none;
+    font-size: 0.9rem;
+}
+
+.health-text {
+    left: 10px;
+}
+
+.shield-text {
+    right: 10px;
+}
+        /* RESPAWN OVERLAY */
+#respawn-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  backdrop-filter: blur(6px);
+  background: rgba(10, 10, 10, 0.6);
+  z-index: 16;
+  display: none; /* change to flex to show */
+  align-items: center;
+  justify-content: center;
+  pointer-events: auto;
+}
+
+.respawn-container {
+  background: rgba(20, 20, 20, 0.85);
+  border-radius: 16px;
+  padding: 40px 30px;
+  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.4);
+  text-align: center;
+  max-width: 300px;
+  width: 90%;
+}
+
+.respawn-text {
+  font-size: 1.75rem;
+  font-weight: 700;
+  color: #ffffff;
+  margin-bottom: 24px;
+  letter-spacing: 0.5px;
+}
+
+#respawn-now-button {
+  padding: 14px 28px;
+  font-size: 1.25rem;
+  font-weight: 600;
+  cursor: pointer;
+  border: none;
+  border-radius: 12px;
+  background: linear-gradient(145deg, #ff5f5f, #c43737);
+  color: white;
+  box-shadow:
+    0 8px 15px rgba(0, 0, 0, 0.3),
+    inset 0 -2px 4px rgba(0, 0, 0, 0.25);
+  transition:
+    transform 0.2s ease,
+    box-shadow 0.2s ease,
+    background 0.3s ease;
+}
+
+#respawn-now-button:hover {
+  background: linear-gradient(145deg, #ff6f6f, #d13d3d);
+  transform: translateY(-3px);
+  box-shadow:
+    0 10px 20px rgba(0, 0, 0, 0.35),
+    inset 0 -2px 4px rgba(0, 0, 0, 0.25);
+}
+
+#respawn-now-button:active {
+  transform: scale(0.98);
+  box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.35);
+}
+
+
+
+        /* HIDDEN UTIL */
+        .hidden {
+            display: none !important;
+        }
+
+        /* FADE-TO-BLACK OVERLAY */
+        #fade-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: #000;
+            opacity: 0;
+            transition: opacity 1s ease-in-out;
+            pointer-events: none;
+            z-index: 15;
+        }
+
+#loading-overlay {
+    position: fixed;
+    inset: 0;
+    width: 100vw;
+    height: 100vh;
+    background: radial-gradient(circle at center, rgba(20, 20, 20, 0.95), rgba(0, 0, 0, 0.98));
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    z-index: 2000;
+    transition: opacity 0.4s ease, transform 0.4s ease;
+}
+
+#loading-overlay.hidden {
+    opacity: 0;
+    pointer-events: none;
+    transform: scale(1.02);
+}
+
+/* ============================= */
+/* Loading Box */
+/* ============================= */
+#loading-box {
+    width: 350px;
+    text-align: center;
+    color: #fff;
+    font-family: "Segoe UI", Arial, sans-serif;
+    background: rgba(255, 255, 255, 0.05);
+    padding: 24px 20px;
+    border-radius: 14px;
+    box-shadow: 0 6px 25px rgba(0, 0, 0, 0.7);
+    backdrop-filter: blur(10px) saturate(140%);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    animation: popIn 0.4s ease, floatUpDown 3s ease-in-out infinite;
+}
+
+/* ============================= */
+/* Progress Bar */
+/* ============================= */
+#progress-bar-bg {
+    width: 100%;
+    height: 16px;
+    background: rgba(255, 255, 255, 0.15);
+    border-radius: 8px;
+    overflow: hidden;
+    margin-bottom: 10px;
+    box-shadow: inset 0 0 6px rgba(0,0,0,0.4);
+}
+
+#progress-bar-fill {
+    width: 0%;
+    height: 100%;
+    background: linear-gradient(90deg, #954ffe, #9d00fe);
+    box-shadow: 0 0 10px rgba(140, 0, 254, 0.9);
+    transition: width 0.25s ease-in-out;
+    animation: glowPulse 1.5s infinite alternate ease-in-out;
+}
+
+/* ============================= */
+/* Loading Text */
+/* ============================= */
+#progress-text {
+    font-size: 14px;
+    opacity: 0.9;
+    letter-spacing: 0.4px;
+    font-weight: 400;
+}
+
+/* Optional title above progress bar */
+#loading-title {
+    font-size: 18px;
+    margin-bottom: 12px;
+    font-weight: 500;
+    letter-spacing: 0.5px;
+    text-shadow: 0 1px 2px rgba(0,0,0,0.6);
+}
+
+/* ============================= */
+/* Optional Spinner */
+/* ============================= */
+#loading-spinner {
+    width: 32px;
+    height: 32px;
+    margin: 0 auto 14px;
+    border: 3px solid rgba(255,255,255,0.2);
+    border-top-color: #a100fe;
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+}
+
+/* ============================= */
+/* Animations */
+/* ============================= */
+@keyframes popIn {
+    from { transform: scale(0.95); opacity: 0; }
+    to { transform: scale(1); opacity: 1; }
+}
+
+@keyframes glowPulse {
+    from { box-shadow: 0 0 6px rgba(140, 0, 254, 0.6); }
+    to { box-shadow: 0 0 14px rgba(140, 0, 254, 0.9); }
+}
+
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}
+
+@keyframes floatUpDown {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-6px); }
+}
+        /* --- General Body and HTML Styles for Centering --- */
+        html, body {
+            margin: 0;
+            overflow: hidden; /* Prevent scrollbars */
+            height: 100%;
+            font-family: 'Arial', sans-serif;
+            background-color: #dddddd; /* Lighter grey for the overall background, matching the image */
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .hidden { display: none; }
+
+
+        #game-logo {
+            grid-column: 1 / -1;
+            justify-self: center;
+            align-self: start;
+            margin-top: 20px;
+            margin-bottom: 40px;
+            max-width: 5%; /* Adjust as needed */
+            height: auto;
+            display: block;
+            transform: translateX(-950%) translateY(-10%);
+            display: none;
+        }
+
+        #left-menu-options {
+            grid-column: 1;
+            grid-row: 2;
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+            justify-content: flex-start;
+            padding-left: 50px;
+            box-sizing: border-box;
+        }
+
+        .menu-option {
+            background: none;
+            border: none;
+            color: #6a0dad;
+            cursor: pointer;
+            padding: 10px 0;
+            text-align: left;
+            transition: color 0.3s ease;
+            font-weight: bold;
+            outline: none;
+            font-family: inherit;
+        }
+
+        .menu-option:hover {
+            color: #8a2be2;
+        }
+
+        #play-button {
+            font-size: 5em;
+            margin-bottom: 20px;
+            transform: translateY(-100%);
+            display: none;
+        }
+
+        #settings-button {
+            font-size: 2.5em;
+            margin-bottom: 20px;
+            transform: translateY(-200%);
+            display: none;
+        }
+
+        #career-button {
+            font-size: 2.5em;
+            transform: translateY(-200%);
+            display: none;
+        }
+
+#leaderboard-overlay {
+  position: fixed;
+  top: 12px;
+  right: 12px;
+  background: linear-gradient(145deg, rgba(20, 20, 20, 0.7), rgba(35, 35, 35, 0.7));
+  color: #f0f0f0;
+  padding: 14px 18px;
+  border-radius: 12px;
+  font-family: 'Segoe UI', Arial, sans-serif;
+  z-index: 1000;
+  pointer-events: none;
+  display: none; /* Hidden by default */
+  max-height: 70vh;
+  overflow-y: auto;
+  min-width: 260px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.4);
+  backdrop-filter: blur(6px);
+}
+
+/* Title */
+#leaderboard-overlay .title {
+  font-size: 1.4rem;
+  font-weight: 700;
+  margin-bottom: 10px;
+  text-align: center;
+  letter-spacing: 0.5px;
+  color: #cfbdff;
+  text-shadow: 0 0 6px rgba(68, 0, 105, 0.4);
+}
+
+/* Table */
+#leaderboard-overlay table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+  text-align: center; /* Center both headings and stats */
+}
+
+#leaderboard-overlay th {
+  padding: 6px 4px;
+  font-weight: 600;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.15);
+  color: #8657ff;
+}
+
+#leaderboard-overlay td {
+  padding: 6px 4px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+/* Zebra striping for better readability */
+#leaderboard-overlay tr:nth-child(even) {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+        #game-container {
+            width: 100%;
+            height: 100%;
+            position: relative; /* Essential for positioning elements inside */
+            /* Initially hidden, or visible and controlled by JS */
+            display: none; /* Start hidden and show when game starts */
+        }
+
+        #game-screen-logo {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            max-width: 50px;
+            height: auto;
+            z-index: 10000;
+            display: none;
+        }
+
+
+#crosshair {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  pointer-events: none;
+  z-index: 1000;
+  transform: translate(-50%, -50%);
+}
+
+.line {
+  position: absolute;
+  background: white;
+  opacity: 0.9;
+  box-shadow: 0 0 2px rgba(255, 255, 255, 0.5);
+  border-radius: 2px;
+}
+
+/* Vertical lines */
+#line-up, #line-down {
+  width: 2px;
+  height: 7px;
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+#line-up { top: -30px; }
+#line-down { bottom: -30px; }
+
+/* Horizontal lines */
+#line-left, #line-right {
+  height: 2px;
+  width: 7px;
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+#line-left { left: -30px; }
+#line-right { right: -30px; }
+
+
+#scopeOverlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  background: url("https://codehs.com/uploads/82750a4e4098e0f3f00b9cb6ea4f3b39") center center / cover no-repeat;
+  pointer-events: none;
+  display: none;
+  z-index: 1001;
+}
+
+        #buy-menu {
+            position: absolute;
+            top: 25%;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(40, 40, 40, 0.9);
+            padding: 20px;
+            border-radius: 8px;
+            color: white;
+            z-index: 1000;
+            pointer-events: none; /* Controlled by JS */
+            display: none;
+        }
+        #buy-menu h2 { margin: 0 0 10px; font-size: 1.2rem; }
+        #buy-menu button {
+            display: block; margin: 8px 0; padding: 8px 12px; font-size: 1rem;
+            cursor: pointer; background: #555; border: none; border-radius: 4px; color: white;
+        }
+        #buy-menu button:hover { background: #666; }
+        #scoreboard {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background-color: rgba(0,0,0,0.8);
+            color: white;
+            padding: 20px;
+            border-radius: 8px;
+            z-index: 1000;
+            min-width: 300px;
+            pointer-events: auto; /* Scoreboard should be interactive for scrolling */
+            display: none;
+        }
+        #score-table { width: 100%; border-collapse: collapse; display: none; }
+        #score-table th, #score-table td { padding: 8px; border-bottom: 1px solid #444; text-align: left; display: none; }
+
+        #damage-overlay {
+            pointer-events: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(255, 0, 0, 1);
+            opacity: 0;
+            transition: opacity 0.2s ease-out;
+            z-index: 9999;
+        }
+        #loading-overlay {
+            position: fixed; /* Or 'absolute' if it's within a specific container */
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.8); /* Dark semi-transparent background */
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            color: white;
+            font-family: Arial, sans-serif;
+            font-size: 1.5em;
+            z-index: 9999; /* Ensure it's on top of everything else */
+        }
+
+        #map-select {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+        #map-select button {
+            padding: 15px 25px;
+            font-size: 1.5em;
+            background-color: #6a0dad;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: background-color 0.3s ease;
+        }
+        #map-select button:hover {
+            background-color: #8a2be2;
+        }
+
+        #loading-overlay.hidden {
+            display: none;
+        }
+
+        .progress-bar {
+            width: 80%; /* Adjust as needed */
+            max-width: 500px;
+            height: 20px;
+            background-color: #555;
+            border-radius: 10px;
+            overflow: hidden; /* Ensures the fill stays within the rounded corners */
+            margin-top: 20px;
+        }
+
+        #progress-bar-fill {
+            height: 100%;
+            width: 0%; /* Initial width */
+            background-color: #6a0dad; /* Purple color for the progress */
+            transition: width 0.1s linear; /* Smooth transition for progress updates */
+        }
+
+        #progress-text {
+            margin-bottom: 10px;
+        }
+
+
+        #fps-counter {
+            position: absolute;
+            top: 97%;
+            left: 0%;
+            background-color: rgba(0, 0, 0, 0.0);
+            color: white;
+            padding: 5px 10px;
+            border-radius: 5px;
+            font-family: monospace;
+            font-size: 16px;
+            z-index: 10000;
+        }
+#game-timer {
+    position: absolute;
+    top: 10px; /* Below your FPS counter */
+    left: 50%;
+    transform: translateX(-50%);
+    
+    background: rgba(0, 0, 0, 0.45);
+    backdrop-filter: blur(6px) saturate(120%);
+    padding: 6px 14px;
+    border-radius: 8px;
+    
+    font-family: "Segoe UI", monospace;
+    font-size: 18px;
+    font-weight: bold;
+    letter-spacing: 0.5px;
+    color: #fff;
+    text-shadow: 0 1px 2px rgba(0,0,0,0.7);
+    
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    
+    z-index: 10000;
+    display: none; /* Only visible in FFA mode */
+    
+    animation: timerPop 0.3s ease;
+}
+
+/* Small pop-in animation */
+@keyframes timerPop {
+    from { transform: translateX(-50%) scale(0.9); opacity: 0; }
+    to { transform: translateX(-50%) scale(1); opacity: 1; }
+}
+
+        /* Hide the original h1 title now that we're using an image */
+        #menu-overlay h1 {
+            display: none;
+        }
+
+        /* Hide the other menu panels by default as per the image's focus on the main menu */
+/* Styling for the username prompt container */
+#username-prompt {
+  /* Positioning and Layout */
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 1010;
+
+  /* Visuals */
+  background-color: #ffffff;
+  padding: 30px;
+  border-radius: 10px;
+  box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
+  border: 1px solid #ddd;
+  text-align: center;
+
+  /* Sizing (optional, adjust as needed) */
+  min-width: 300px;
+  max-width: 90%;
+}
+
+/* Styling for both input fields */
+#username-prompt input[type="text"],
+#username-prompt input[type="password"] {
+  width: calc(100% - 20px);
+  padding: 12px 10px;
+  margin-bottom: 15px; /* Add some space between the inputs */
+  border: 1px solid #ccc;
+  border-radius: 5px;
+  font-size: 1em;
+  box-sizing: border-box;
+  outline: none;
+}
+
+#username-prompt input[type="text"]:focus,
+#username-prompt input[type="password"]:focus {
+  border-color: #007bff;
+  box-shadow: 0 0 5px rgba(0, 123, 255, 0.3);
+}
+
+/* Styling for the button */
+#username-prompt button {
+  background: linear-gradient(to right, #bc8cff, #8341e0);
+  color: #ffffff;
+  padding: 12px 25px;
+  border: none;
+  border-radius: 5px;
+  cursor: pointer;
+  font-size: 1em;
+  font-weight: bold;
+  transition: opacity 0.3s ease;
+}
+
+#username-prompt button:hover {
+  opacity: 0.9;
+}
+
+
+/* You still need to manage the 'hidden' class with JavaScript */
+.hidden {
+  display: none;
+}
+        #map-menu {
+            display: none; /* Adjusted to directly hide these elements */
+        }
+        #controls-menu {
+            display: none; /* Adjusted to directly hide these elements */
+        }
+        
+        
+        
+        body {
+    margin: 0;
+    font-family: Arial, sans-serif;
+    color: #ffffff; /* Example text color */
+    background-color: #333; /* Example background for the page */
+    overflow: hidden; /* Hide scrollbars if content overflows */
+}
+
+/* Styles for the main menu overlay */
+#menu-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background-color: rgba(0, 0, 0, 0.8); /* Dark semi-transparent background */
+    display: none;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    z-index: 100; /* Ensure it's on top */
+}
+
+:root{
+  --bg-overlay: rgba(6,10,15,0.65);
+  --panel-bg: rgba(255,255,255,0.04);
+  --accent-1:  #f5be7f;
+  --accent-2:  #eb9431;
+  --accent-3:  #2ee07d;
+  --text: #ffffff;
+  --muted: rgba(255,255,255,0.55);
+  --glass-blur: 8px;
+  --radius-lg: clamp(20px, 4vw, 48px);
+  --radius-md: clamp(8px, 1.6vw, 14px);
+  --shadow-1: 0 6px 20px rgba(0,0,0,0.45);
+  --shadow-2: 0 10px 30px rgba(0,0,0,0.55);
+}
+
+/* Container: hidden by default, toggled by adding .open */
+#loadout-screen{
+  display: none; /* Use flexbox to center the content */
+  position: fixed;
+  inset: 0; /* cover viewport so bottom % isn't required */
+  z-index: 1000;
+  align-items: center;
+  justify-content: center;
+  padding: clamp(1rem, 3vw, 3rem);
+  box-sizing: border-box;
+  color: var(--text);
+  pointer-events: none; /* stays inert until opened */
+  -webkit-font-smoothing:antialiased;
+
+  /* Added properties for width, height, and display */
+  width: 1000px; /* Example width */
+  height: 300px; /* Example height */
+  margin: auto; /* This centers the block-level element horizontally and vertically */
+}
+/* Show & enable interactions by toggling .open (JS-friendly) */
+#loadout-screen.open{
+  display: flex;
+  pointer-events: auto;
+}
+
+/* Panel inside the overlay (keeps your clamp sizing ideas) */
+#loadout-panel{
+  width: clamp(320px, 85vw, 1200px);
+  height: clamp(360px, 70vh, 820px);
+  max-height: 95vh;
+  border-radius: var(--radius-lg);
+  padding: clamp(1rem, 2.6vw, 2.5rem);
+  position: relative;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: clamp(1rem, 2vh, 2rem);
+  align-items: stretch;
+  transform: translateY(8px);
+  opacity: 0;
+  transition: transform 320ms cubic-bezier(.2,.9,.35,1), opacity 320ms ease;
+}
+
+/* entrance when opening */
+#loadout-screen.open #loadout-panel{
+  transform: translateY(0);
+  opacity: 1;
+}
+
+/* top row (title + close) */
+/* top row (title + close) */
+.loadout-header {
+  display: flex;
+  align-items: center;
+  justify-content: center; /* This will center the h3 horizontally */
+  /* Remove other properties that are not relevant for centering */
+}
+
+.loadout-title {
+ margin-top: 1rem;
+  /* You can keep your existing styling for the title */
+  font-size: clamp(1.05rem, 2.2vw, 1.6rem);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--text);
+  /* Make sure the text is centered within the title element */
+  text-align: center;
+   margin-bottom: 1rem;
+}
+
+
+/* Grid: use CSS grid for predictable layout and responsive columns */
+.weapon-grid{
+  width: 100%;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: clamp(.6rem, 1.6vw, 1.2rem);
+  justify-items: center;
+  align-items: start;
+}
+
+/* Weapon buttons — assume <button class="weapon-button" style="--img:url(...)"> */
+.weapon-button{
+  position: relative;
+  width: 160px;
+  height: 160px;
+  min-width: 90px;
+  min-height: 90px;
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  background-color: rgba(255,255,255,0.02);
+  background-repeat: no-repeat;
+  background-size: cover;
+  background-position: center;
+  border: 1px solid rgba(255,255,255,0.06);
+  box-shadow: 0 6px 18px rgba(0,0,0,0.45);
+  cursor: pointer;
+  transition: transform .18s ease, box-shadow .18s ease, border-color .18s ease;
+  display:flex;
+  align-items:flex-end;
+  justify-content:stretch;
+  padding: 0;
+  pointer-events: auto;
+}
+
+/* New pattern: set image through CSS var: --img */
+.weapon-button[style]{
+  /* if the button uses inline style --img it will be applied */
+  background-image: var(--img);
+}
+
+/* subtle hover and focus */
+.weapon-button:hover,
+.weapon-button:focus{
+  transform: translateY(-6px) scale(1.02);
+  box-shadow: var(--shadow-2);
+  border-color: rgba(255,255,255,0.18);
+  z-index: 5;
+}
+.weapon-button:focus{
+  outline: 3px solid rgba(100,200,255,0.08);
+  outline-offset: 2px;
+}
+
+/* caption area (semi-transparent bar at the bottom) */
+.weapon-button .caption{
+  width: 100%;
+  padding: .5rem .6rem;
+  background: linear-gradient(180deg, rgba(0,0,0,0.35), rgba(0,0,0,0.55));
+  color: var(--text);
+  font-weight: 600;
+  font-size: clamp(.82rem, 1.6vw, 1rem);
+  text-align: left;
+  box-sizing: border-box;
+}
+
+/* selected state — glowing ring */
+.weapon-button.selected{
+  border-color: rgba(46,224,125,0.95);
+  box-shadow: 0 8px 30px rgba(46,224,125,0.12), 0 2px 6px rgba(0,0,0,0.6) inset;
+  transform: translateY(-4px) scale(1.03);
+}
+
+/* focus-visible (keyboard) */
+.weapon-button:focus-visible{
+  box-shadow: 0 8px 30px rgba(70,150,255,0.12);
+  border-color: rgba(70,150,255,0.9);
+}
+
+/* Confirm button area — kept centered */
+.loadout-actions{
+  display:flex;
+  gap: 1rem;
+  justify-content:center;
+  align-items:center;
+  margin-top: auto;
+}
+
+/* Primary confirm button (refined gradient + nicer hover) */
+#loadout-confirm{
+  pointer-events: auto;
+  appearance: none;
+  border: none;
+  cursor: pointer;
+  padding: clamp(.55rem, 1.4vw, .95rem) clamp(.9rem, 2.6vw, 1.8rem);
+  border-radius: clamp(6px, 1.2vw, 12px);
+  background: linear-gradient(90deg, rgba(245,190,127,0.98), rgba(235,148,49,0.98));
+  color: var(--text);
+  font-weight: 700;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  font-size: clamp(.9rem, 1.8vw, 1.15rem);
+  box-shadow: 0 8px 18px rgba(235,148,49,0.12);
+  transition: transform .14s ease, box-shadow .18s ease, filter .12s ease;
+  user-select: none;
+}
+#loadout-confirm:hover{
+  transform: translateY(-3px);
+  filter: brightness(.98);
+  box-shadow: 0 12px 28px rgba(235,148,49,0.16);
+}
+#loadout-confirm:active{
+  transform: translateY(0);
+  box-shadow: 0 6px 12px rgba(0,0,0,0.25);
+}
+
+/* Secondary button (optional) */
+.button-secondary{
+  background: transparent;
+  border: 1px solid rgba(255,255,255,0.08);
+  color: var(--muted);
+  padding: .5rem .9rem;
+  border-radius: 10px;
+  font-weight: 600;
+}
+
+/* Tooltip / weapon info */
+#weapon-info{
+  position: absolute;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(6px);
+  transition: opacity .18s ease, transform .18s ease;
+  background: linear-gradient(180deg, rgba(0,0,0,0.9), rgba(8,8,8,0.95));
+  padding: clamp(.5rem, 1.2vw, .9rem);
+  border-radius: clamp(8px, 2vw, 12px);
+  color: var(--text);
+  width: clamp(170px, 22vw, 300px);
+  box-shadow: 0 6px 20px rgba(0,0,0,0.6);
+  z-index: 1200;
+  font-size: clamp(.9rem, 1.2vw, 1rem);
+  line-height: 1.2;
+}
+
+/* visible modifier shows it */
+#weapon-info.visible{
+  opacity: 1;
+  transform: translateY(0);
+}
+
+
+
+/* weapons list inside tooltip */
+#weapon-info h3{ margin:0 0 .4rem 0; font-size:1rem; }
+#weapon-info ul{ margin:0; padding:0; list-style:none; color:var(--muted); }
+#weapon-info li + li{ margin-top:.35rem; }
+
+/* Responsive tweaks */
+@media (max-width: 768px){
+  #loadout-panel{ padding: clamp(.8rem, 3vw, 1.2rem); gap: 1rem; }
+  .weapon-grid{ grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: .6rem; }
+  .weapon-button{ width: clamp(96px, 22vw, 140px); height: clamp(96px, 22vw, 140px); }
+  #weapon-info{ width: clamp(150px, 36vw, 220px); left: 8px; right: 8px; }
+}
+
+@media (max-width: 480px){
+  /* stack vertically on tiny screens */
+  #loadout-panel{ flex-direction: column; padding: 1rem; border-radius: clamp(12px, 8vw, 20px); }
+  .weapon-grid{ grid-template-columns: repeat(auto-fit, minmax(72px, 1fr)); gap: .45rem; }
+  .weapon-button{ width: clamp(72px, 22vw, 110px); height: clamp(72px, 22vw, 110px); border-radius: 10px; }
+  .loadout-header{ flex-direction: column; align-items:flex-start; gap: .4rem;}
+}
+
+/* small accessibility nicety for screen-readers: hide purely decorative elements */
+.sr-only{ position:absolute !important; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
+
+/* Restored original position & sizing, with improved visuals */
+#settings-box {
+    position: fixed;
+    top: 55%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 80%;
+    height: 70%; /* Fixed height to enable scrolling */
+    background-color: rgba(20, 20, 20, 0.0);
+    border: none;
+    border-radius: 12px;
+    z-index: 101;
+    display: none;
+    flex-direction: column;
+    padding: 30px;
+    box-sizing: border-box;
+    align-items: stretch;
+    justify-content: flex-start;
+
+    /* --- ADDITIONS FOR SCROLLING --- */
+    overflow-y: auto; /* Enables vertical scrolling when content overflows */
+    -webkit-overflow-scrolling: touch; /* Improves scrolling performance on touch devices */
+}
+
+/* Optional: Style the scrollbar for better aesthetics */
+#settings-box::-webkit-scrollbar {
+    width: 8px; /* Width of the scrollbar */
+}
+
+#settings-box::-webkit-scrollbar-track {
+    background: rgba(255, 255, 255, 0.05); /* Track background */
+    border-radius: 10px;
+}
+
+#settings-box::-webkit-scrollbar-thumb {
+    background-color: rgba(102, 204, 255, 0.5); /* Thumb color (light blue with transparency) */
+    border-radius: 10px;
+    border: 2px solid rgba(20, 20, 20, 0); /* Creates a bit of padding around the thumb */
+}
+
+#settings-box::-webkit-scrollbar-thumb:hover {
+    background-color: rgba(102, 204, 255, 0.7); /* Darker thumb on hover */
+}
+
+
+#settings-box.hidden {
+    display: none;
+}
+
+#settings-box h2 {
+    color: #f5f5f5;
+    text-align: center;
+    margin: 0 0 20px;
+    font-size: 2em;
+    text-shadow: 1px 1px 3px rgba(0, 0, 0, 0.7);
+}
+
+.setting-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    margin-bottom: 18px;
+    padding: 12px 16px;
+    background-color: rgba(255, 255, 255, 0.05);
+    border-radius: 8px;
+    transition: background-color 0.2s;
+}
+.setting-item:hover {
+    background-color: rgba(255, 255, 255, 0.1);
+}
+
+.setting-item label {
+    flex: 1;
+    color: #ddd;
+    font-size: 1.1em;
+    margin-right: 15px;
+    white-space: nowrap;
+}
+
+.setting-item input[type="number"],
+.setting-item input[type="range"] {
+    flex: 1.5;
+}
+
+.setting-item input[type="number"] {
+    max-width: 80px;
+    padding: 4px 6px;
+    font-size: 1em;
+    color: #eee;
+    background: rgba(0,0,0,0.3);
+    border: 1px solid rgba(255,255,255,0.2);
+    border-radius: 4px;
+    text-align: center;
+}
+
+.setting-item input[type="range"] {
+    -webkit-appearance: none;
+    width: 100%;
+    height: 6px;
+    border-radius: 4px;
+    background: rgba(255,255,255,0.2);
+    outline: none;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+.setting-item input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: #66ccff;
+    cursor: pointer;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.5);
+    transition: background 0.2s;
+}
+.setting-item input[type="range"]::-webkit-slider-thumb:hover {
+    background: #99dcff;
+}
+
+/* Sensitivity slider container: slider left, number right */
+#sensitivity-slider-container {
+    order: -1;
+    margin: 0 0 18px;
+    text-align: left;
+    margin-left: -30px;        /* further shift left */
+    align-self: flex-start;
+    display: flex;
+    align-items: center;
+    width: 50%;
+    min-width: 40%;
+    gap: 32px;                 /* tighter spacing */
+}
+
+/* Adjust label spacing */
+#sensitivity-slider-container label {
+    margin-right: 2px;        /* minimal space before slider */
+}
+
+#sensitivity-slider-container input[type="range"] {
+    flex: 1;
+    margin: 0;
+}
+
+#sensitivity-slider-container input[type="number"] {
+    flex: none;
+}
+
+/* Optional toggle switch styling */
+.toggle-switch {
+    position: relative;
+    width: 50px;
+    height: 24px;
+}
+.toggle-switch input {
+    opacity: 0;
+    width: 0;
+    height: 0;
+}
+.toggle-slider {
+    position: absolute;
+    cursor: pointer;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background-color: rgba(255,255,255,0.2);
+    transition: 0.2s;
+    border-radius: 12px;
+}
+.toggle-slider:before {
+    position: absolute;
+    content: "";
+    height: 18px;
+    width: 18px;
+    left: 3px;
+    bottom: 3px;
+    background-color: #fff;
+    transition: 0.2s;
+    border-radius: 50%;
+}
+.toggle-switch input:checked + .toggle-slider {
+    background-color: #66ccff;
+}
+.toggle-switch input:checked + .toggle-slider:before {
+    transform: translateX(26px);
+}
+
+.settings-section {
+    margin-top: 30px;
+    padding-top: 20px;
+    border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.settings-section h3 {
+    color: #f5f5f5;
+    margin-bottom: 15px;
+    font-size: 1.5em;
+    text-align: center;
+}
+
+.keybind-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    margin-bottom: 12px;
+    padding: 10px 15px;
+    background-color: rgba(255, 255, 255, 0.03);
+    border-radius: 6px;
+    transition: background-color 0.2s;
+}
+
+.keybind-item:hover {
+    background-color: rgba(255, 255, 255, 0.08);
+}
+
+.keybind-item label {
+    color: #ccc;
+    font-size: 1em;
+    flex: 1;
+    margin-right: 10px;
+}
+
+.keybind-item button {
+    background-color: #333;
+    color: #eee;
+    border: 1px solid #555;
+    padding: 8px 15px;
+    border-radius: 5px;
+    cursor: pointer;
+    font-size: 0.9em;
+    min-width: 80px;
+    transition: background-color 0.2s, border-color 0.2s;
+}
+
+.keybind-item button:hover {
+    background-color: #555;
+    border-color: #777;
+}
+
+.keybind-item button.remapping {
+    background-color: #ffc107;
+    color: #333;
+    border-color: #ffc107;
+    animation: pulse 1s infinite alternate;
+}
+
+@keyframes pulse {
+    from { transform: scale(1); }
+    to { transform: scale(1.05); }
+}
+
+.settings-button {
+    display: block;
+    width: fit-content;
+    margin: 25px auto 0;
+    padding: 10px 25px;
+    background-color: #007bff;
+    color: white;
+    border: none;
+    border-radius: 5px;
+    cursor: pointer;
+    font-size: 1.1em;
+    transition: background-color 0.2s;
+}
+
+.settings-button:hover {
+    background-color: #0056b3;
+}
+        
+        
+          #loading-menu {
+    display: flex;        /* remove inline‑block whitespace */
+    width: 100vw;          /* viewport width */
+    height: 100vh;         /* viewport height */
+  }
+        
+#gameWrapper {
+  position: fixed;   /* fixed to viewport */
+  top: 0;
+  left: 0;
+  width: 100vw;     /* full viewport width */
+  height: 100vh;    /* full viewport height */
+  pointer-events: none; /* let clicks pass through if needed, or 'auto' if you want interaction */
+  background: transparent; /* or any background you want */
+}
+
+
+#online-players-container {
+    position: absolute;
+    top: 75%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 500px;
+    height: 180px;
+
+    /* Background & visual polish */
+    background: linear-gradient(145deg, rgba(20, 20, 20, 0.9), rgba(0, 0, 0, 0.75));
+    border: 1px solid rgba(255, 255, 255, 0.25);
+    border-radius: 14px;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.5);
+
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    color: #f5f5f5;
+    font-family: 'Segoe UI', sans-serif;
+    z-index: 5;
+}
+
+#online-players-list {
+    width: 100%;
+    height: 100%;
+    overflow-y: auto;
+    margin-top: 8px;
+    list-style: none;
+    padding: 0;
+}
+
+#online-players-list p {
+    text-align: center;
+    color: rgba(200, 200, 200, 0.8);
+    font-style: italic;
+    padding: 8px 0;
+}
+
+.online-player {
+    position: relative; /* CRUCIAL: This makes the tooltip position relative to the player element */
+    padding: 6px 10px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    font-size: 1.05em;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    transition: background 0.25s ease, transform 0.15s ease;
+}
+
+.online-player:hover {
+    background: rgba(255, 255, 255, 0.04);
+    transform: translateX(2px);
+}
+
+/* Green status dot */
+.online-player::after {
+    content: "";
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    background-color: #28ff28;
+    border-radius: 50%;
+    box-shadow: 0 0 6px rgba(40, 255, 40, 0.7);
+}
+
+/* * Tooltip Styling
+ * This is the new CSS you need to add.
+ */
+.stats-tooltip {
+  position: fixed;             /* so we can move it via clientX/clientY */
+  left: 0;
+  top: 0;
+  z-index: 9999;
+  display: none;              /* JS controls showing/hiding */
+  pointer-events: none;       /* so it doesn't block mouse events */
+  background-color: rgba(0,0,0,0.9);
+  backdrop-filter: blur(4px);
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 8px;
+  padding: 10px 12px;
+  white-space: nowrap;
+  min-width: 200px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+}
+
+
+/* Show the tooltip on hover */
+.online-player:hover .stats-tooltip {
+    display: block; /* Make it visible */
+    opacity: 1; /* Fade it in */
+}
+
+/* Add an optional arrow to the tooltip */
+.stats-tooltip::before {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: -8px; /* Position it on the left edge */
+    transform: translateY(-50%);
+    border-width: 8px;
+    border-style: solid;
+    border-color: transparent rgba(0, 0, 0, 0.85) transparent transparent;
+}
+
+
+/* Hide scrollbar for a cleaner look */
+#online-players-list::-webkit-scrollbar {
+    display: none;
+}
+#online-players-list {
+    -ms-overflow-style: none; /* IE and Edge */
+    scrollbar-width: none; /* Firefox */
+}
+
+:root{
+  --glass-bg: rgba(255,255,255,0.05);
+  --accent: #ef4444;         /* red accent */
+  --accent-2: #ff7a7a;
+  --glass-border: rgba(255,255,255,0.08);
+  --text: #feecec;
+  --muted: rgba(255,255,255,0.8);
+  --shadow: 0 20px 50px rgba(0,0,0,0.45);
+}
+
+/* Backdrop - matches the loading overlay vibe */
+.overlay {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 3000;
+  background: radial-gradient(ellipse at center, rgba(20,20,20,0.65), rgba(8,8,8,0.85));
+  backdrop-filter: blur(12px) saturate(150%);
+  -webkit-backdrop-filter: blur(12px) saturate(150%);
+  animation: overlayFadeIn 260ms cubic-bezier(.2,.9,.2,1);
+  padding: 2rem;
+}
+
+/* The glass card */
+.error-box {
+  position: relative;
+  width: min(420px, 92%);
+  background: linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0.02));
+  border-radius: 14px;
+  padding: 26px 22px;
+  box-shadow: var(--shadow);
+  border: 1px solid var(--glass-border);
+  text-align: center;
+  color: var(--text);
+  transform: translateY(6px) scale(0.995);
+  animation: popInCard 360ms cubic-bezier(.2,.9,.2,1) forwards;
+  overflow: visible;
+  outline: none;
+}
+
+/* gradient border glow (pseudo element) */
+.error-box::before {
+  content: "";
+  position: absolute;
+  inset: -2px;
+  z-index: -1;
+  border-radius: inherit;
+  padding: 2px;
+  background: conic-gradient(from 180deg at 50% 50%, rgba(255,80,80,0.18), rgba(255,40,40,0.1), rgba(160,0,0,0.08));
+  filter: blur(8px) saturate(120%);
+  opacity: 0.9;
+}
+
+
+/* Icon */
+.error-icon {
+  width: 56px;
+  height: 56px;
+  margin: 2px auto 8px;
+  color: var(--accent);
+  filter: drop-shadow(0 6px 18px rgba(239,68,68,0.18));
+  transform-origin: center;
+  animation: iconBounce 900ms cubic-bezier(.2,.9,.2,1);
+}
+
+/* Heading & message */
+.error-heading {
+  margin-top: 8px;
+  font-size: 1.4rem;
+  font-weight: 700;
+  color: rgba(255, 220, 220, 0.98);
+  letter-spacing: -0.02em;
+}
+.error-message {
+  margin-top: 0.6rem;
+  font-size: 0.98rem;
+  color: rgba(255,255,255,0.85);
+  line-height: 1.45;
+  margin-bottom: 1.15rem;
+}
+
+/* Actions */
+.actions {
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+  margin-top: 6px;
+}
+
+/* Primary button (retry) */
+.refresh-button {
+  padding: 0.6rem 1.1rem;
+  border-radius: 10px;
+  font-weight: 700;
+  border: none;
+  cursor: pointer;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  color: white;
+  box-shadow: 0 8px 26px rgba(239,68,68,0.16), 0 1px 0 rgba(255,255,255,0.04) inset;
+  transition: transform .14s ease, box-shadow .14s ease;
+}
+.refresh-button:hover { transform: translateY(-3px); box-shadow: 0 14px 34px rgba(239,68,68,0.22);}
+.refresh-button:active { transform: translateY(-1px) scale(.997); }
+
+/* Secondary neutral button */
+.secondary-btn{
+  padding: 0.56rem 0.9rem;
+  border-radius: 10px;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid rgba(255,255,255,0.04);
+  color: rgba(255,255,255,0.9);
+  font-weight: 600;
+  cursor: pointer;
+  transition: background .12s ease, transform .12s ease;
+}
+.secondary-btn:hover { background: rgba(255,255,255,0.05); transform: translateY(-2px); }
+
+/* Focus states for accessibility */
+.refresh-button:focus, .secondary-btn:focus, .close-btn:focus, .error-box:focus {
+  outline: 3px solid rgba(161,0,254,0.12);
+  outline-offset: 3px;
+}
+
+/* small responsive tweak */
+@media (max-width:420px){
+  .error-box { padding: 18px; border-radius: 12px; }
+  .error-icon { width: 48px; height: 48px; }
+}
+
+/* Animations */
+@keyframes overlayFadeIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes popInCard {
+  from { transform: translateY(10px) scale(.98); opacity: 0; }
+  60% { transform: translateY(-6px) scale(1.002); }
+  to { transform: translateY(0) scale(1); opacity: 1; }
+}
+@keyframes iconBounce {
+  0% { transform: translateY(-6px) scale(.98); opacity: 0.85; }
+  40% { transform: translateY(2px) scale(1.06); }
+  70% { transform: translateY(-2px) scale(1.02); }
+  100% { transform: translateY(0) scale(1); opacity: 1; }
+}
+/* Hides the error screen by default */
+.hidden {
+    display: none;
+}
+#error-overlay[hidden] {
+  display: none !important;
+}
+        
+        
+    </style>
+</head>
+<body>
+    <canvas id="menuCanvas" style="z-index: 1; cursor: default;"></canvas>
+    
+    <img src="https://codehs.com/uploads/14482c49471f61d90d86ae95e1d8bfd3" id="animatedBG" style="position:absolute; top:100; left:100; width:100%; height:100%; display:none; z-index:0;">
+    <img src="https://codehs.com/uploads/2ff141e22078b54bcab9a339e1d9ee3b" id="loading-menu" style="position:absolute; top:100; left:100; width:100%; height:100%; display:flex; z-index:15;">
+    
+  <div id="menu-overlay">
+    <img id="game-logo" src="https://codehs.com/uploads/e5f49fe89104f21b35c58ffa743f286f" alt="VOID.FFA Game Logo">
+
+<div id="username-prompt" class="menu-panel hidden">
+  <input type="text" id="username-input" maxlength="16" placeholder="Enter Username" />
+  <input type="password" id="password-input" maxlength="20" placeholder="Enter Password" />
+  <div style="display:flex; gap:8px; justify-content:center; margin-top:8px;">
+    <button id="signup-btn">Sign Up</button>
+    <button id="login-btn">Log In</button>
+  </div>
+  <div id="auth-message" style="margin-top:12px; color:#c00; min-height:18px;"></div>
+</div>
+    <div id="map-menu" class="menu-panel hidden">
+        <h2>Select Map</h2>
+        <button class="map-btn" data-map="CrocodilosConstruction">Crocodilo's Construction</button>
+        <button class="map-btn" data-map="SigmaCity">Sigma City</button>
+        <button class="map-btn" data-map="DiddyDunes">Diddy Dunes</button>
+    </div>
+    <div id="controls-menu" class="menu-panel hidden">
+        <h2>Controls</h2>
+        <p>
+            (WASD) = Move | (X) = Shoot/Knife | (E) = ADS | (R) = Reload | (SHIFT) = Crouch | (`) = Type in Chat | (C) = Open/Close Chat | (G) = Respawn | (T) = Leaderboard |
+            (1) = Knife | (2) = Deagle | (3) = AK-47 | (4) = Marshal
+        </p>
+    </div>
+
+
+</div>
+
+<div id="loadout-screen" role="dialog" aria-modal="true">
+  <div id="loadout-panel" role="document" aria-labelledby="loadout-title">
+    <div class="loadout-header">
+      <div style="display:flex; gap:.5rem; align-items:center;">
+
+      </div>
+    </div>
+
+    <!-- Primary -->
+<section aria-labelledby="primary-heading">
+  <div class="loadout-header">
+    <h3 id="primary-heading" class="loadout-title">Primary Weapons</h3>
+    </div>
+  <div id="primary-container" class="weapon-grid">
+    <div class="weapon-button" aria-pressed="false"></div>
+    <div class="weapon-button" aria-pressed="false"></div>
+    <div class="weapon-button" aria-pressed="false"></div>
+    <div class="weapon-button" aria-pressed="false"></div>
+  </div>
+</section>
+
+<section aria-labelledby="secondary-heading">
+  <div class="loadout-header">
+    <h3 id="secondary-heading" class="loadout-title">Secondary Weapons</h3>
+    </div>
+  <div id="secondary-container" class="weapon-grid" aria-label="Secondary weapons">
+    <div class="weapon-button" aria-pressed="false"></div>
+    <div class="weapon-button" aria-pressed="false"></div>
+  </div>
+</section>
+
+    <!-- Actions -->
+    <div class="loadout-actions">
+      <button id="loadout-confirm">Confirm Loadout</button>
+    </div>
+  </div>
+</div>
+
+
+
+    <script>
+        // Audio functions (as provided by you)
+        function playButtonHover() {
+            let buttonHover = new Audio("https://codehs.com/uploads/773375a846afc175b34b2eff70e8d947");
+            buttonHover.volume = 0.3;
+            buttonHover.play();
+        }
+
+        function playButtonClick() {
+            let buttonClick = new Audio("https://codehs.com/uploads/0e6b3db8eba47ff22199d98eda64cdac");
+            buttonClick.volume = 1;
+            buttonClick.play();
+        }
+
+        // Get references to your buttons
+        const saveUsernameBtn = document.getElementById('save-username-btn');
+        const loadoutConfirmBtn = document.getElementById('loadout-confirm');
+        const weaponButtons = document.querySelectorAll('.weapon-button'); // Selects all elements with this class
+
+        // --- Event Listeners for Buttons ---
+
+        // Save Username Button
+        if (saveUsernameBtn) { // Check if the element exists
+            saveUsernameBtn.addEventListener('mouseenter', playButtonHover);
+            saveUsernameBtn.addEventListener('click', playButtonClick);
+        }
+
+        // Confirm Loadout Button
+        if (loadoutConfirmBtn) { // Check if the element exists
+            loadoutConfirmBtn.addEventListener('mouseenter', playButtonHover);
+            loadoutConfirmBtn.addEventListener('click', playButtonClick);
+        }
+
+        // Weapon Buttons (loop through all of them)
+        weaponButtons.forEach(button => {
+            button.addEventListener('mouseenter', playButtonHover);
+            button.addEventListener('click', playButtonClick);
+        });
+
+        // Example: If you have other buttons like a "Start Game" button
+        const startGameButton = document.getElementById('start-game-button');
+        if (startGameButton) {
+            startGameButton.addEventListener('mouseenter', playButtonHover);
+            startGameButton.addEventListener('click', playButtonClick);
+        }
+
+
+        // Get references to overlay and screens
+        const menuOverlay = document.getElementById('menu-overlay');
+        const usernamePrompt = document.getElementById('username-prompt');
+        // const loadoutScreen = document.getElementById('loadout-screen'); // Already defined implicitly in your CSS
+
+        // Function to show username prompt (example)
+        function showUsernamePrompt() {
+            menuOverlay.style.display = 'flex'; // Show the overlay
+            usernamePrompt.classList.remove('hidden'); // Show the prompt
+        }
+
+        // Function to hide username prompt (example)
+        function hideUsernamePrompt() {
+            usernamePrompt.classList.add('hidden'); // Hide the prompt
+            menuOverlay.style.display = 'none'; // Hide the overlay
+        }
+
+    </script>
+
+<!-- And somewhere in your HUD area -->
+<div id="hud-weapons" style="position:fixed; bottom:1rem; right:1rem; display:flex; gap:1rem;">
+  <!-- Will be populated with two <img> icons -->
+</div>
+
+<div id="weapon-info">
+  <h3 id="wi-name"></h3>
+  <ul>
+    <li><strong>Body Damage:</strong> <span id="wi-body"></span></li>
+    <li><strong>Headshot Damage:</strong> <span id="wi-head"></span></li>
+    <li><strong>Magazine Size:</strong> <span id="wi-mag"></span></li>
+    <li><strong>Difficulty:</strong> <span id="wi-diff"></span></li>
+    <li><strong></strong> <span id="wi-desc"></span></li>
+  </ul>
+</div>
+
+<div id="settings-box">
+
+    <div class="setting-item" id="sensitivity-slider-container">
+        <label for="sensitivity-range">Mouse Sensitivity:</label>
+        <input type="range" id="sensitivity-range" min="0.1" max="10.0" step="0.1" value="5.0">
+        <input type="number" id="sensitivity-input" min="0.1" max="10.0" step="0.1" value="5.0">
+    </div>
+
+    <div class="settings-section">
+        <h3>Keybinds</h3>
+        <button id="reset-keybinds-btn" class="settings-button">Reset Keybinds to Default</button>
+        <div id="keybinds-container">
+            </div>
+        
+    </div>
+
+    <button id="toggle-details-btn" style="margin-top: 20px; padding: 10px 20px; background-color: #4CAF50; color: white; border: none; border-radius: 5px; display: none; cursor: pointer;">Details: On</button>
+</div>
+
+
+        <div id="leaderboard-overlay">
+          <div class="title">Leaderboard</div>
+          <table>
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>K</th>
+                <th>D</th>
+                <th>KS</th>
+              </tr>
+            </thead>
+            <tbody id="leaderboard-body">
+              <tr><td colspan="4" style="text-align:center;">Loading…</td></tr>
+            </tbody>
+          </table>
+        </div>
+    </div>
+
+    <img id="game-screen-logo" src="https://codehs.com/uploads/e5f49fe89104f21b35c58ffa743f286f" alt="VOID.FFA Logo">
+    <div id="game-container"></div>
+<div id="crosshair" style="display: none";>
+  <div id="line-up" class="line"></div>
+  <div id="line-down" class="line"></div>
+  <div id="line-left" class="line"></div>
+  <div id="line-right" class="line"></div>
+</div>
+<div id="scopeOverlay"></div>
+
+
+<div id="loading-overlay" class="hidden">
+    <div id="loading-box">
+        <!-- Optional title -->
+        <div id="loading-title">Loading Game Assets</div>
+        
+        <!-- Optional spinner -->
+        <div id="loading-spinner"></div>
+        
+        <!-- Progress bar -->
+        <div id="progress-bar-bg">
+            <div id="progress-bar-fill"></div>
+        </div>
+        
+        <!-- Progress text -->
+        <div id="progress-text">Loading... 0.00%</div>
+    </div>
+</div>
+
+<div id="gameWrapper">
+    <!-- Crosshair element -->
+    <crosshair></crosshair>
+
+
+
+    <!-- Buy Menu (hidden by default) -->
+    <div id="buy-menu" class="hidden">
+        <h2>Buy Menu (FREE)</h2>
+        <button id="buy-deagle">Get Deagle</button>
+        <button id="buy-ak">Get AK-47</button>
+        <button id="close-buy">Close</button>
+    </div>
+
+    <!-- HUD Container -->
+    <div id="hud">
+        <!-- Kill Feed -->
+        <kill-feed></kill-feed>
+
+        <!-- Scoreboard (hidden by default) -->
+        <div id="scoreboard" class="hidden">
+            <h3>Scoreboard</h3>
+            <table id="score-table">
+                <thead>
+                    <tr>
+                        <th>Player</th>
+                        <th>K</th>
+                        <th>D</th>
+                        <th>KS</th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            </table>
+        </div>
+
+<div id="hud-container">
+    <div id="health-shield-display">
+        <div class="combined-bar" role="progressbar" aria-valuemin="0" aria-valuemax="150" aria-valuenow="150">
+            <div id="filled-bar" class="filled-bar"></div>
+            <span id="health-text" class="segment-text health-text"></span>
+            <span id="shield-text" class="segment-text shield-text"></span>
+        </div>
+    </div>
+  <div id="inventory" aria-label="Inventory" role="toolbar">
+    <div class="inventory-slot selected" data-slot="knife" tabindex="0"><img src="knife.png" alt="Knife"></div>
+    <div class="inventory-slot" data-slot="primary" tabindex="0"><img src="primary.png" alt="Primary Weapon"></div>
+    <div class="inventory-slot" data-slot="secondary" tabindex="0"><img src="secondary.png" alt="Secondary Weapon"></div>
+  </div>
+
+  <div id="ammo-display" aria-live="polite" aria-atomic="true">
+    <span class="ammo">30 / 120</span>
+  </div>
+</div>
+</div>
+
+
+    </div>
+</div>
+
+<div id="online-players-container" class="menu-panel">
+    <h3>Online Players</h3>
+    <div id="online-players-list">
+        <p>Loading players...</p>
+    </div>
+</div>
+
+<div id="chat-box" aria-live="polite" aria-label="Game chat">
+  <div id="chat-header">
+    <div id="chat-title">Chat</div>
+  </div>
+
+  <div id="chat-messages" role="log"></div>
+
+  <form id="chat-form" autocomplete="off">
+    <input id="chat-input" type="text" placeholder="Say something and press Enter..." />
+  </form>
+</div>
+    <div id="buy-menu">
+        <h2>Buy Menu</h2>
+        <button id="buy-deagle">Deagle ($800)</button>
+        <button id="buy-ak47">AK-47 ($2500)</button>
+        <button id="buy-armor">Armor ($600)</button>
+    </div>
+  <div id="hud">
+    <div id="kill-feed"></div>
+    <div id="scoreboard" class="hidden">
+      <h3>Scoreboard</h3>
+      <table id="score-table">
+        <thead>
+          <tr><th>Player</th><th>K</th><th>D</th><th>KS</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+<div id="respawn-overlay">
+  <div class="respawn-container">
+    <div class="respawn-text">You died. Try again?</div>
+    <button id="respawn-now-button">Respawn</button>
+  </div>
+</div>
+    <div id="damage-overlay"></div>
+    <div id="fps-counter"></div>
+            <div id="game-timer"></div> </div>
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://cdnjs.cloudflare.com/ajax/libs/three.js/0.152.0/three.module.js",
+                "three/examples/jsm/": "https://cdn.jsdelivr.net/npm/three@0.152.0/examples/jsm/",
+                "three-mesh-bvh": "https://cdn.jsdelivr.net/npm/three-mesh-bvh@0.9.1/+esm",
+                "stats.js": "https://cdnjs.cloudflare.com/ajax/libs/stats.js/r17/Stats.min.js"
+            }
+        }
+    </script>
+    
+    
+
+    
+    
+<div class="overlay" id="error-overlay" role="alertdialog" aria-labelledby="error-heading" aria-modal="true" hidden>
+  <div class="error-box" tabindex="0">
+
+    <!-- SVG icon — keeps crisp on all screens -->
+    <svg class="error-icon" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M11 7h2v6h-2zM11 15h2v2h-2z" fill="currentColor"/>
+      <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2z" fill="none" stroke="currentColor" stroke-width="1.2"/>
+    </svg>
+
+    <h2 id="error-heading" class="error-heading">Something went wrong</h2>
+    <p class="error-message">We couldn't complete that action. Try refreshing or check your connection. If the issue persists, copy the error and open an issue.</p>
+
+    <div class="actions">
+      <button class="refresh-button" id="retry-btn">Retry</button>
+      <button class="secondary-btn" id="copy-btn">Copy error</button>
+    </div>
+  </div>
+</div>
+    
+
+
+<script>
+(() => {
+  let lastErrorText = '';
+
+  // Elements
+  const fpsCounter = document.getElementById('fps-counter');
+  const appContent = document.getElementById('app-content');
+
+  // FPS Counter setup
+  let rafId = null;
+  let lastTime = performance.now();
+  let lastDisplayUpdate = lastTime;
+  let emaFps = 60;
+  const alpha = 0.08;
+  const displayInterval = 250;
+
+  function fpsLoop(now) {
+    try {
+      const dt = now - lastTime;
+      if (dt > 0 && dt < 2000) {
+        const instFps = 1000 / dt;
+        emaFps = emaFps * (1 - alpha) + instFps * alpha;
+      }
+      lastTime = now;
+
+      if (now - lastDisplayUpdate >= displayInterval) {
+        if (fpsCounter) {
+          fpsCounter.textContent = `FPS: ${Math.round(emaFps)}`;
+          fpsCounter.title = `Smoothed FPS ${emaFps.toFixed(1)}`;
+        }
+        lastDisplayUpdate = now;
+      }
+
+      rafId = requestAnimationFrame(fpsLoop);
+    } catch (err) {
+      showFailSafeError('FPS loop crashed', err && (err.stack || String(err)));
+      if (rafId) cancelAnimationFrame(rafId);
+      rafId = null;
+    }
+  }
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      if (rafId) {
+        cancelAnimationFrame(rafId);
+        rafId = null;
+      }
+    } else {
+      lastTime = performance.now();
+      lastDisplayUpdate = lastTime;
+      if (!rafId) rafId = requestAnimationFrame(fpsLoop);
+    }
+  });
+
+  window.addEventListener('load', () => {
+    lastTime = performance.now();
+    lastDisplayUpdate = lastTime;
+    if (!rafId) rafId = requestAnimationFrame(fpsLoop);
+  }, { once: true });
+
+  if (document.readyState === 'complete' && !rafId) {
+    lastTime = performance.now();
+    lastDisplayUpdate = lastTime;
+    rafId = requestAnimationFrame(fpsLoop);
+  }
+
+  // Menu/Game switching logic
+  document.addEventListener('DOMContentLoaded', () => {
+    const menuOverlay = document.getElementById('menu-overlay');
+    const gameWrapper = document.getElementById('game-container');
+    const gameScreenLogo = document.getElementById('game-screen-logo');
+    const mapSelect = document.getElementById('map-menu');
+
+    const showMenu = () => {
+      if (menuOverlay) menuOverlay.style.display = 'flex';
+      if (gameScreenLogo) gameScreenLogo.style.display = 'none';
+    };
+
+    showMenu();
+  });
+
+})();
+</script>
+
+<script type="module" src="https://void-ffa.vercel.app/js/game.js"></script>
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+
+
+
+</body>
+</html>
