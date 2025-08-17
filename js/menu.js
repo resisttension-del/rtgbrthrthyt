@@ -6001,6 +6001,24 @@ async function initializeMenuDisplay() {
 
 let disconnectAlertShown = false;
 
+const myRef = onlineUsersRef.child(uid);
+
+myRef.onDisconnect().remove(); // ensure server cleans up if connection dies
+
+// Listen for your own node being deleted or overwritten
+myRef.on('value', snapshot => {
+    const data = snapshot.val();
+    if (!data || data.session !== sessionId) { // missing or replaced session
+        Swal.fire({
+            title: 'Disconnected',
+            text: 'You were disconnected. Reload to reconnect.',
+            icon: 'warning',
+            confirmButtonText: 'Reload'
+        }).then(() => location.reload());
+    }
+});
+
+         
 lagCheckInterval = setInterval(async () => {
     try {
         // Update presence
