@@ -1253,7 +1253,7 @@ try {
 healthBarObj = createHealthBar();
 healthBarObj.group.position.set(0, 0.5 - 1.1, -0.4); // Position relative to group
 healthBarObj.group.scale.set(0.25, 0.75, 1);
-group.add(healthBarObj.group);
+// group.add(healthBarObj.group);
 } catch (e) {
 console.error(`Error creating health bar for player ${data.id}:`, e);
 // Decide how to handle: skip health bar, or abort player creation?
@@ -2725,6 +2725,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
