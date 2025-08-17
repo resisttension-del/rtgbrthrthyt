@@ -6001,58 +6001,62 @@ async function initializeMenuDisplay() {
 
 let disconnectAlertShown = false;
 
-          lagCheckInterval = setInterval(async () => {
-              try {
-                  await onlineUsersRef.child(uid).update({
-                      lastActive: firebase.database.ServerValue.TIMESTAMP
-                  });
-          
-                  const now = nowAligned();
-                  const onlineSnapshot = await onlineUsersRef.once('value');
-          
-                  if (onlineSnapshot.exists()) {
-                      onlineSnapshot.forEach(child => {
-                          const otherUid = child.key;
-                          if (otherUid === uid) return;
-          
-                          const data = child.val();
-                          const lastActive = data.lastActive || 0;
-                          const inGame = !!data.currentGameId;
-          
-                          if (!inGame && (now - lastActive > LAG_THRESHOLD)) {
-                              console.log(`User ${otherUid} inactive for more than ${LAG_THRESHOLD/1000}s and not in game. Removing.`);
-                              onlineUsersRef.child(otherUid).remove();
-                          }
-                      });
-          
-                      // --- minimal self-presence check using the snapshot you already have ---
-                      if (!disconnectAlertShown && document.visibilityState === 'visible') {
-                          const mySnap = onlineSnapshot.child(uid);
-                          const exists = mySnap.exists();
-                          const myLastActive = (mySnap.val() && mySnap.val().lastActive) || 0;
-          
-                          if (!exists || (now - myLastActive > LAG_THRESHOLD)) {
-                              disconnectAlertShown = true; // ensure we only show once
-                              await Swal.fire({
-                                title: 'Disconnected',
-                                text: 'You were disconnected. Reload to reconnect.',
-                                icon: 'warning',
-                                confirmButtonText: 'Reload'
-                              });
-                              location.reload();
-                          }
-                      }
-                  }
-              } catch (e) {
-                  console.error("lagCheckInterval: Failed to update presence or check for inactive users:", e);
-                  const lastActiveLocal = parseInt(localStorage.getItem("lastActiveLocal") || "0", 10);
-                  if (lastActiveLocal && (nowAligned() - lastActiveLocal > LAG_THRESHOLD)) {
-                      handleLaggedOut();
-                  } else {
-                      localStorage.setItem("lastActiveLocal", nowAligned().toString());
-                  }
-              }
-          }, LAST_ACTIVE_INTERVAL);
+lagCheckInterval = setInterval(async () => {
+    try {
+        // Update presence
+        await onlineUsersRef.child(uid).update({
+            lastActive: firebase.database.ServerValue.TIMESTAMP,
+            session: sessionId // keep session alive
+        });
+
+        const now = nowAligned();
+        const onlineSnapshot = await onlineUsersRef.once('value');
+
+        if (onlineSnapshot.exists()) {
+            // remove other inactive users
+            onlineSnapshot.forEach(child => {
+                const otherUid = child.key;
+                if (otherUid === uid) return;
+
+                const data = child.val();
+                const lastActive = data.lastActive || 0;
+                const inGame = !!data.currentGameId;
+
+                if (!inGame && (now - lastActive > LAG_THRESHOLD)) {
+                    console.log(`User ${otherUid} inactive for more than ${LAG_THRESHOLD/1000}s and not in game. Removing.`);
+                    onlineUsersRef.child(otherUid).remove();
+                }
+            });
+
+            // --- minimal self-presence check ---
+            if (!disconnectAlertShown && document.visibilityState === 'visible') {
+                const mySnap = onlineSnapshot.child(uid);
+                const myData = mySnap.val() || {};
+                const myLastActive = myData.lastActive || 0;
+                const dbSession = myData.session || null;
+
+                if (!mySnap.exists() || (now - myLastActive > LAG_THRESHOLD) || dbSession !== sessionId) {
+                    disconnectAlertShown = true; // only show once
+                    await Swal.fire({
+                        title: 'Disconnected',
+                        text: 'You were disconnected. Reload to reconnect.',
+                        icon: 'warning',
+                        confirmButtonText: 'Reload'
+                    });
+                    location.reload();
+                }
+            }
+        }
+    } catch (e) {
+        console.error("lagCheckInterval: Failed to update presence or check for inactive users:", e);
+        const lastActiveLocal = parseInt(localStorage.getItem("lastActiveLocal") || "0", 10);
+        if (lastActiveLocal && (nowAligned() - lastActiveLocal > LAG_THRESHOLD)) {
+            handleLaggedOut();
+        } else {
+            localStorage.setItem("lastActiveLocal", nowAligned().toString());
+        }
+    }
+}, LAST_ACTIVE_INTERVAL);
     }
 
     if (username && username.trim()) {
