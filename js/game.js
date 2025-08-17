@@ -2578,6 +2578,132 @@ export function incrementUserStat(username, field, amount) {
 }
 
 // game.js
+(function ensureDamagePopupStyles() {
+  if (document.getElementById('damage-popup-styles')) return;
+  const style = document.createElement('style');
+  style.id = 'damage-popup-styles';
+  style.textContent = `
+    .damage-popup {
+      position: fixed;
+      left: 0;
+      top: 0;
+      transform-origin: center;
+      font-weight: 800;
+      color: #ff3b3b;
+      text-shadow: 0 2px 6px rgba(0,0,0,0.6);
+      pointer-events: none;
+      user-select: none;
+      z-index: 999999;
+      font-family: "Segoe UI", Roboto, system-ui, -apple-system, "Helvetica Neue", Arial;
+      will-change: left, top, opacity, transform;
+      white-space: nowrap;
+    }
+  `;
+  document.head.appendChild(style);
+})();
+
+function showDamagePopup(damage, opts = {}) {
+  // options
+  const duration = opts.duration ?? 900; // ms
+  const minRadius = opts.minRadius ?? 36; // px from center
+  const maxRadius = opts.maxRadius ?? 120; // px from center
+  const fontSize = opts.fontSize ?? Math.max(18, Math.min(40, Math.round(window.innerWidth * 0.03))); // responsive
+  const MAX_ROT_DEG = 25; // clamp to ±25 degrees
+
+  // helper to normalize to [-180,180]
+  const normalizeDeg = (d) => {
+    let a = ((d + 180) % 360);
+    if (a < 0) a += 360;
+    return a - 180;
+  };
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+  // create element
+  const el = document.createElement('div');
+  el.className = 'damage-popup';
+  el.textContent = `${damage}`;
+  el.style.fontSize = `${fontSize}px`;
+  el.style.fontWeight = '900';
+  el.style.color = '#ff2e2e';
+  el.style.opacity = '1';
+  el.style.transform = 'translate(-50%,-50%) rotate(0deg)';
+
+  // compute center
+  const cx = window.innerWidth / 2;
+  const cy = window.innerHeight / 2;
+
+  // choose a random angle (radians) and radius (px)
+  const angle = Math.random() * Math.PI * 2; // full circle
+  const radius = minRadius + Math.random() * (maxRadius - minRadius);
+
+  // start position (near center)
+  const dx = Math.cos(angle) * radius;
+  const dy = Math.sin(angle) * radius;
+  const startLeft = Math.round(cx + dx);
+  const startTop = Math.round(cy + dy);
+
+  // end position — move further outward
+  const outwardFactor = 1.45 + Math.random() * 0.35; // 1.45..1.8
+  const endLeft = Math.round(cx + dx * outwardFactor);
+  const endTop = Math.round(cy + dy * outwardFactor);
+
+  // rotation — base angle pointing away from center (convert to degrees)
+  const angleDeg = angle * (180 / Math.PI); // 0..360
+  // normalize then clamp to ±MAX_ROT_DEG, then add small jitter and clamp again
+  let rotationDeg = clamp(normalizeDeg(angleDeg) + (Math.random() * 8 - 4), -MAX_ROT_DEG, MAX_ROT_DEG);
+  const endRotationDeg = clamp(rotationDeg + (Math.random() * 10 - 5), -MAX_ROT_DEG, MAX_ROT_DEG);
+
+  // style initial placement
+  el.style.left = `${startLeft}px`;
+  el.style.top = `${startTop}px`;
+  el.style.transform = `translate(-50%,-50%) rotate(${rotationDeg}deg)`;
+  el.style.opacity = '1';
+
+  document.body.appendChild(el);
+
+  // animate using Web Animations API (fallback to CSS transitions if not supported)
+  const easing = 'cubic-bezier(.2,.9,.27,1)';
+
+  if (el.animate) {
+    el.animate([
+      {
+        left: `${startLeft}px`,
+        top: `${startTop}px`,
+        transform: `translate(-50%,-50%) rotate(${rotationDeg}deg) scale(1)`,
+        opacity: 1
+      },
+      {
+        left: `${endLeft}px`,
+        top: `${endTop}px`,
+        transform: `translate(-50%,-50%) rotate(${endRotationDeg}deg) scale(1.08)`,
+        opacity: 0
+      }
+    ], {
+      duration,
+      easing,
+      fill: 'forwards'
+    }).onfinish = () => {
+      if (el && el.parentNode) el.parentNode.removeChild(el);
+    };
+  } else {
+    // fallback: CSS transition
+    el.style.transition = `left ${duration}ms ${easing}, top ${duration}ms ${easing}, opacity ${Math.round(duration*0.9)}ms ${easing}, transform ${duration}ms ${easing}`;
+    requestAnimationFrame(() => {
+      el.style.left = `${endLeft}px`;
+      el.style.top = `${endTop}px`;
+      el.style.transform = `translate(-50%,-50%) rotate(${endRotationDeg}deg) scale(1.08)`;
+      el.style.opacity = '0';
+    });
+    setTimeout(() => {
+      if (el && el.parentNode) el.parentNode.removeChild(el);
+    }, duration + 50);
+  }
+}
+
+// ---------------------- Integrate with applyDamageToRemote ----------------------
+// Updated applyDamageToRemote that calls showDamagePopup for the local shooter when the shot did NOT penetrate.
+// NOTE: make sure you have `localPlayerId` defined on the client (the id of the local player).
+
 function applyDamageToRemote(targetId, damage, killerInfo) {
   const {
     id: killerId,
@@ -2592,6 +2718,19 @@ function applyDamageToRemote(targetId, damage, killerInfo) {
   if (!damageQueueRef || !playersRef) {
     console.warn('[applyDamageToRemote] required database references not set—skipping');
     return;
+  }
+
+  // Show local damage popup when this client is the shooter AND the bullet DID NOT penetrate.
+  // (treat explicit false as "didn't penetrate")
+  try {
+    if (typeof localPlayerId !== 'undefined' && killerId === localPlayerId && isPenetrationShot === false) {
+      // optional: make headshot popups bigger
+      const popupDamage = isHeadshot ? `${damage} 💥` : damage;
+      showDamagePopup(popupDamage, { duration: 900, minRadius: 36, maxRadius: 110 });
+    }
+  } catch (err) {
+    // don't block server push if UI fails
+    console.warn('[applyDamageToRemote] popup error', err);
   }
 
   // Check the player's current status before applying damage.
@@ -2725,6 +2864,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
