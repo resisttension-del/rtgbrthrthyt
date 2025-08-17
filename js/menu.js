@@ -1592,6 +1592,341 @@ function updateBoardHit() {
 }
 
 
+
+function getMyUsername() {
+    return localStorage.getItem("username") || window.username || window.currentUsername || null;
+}
+function makeChatId(a, b) {
+    if (!a || !b) return null;
+    const [x, y] = [String(a).toLowerCase(), String(b).toLowerCase()].sort();
+    return `${x.replace(/\s+/g, "_").replace(/[.#$\[\]]/g, "")}_${y.replace(/\s+/g, "_").replace(/[.#$\[\]]/g, "")}`;
+}
+
+/* Local caches */
+const _incomingRequests = {};
+const _sentRequests = {};
+const _friends = {};
+const _unreadByChat = {};
+const _onlineElements = {};
+
+/* DB ops (send/accept/decline/cancel/remove) */
+async function sendFriendRequest(targetUser) {
+    const me = getMyUsername(); if (!me || !usersRef || !targetUser || targetUser === me) return;
+    const now = firebase.database.ServerValue.TIMESTAMP;
+    const updates = {};
+    updates[`${targetUser}/friendRequests/${me}`] = { from: me, ts: now, status: "pending" };
+    updates[`${me}/sentRequests/${targetUser}`] = { to: targetUser, ts: now, status: "pending" };
+    return usersRef.update(updates);
+}
+async function cancelFriendRequest(targetUser) {
+    const me = getMyUsername(); if (!me || !usersRef) return;
+    await usersRef.child(me).child("sentRequests").child(targetUser).remove().catch(()=>{});
+    await usersRef.child(targetUser).child("friendRequests").child(me).remove().catch(()=>{});
+}
+async function acceptFriendRequest(fromUser) {
+    const me = getMyUsername(); if (!me || !usersRef) return;
+    const updates = {};
+    updates[`${me}/friends/${fromUser}`] = true;
+    updates[`${fromUser}/friends/${me}`] = true;
+    updates[`${me}/friendRequests/${fromUser}`] = null;
+    updates[`${fromUser}/sentRequests/${me}`] = null;
+    return usersRef.update(updates);
+}
+async function declineFriendRequest(fromUser) {
+    const me = getMyUsername(); if (!me || !usersRef) return;
+    await usersRef.child(me).child("friendRequests").child(fromUser).remove().catch(()=>{});
+    await usersRef.child(fromUser).child("sentRequests").child(me).remove().catch(()=>{});
+}
+async function removeFriend(friendUser) {
+    const me = getMyUsername(); if (!me || !usersRef) return;
+    const updates = {};
+    updates[`${me}/friends/${friendUser}`] = null;
+    updates[`${friendUser}/friends/${me}`] = null;
+    return usersRef.update(updates);
+}
+
+/* Chat send + unread increment */
+async function sendChatMessageToUser(targetUser, text) {
+    const me = getMyUsername(); if (!me || !menuApp || !text) return;
+    const chatId = makeChatId(me, targetUser);
+    const msg = { from: me, to: targetUser, text: String(text), ts: firebase.database.ServerValue.TIMESTAMP };
+    const chatMessagesRef = menuApp.database().ref(`userchats/${chatId}/messages`);
+    await chatMessagesRef.push(msg);
+    // increment unread for target
+    const unreadRef = usersRef.child(targetUser).child("unread").child(chatId);
+    await unreadRef.transaction(n => (n || 0) + 1).catch(()=>{});
+}
+
+/* Chat open + listener */
+let activeChatListener = null;
+let activeChatId = null;
+function openChatWithUser(targetUser) {
+    const me = getMyUsername(); if (!me || !menuApp) return;
+    const chatId = makeChatId(me, targetUser);
+    if (!chatId) return;
+    if (activeChatListener && activeChatId) {
+        try { menuApp.database().ref(`userchats/${activeChatId}/messages`).off("value", activeChatListener); } catch(e){}
+        activeChatListener = null; activeChatId = null;
+    }
+    activeChatId = chatId;
+    const chatRef = menuApp.database().ref(`userchats/${chatId}`);
+    // ensure meta exists
+    chatRef.child("meta").update({ participants: { [me]: true, [targetUser]: true }, createdAt: firebase.database.ServerValue.TIMESTAMP }).catch(()=>{});
+    activeChatListener = chatRef.child("messages").on("value", snap => {
+        const messages = [];
+        if (snap.exists()) snap.forEach(c => messages.push(c.val()));
+        renderChatMessages(chatId, targetUser, messages);
+    });
+    // clear unread for this chat for me
+    usersRef.child(me).child("unread").child(chatId).set(0).catch(()=>{});
+    openChatBoxFor(targetUser, chatRef);
+}
+
+/* Minimal chat UI functions (adopt to your chatBox) */
+function openChatBoxFor(targetUser, chatRef) {
+    const chatBoxEl = document.getElementById("chatBox") || window.chatBox || document.createElement("div");
+    if (!document.getElementById("chatBox") && !window.chatBox) {
+        // if no chatBox present, append a temporary one
+        chatBoxEl.id = "chatBox";
+        chatBoxEl.style.position = "fixed";
+        chatBoxEl.style.right = "20px";
+        chatBoxEl.style.bottom = "20px";
+        chatBoxEl.style.width = "320px";
+        chatBoxEl.style.zIndex = 99999;
+        document.body.appendChild(chatBoxEl);
+    }
+    chatBoxEl.style.display = "flex";
+    chatBoxEl.style.flexDirection = "column";
+    chatBoxEl.style.background = "rgba(0,0,0,0.7)";
+    chatBoxEl.style.padding = "8px";
+    chatBoxEl.style.borderRadius = "8px";
+    chatBoxEl.innerHTML = "";
+
+    const header = document.createElement("div"); header.textContent = `Chat with ${targetUser}`; header.style.fontWeight = "700"; header.style.marginBottom = "6px";
+    const messages = document.createElement("div"); messages.id = `chat-messages-${makeChatId(getMyUsername(), targetUser)}`; messages.style.maxHeight = "260px"; messages.style.overflowY = "auto"; messages.style.marginBottom = "6px"; messages.style.padding = "6px"; messages.style.background = "rgba(255,255,255,0.02)"; messages.style.borderRadius = "6px";
+    const inputRow = document.createElement("div"); inputRow.style.display = "flex";
+    const input = document.createElement("input"); input.type = "text"; input.placeholder = "Say hi..."; input.style.flex = "1"; input.style.marginRight = "6px";
+    const sendBtn = document.createElement("button"); sendBtn.textContent = "Send";
+    sendBtn.onclick = () => { const v = input.value.trim(); if (!v) return; sendChatMessageToUser(targetUser, v); input.value = ""; };
+    input.addEventListener("keydown", e => { if (e.key === "Enter") sendBtn.click(); });
+    const close = document.createElement("button"); close.textContent = "Close"; close.style.marginLeft = "6px"; close.onclick = () => { chatBoxEl.style.display = "none"; };
+
+    inputRow.appendChild(input); inputRow.appendChild(sendBtn); inputRow.appendChild(close);
+    chatBoxEl.appendChild(header); chatBoxEl.appendChild(messages); chatBoxEl.appendChild(inputRow);
+}
+
+function renderChatMessages(chatId, targetUser, messagesArray) {
+    const id = `chat-messages-${chatId}`;
+    const container = document.getElementById(id);
+    if (!container) return;
+    container.innerHTML = "";
+    messagesArray.sort((a,b) => (a.ts||0) - (b.ts||0));
+    messagesArray.forEach(m => {
+        const div = document.createElement("div");
+        div.style.marginBottom = "6px"; div.style.fontSize = "0.95em";
+        if (m.from === getMyUsername()) { div.style.textAlign = "right"; div.textContent = `${m.text}`; }
+        else { div.style.textAlign = "left"; div.textContent = `${m.from}: ${m.text}`; }
+        container.appendChild(div);
+    });
+    container.scrollTop = container.scrollHeight;
+}
+
+/* Incoming requests UI */
+function renderIncomingRequestsPanel() {
+    const container = document.getElementById("online-players-container") || document.body;
+    let panel = container.querySelector(".incoming-requests");
+    if (!panel) {
+        panel = document.createElement("div"); panel.className = "incoming-requests"; panel.style.marginBottom = "8px";
+        panel.innerHTML = "<strong>Friend Requests</strong><div class='req-list'></div>";
+        if (container.querySelector("#online-players-list")) container.insertBefore(panel, container.querySelector("#online-players-list"));
+        else container.appendChild(panel);
+    }
+}
+
+/* Realtime listeners for current user: friendRequests, sentRequests, friends, unread */
+let _myReqListeners = [];
+function startMyRealtimeListeners() {
+    const me = getMyUsername(); if (!me || !usersRef) return;
+    // clean caches
+    Object.keys(_incomingRequests).forEach(k => delete _incomingRequests[k]);
+    Object.keys(_sentRequests).forEach(k => delete _sentRequests[k]);
+    Object.keys(_friends).forEach(k => delete _friends[k]);
+    Object.keys(_unreadByChat).forEach(k => delete _unreadByChat[k]);
+    // detach previous
+    _myReqListeners.forEach(x => { try { x.off(); } catch(e){} }); _myReqListeners = [];
+
+    const frRef = usersRef.child(me).child("friendRequests");
+    const frCb = frRef.on("value", snap => { for (const k in _incomingRequests) delete _incomingRequests[k]; if (snap.exists()) snap.forEach(c => _incomingRequests[c.key] = c.val()); updateIncomingPanel(); refreshAllOnlineButtons(); });
+    _myReqListeners.push(frRef);
+
+    const sRef = usersRef.child(me).child("sentRequests");
+    const sCb = sRef.on("value", snap => { for (const k in _sentRequests) delete _sentRequests[k]; if (snap.exists()) snap.forEach(c => _sentRequests[c.key] = c.val()); refreshAllOnlineButtons(); });
+    _myReqListeners.push(sRef);
+
+    const fRef = usersRef.child(me).child("friends");
+    const fCb = fRef.on("value", snap => { for (const k in _friends) delete _friends[k]; if (snap.exists()) snap.forEach(c => _friends[c.key] = true); refreshAllOnlineButtons(); });
+    _myReqListeners.push(fRef);
+
+    const uRef = usersRef.child(me).child("unread");
+    const uCb = uRef.on("value", snap => { for (const k in _unreadByChat) delete _unreadByChat[k]; if (snap.exists()) snap.forEach(c => _unreadByChat[c.key] = c.val()); refreshAllOnlineButtons(); });
+    _myReqListeners.push(uRef);
+}
+
+/* UI creation for each online player (realtime-driven) */
+function createOnlinePlayerElementRealtime(username, sharedTooltip, statsCache, loadingPromises, handleMouseMove) {
+    const el = document.createElement("div"); el.className = "online-player"; el.style.display = "flex"; el.style.justifyContent = "space-between"; el.style.alignItems = "center"; el.style.padding = "6px";
+
+    const left = document.createElement("div"); left.style.display = "flex"; left.style.alignItems = "center";
+    const nameSpan = document.createElement("span"); nameSpan.textContent = username; nameSpan.style.marginRight = "8px";
+    left.appendChild(nameSpan);
+
+    const right = document.createElement("div"); right.style.display = "flex"; right.style.gap = "6px"; right.style.alignItems = "center";
+    const addBtn = document.createElement("button"); addBtn.textContent = "Add Friend";
+    addBtn.onclick = async (ev) => { ev.stopPropagation(); const me = getMyUsername(); if (!me) return Swal.fire("Not logged in","Set your username first.","warning"); if (me === username) return; if (_friends[username]) { openFriendsListFor(username); return; } if (_sentRequests[username]) { cancelFriendRequest(username); return; } sendFriendRequest(username); };
+
+    const viewBtn = document.createElement("button"); viewBtn.textContent = "View";
+    viewBtn.onclick = async (ev)=>{ ev.stopPropagation(); const snap = await usersRef.child(username).child("friends").once("value"); const friendNames=[]; if (snap.exists()) snap.forEach(c=>friendNames.push(c.key)); Swal.fire({ title: `${username}'s Friends`, html: friendNames.length ? `<pre>${friendNames.join("<br>")}</pre>` : "No friends.", icon: "info"}); };
+
+    const chatBtn = document.createElement("button"); chatBtn.textContent = "Chat";
+    chatBtn.onclick = (ev)=>{ ev.stopPropagation(); openChatWithUser(username); };
+    const badge = document.createElement("span"); badge.className="unread-badge"; badge.style.display="none"; badge.style.marginLeft="6px"; badge.style.background="#ff4d4d"; badge.style.color="#fff"; badge.style.padding="2px 6px"; badge.style.borderRadius="999px"; badge.style.fontSize="0.75em";
+
+    right.appendChild(addBtn); right.appendChild(viewBtn); right.appendChild(chatBtn); right.appendChild(badge);
+    el.appendChild(left); el.appendChild(right);
+
+    _onlineElements[username] = { el, addBtn, viewBtn, chatBtn, badge, username };
+    refreshButtonFor(username);
+    return el;
+}
+
+/* refresh single user entry */
+function refreshButtonFor(username) {
+    const rec = _onlineElements[username]; if (!rec) return;
+    const { addBtn, chatBtn, badge } = rec;
+    const me = getMyUsername(); if (!me) return;
+    if (me === username) { addBtn.style.display="none"; chatBtn.style.display="none"; badge.style.display="none"; return; }
+    if (_friends[username]) { addBtn.textContent="Friends"; addBtn.disabled=true; chatBtn.disabled=false; } else {
+        addBtn.disabled=false;
+        if (_sentRequests[username]) { addBtn.textContent="Cancel Request"; chatBtn.disabled=true; }
+        else if (_incomingRequests[username]) { addBtn.textContent="Requested You"; addBtn.disabled=true; chatBtn.disabled=true; }
+        else { addBtn.textContent="Add Friend"; chatBtn.disabled=true; }
+    }
+    const chatId = makeChatId(me, username); const count = _unreadByChat[chatId] || 0;
+    if (count > 0) { badge.textContent = String(count); badge.style.display = "inline-block"; } else { badge.style.display = "none"; }
+}
+
+function refreshAllOnlineButtons() { Object.keys(_onlineElements).forEach(u => refreshButtonFor(u)); }
+
+/* update incoming panel display */
+function updateIncomingPanel() {
+    const container = document.getElementById("online-players-container"); if (!container) return;
+    let panel = container.querySelector(".incoming-requests"); if (!panel) { renderIncomingRequestsPanel(); panel = container.querySelector(".incoming-requests"); }
+    const list = panel.querySelector(".req-list"); if (!list) return;
+    list.innerHTML = "";
+    const keys = Object.keys(_incomingRequests);
+    if (keys.length === 0) { list.textContent = "No requests."; return; }
+    keys.forEach(from => {
+        const data = _incomingRequests[from] || {};
+        const row = document.createElement("div"); row.style.display="flex"; row.style.justifyContent="space-between"; row.style.alignItems="center"; row.style.padding="4px 6px"; row.style.borderRadius="6px"; row.style.background="rgba(255,255,255,0.02)";
+        const label = document.createElement("span"); label.textContent = `${from} • ${data.status || "pending"}`;
+        const ctls = document.createElement("div"); const a = document.createElement("button"); a.textContent="Accept"; a.onclick = () => acceptFriendRequest(from); const d = document.createElement("button"); d.textContent="Decline"; d.onclick = () => declineFriendRequest(from);
+        ctls.appendChild(a); ctls.appendChild(d); row.appendChild(label); row.appendChild(ctls); list.appendChild(row);
+    });
+}
+
+/* convenience */
+async function openFriendsListFor(target) { const me = getMyUsername(); if (!me) return; const snap = await usersRef.child(me).child("friends").once("value"); const arr=[]; if (snap.exists()) snap.forEach(c=>arr.push(c.key)); Swal.fire({ title: `Your Friends`, html: arr.length ? `<pre style="text-align:left">${arr.join("\n")}</pre>` : "You have no friends yet." }); }
+
+/* Modified menu wiring — this will create the online players list and hook realtime listeners */
+(function attachMenuFriendChatHook() {
+    // We hook into your existing menu() — replace the section that shows online players
+    // If you prefer, you can simply call this function from inside menu() after you build the UI.
+    // We'll export a small helper you should call from your menu() after the DOM for menu is visible.
+    window.__initFriendChatMenu = function initFriendChatMenu() {
+        // ensure container/list exist
+        let onlinePlayersContainer = document.getElementById("online-players-container");
+        if (!onlinePlayersContainer) {
+            onlinePlayersContainer = document.createElement("div");
+            onlinePlayersContainer.id = "online-players-container";
+            // minimal positioning; your CSS will restyle it
+            onlinePlayersContainer.style.position = "absolute";
+            onlinePlayersContainer.style.top = "75%";
+            onlinePlayersContainer.style.left = "50%";
+            onlinePlayersContainer.style.transform = "translate(-50%, -50%)";
+            onlinePlayersContainer.style.width = "500px";
+            onlinePlayersContainer.style.maxHeight = "220px";
+            onlinePlayersContainer.style.overflow = "hidden";
+            onlinePlayersContainer.style.zIndex = 5;
+            document.body.appendChild(onlinePlayersContainer);
+        }
+        let list = document.getElementById("online-players-list");
+        if (!list) {
+            list = document.createElement("div");
+            list.id = "online-players-list";
+            list.style.overflowY = "auto";
+            list.style.maxHeight = "180px";
+            onlinePlayersContainer.appendChild(list);
+        }
+        renderIncomingRequestsPanel();
+        // shared tooltip
+        const TOOLTIP_ID = "shared-stats-tooltip";
+        let sharedTooltip = document.getElementById(TOOLTIP_ID);
+        if (!sharedTooltip) {
+            sharedTooltip = document.createElement("div"); sharedTooltip.id = TOOLTIP_ID; sharedTooltip.className = "stats-tooltip";
+            Object.assign(sharedTooltip.style, { position: "fixed", left: "0px", top: "0px", display: "none", zIndex: 9999, pointerEvents: "none" });
+            document.body.appendChild(sharedTooltip);
+        }
+        const statsCache = new Map(); const loadingPromises = new Map();
+        function positionTooltipAt(x,y) {
+            const margin = 12, pad = 8; let left = x + margin, top = y + margin; sharedTooltip.style.display = "block";
+            const tw = sharedTooltip.offsetWidth || 220, th = sharedTooltip.offsetHeight || 60;
+            if (left + tw + pad > window.innerWidth) left = window.innerWidth - tw - pad;
+            if (top + th + pad > window.innerHeight) top = window.innerHeight - th - pad;
+            if (left < pad) left = pad; if (top < pad) top = pad;
+            sharedTooltip.style.left = left + "px"; sharedTooltip.style.top = top + "px";
+        }
+        window.positionTooltipAt = positionTooltipAt;
+        const handleMouseMove = (e) => positionTooltipAt(e.clientX, e.clientY);
+
+        // attach onlineUsersRef listener (realtime)
+        if (typeof onlineUsersRef !== "undefined" && onlineUsersRef) {
+            try { onlineUsersRef.off(); } catch(e){}
+            onlineUsersRef.on("value", snap => {
+                list.innerHTML = "";
+                Object.keys(_onlineElements).forEach(k => delete _onlineElements[k]);
+                if (snap.exists()) {
+                    snap.forEach(child => {
+                        const player = child.val();
+                        if (player && player.username) {
+                            const username = String(player.username);
+                            const el = createOnlinePlayerElementRealtime(username, sharedTooltip, statsCache, loadingPromises, handleMouseMove);
+                            list.appendChild(el);
+                        }
+                    });
+                } else {
+                    const p = document.createElement("p"); p.textContent = "No players online."; list.appendChild(p);
+                }
+            });
+        } else {
+            const p = document.createElement("p"); p.textContent = "Could not load online players."; list.appendChild(p);
+        }
+
+        // start listeners for logged-in player
+        startMyRealtimeListeners();
+    };
+})();
+
+/* Inject minimal CSS so things look okay */
+if (!document.getElementById("friend-chat-styles-inline")) {
+    const css = `
+    .online-player { border-bottom: 1px solid rgba(255,255,255,0.06); padding: 6px; display:flex; align-items:center; justify-content:space-between; }
+    .online-player button { padding: 4px 6px; border-radius:6px; border:none; background: rgba(255,255,255,0.06); color:#fff; cursor:pointer; }
+    .unread-badge { min-width:18px; text-align:center; display:inline-block; padding:2px 6px; border-radius:999px; background:#ff4d4d; color:#fff; font-size:0.75em; }
+    .incoming-requests { color:#f5f5f5; margin-bottom:6px; font-size:0.9em; }
+    .stats-tooltip { background: rgba(0,0,0,0.85); color:#fff; padding:8px; border-radius:6px; max-width:320px; }
+    `;
+    const s = document.createElement("style"); s.id = "friend-chat-styles-inline"; s.textContent = css; document.head.appendChild(s);
+}
 /**
  * Initializes the main menu by adding all primary menu elements to the canvas.
  * Now explicitly calls makeButton for initial clickable elements.
@@ -1602,6 +1937,8 @@ function menu() {
     }
     dontyetpls = 1;
 
+if (typeof window.__initFriendChatMenu === "function") window.__initFriendChatMenu();
+     
     clearMenuCanvas(); // Clear anything previously on canvas
     sensitivitySliderContainer.style.display = "none";
     settingsBox.style.display = "none";
