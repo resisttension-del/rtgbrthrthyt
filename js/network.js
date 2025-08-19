@@ -58,6 +58,8 @@ let activeGameSlotName = null; // Stores the name of the currently claimed game 
 
 // Store listeners so they can be detached
 let playersListener = null;
+let ownPlayerValueListener = null;
+let ownPlayerRef = null; 
 let chatListener = null;
 let killsListener = null;
 let mapStateListener = null;
@@ -887,102 +889,155 @@ export function setupDamageListener() {
 }
 
 
+export function attachOwnPlayerListener(playersRef, playerId) {
+  // detach previous own listener if any
+  if (ownPlayerRef && ownPlayerValueListener) {
+    ownPlayerRef.off("value", ownPlayerValueListener);
+    ownPlayerRef = null;
+    ownPlayerValueListener = null;
+  }
+
+  if (!playerId) return;
+
+  // Make a child ref to the local player's node and listen for existence
+  ownPlayerRef = playersRef.child ? playersRef.child(playerId) : playersRef.ref.child(playerId);
+  ownPlayerValueListener = ownPlayerRef.on("value", (snap) => {
+    if (!snap.exists()) {
+      console.warn("[ownPlayerListener] Local player node is gone — reloading.");
+      // Clean slot-specific storage here so reload starts fresh
+      try {
+        localStorage.removeItem(`playerId-${activeGameSlotName}`);
+      } catch (e) { /* ignore storage errors */ }
+
+      // Clear local id only now (keeps it during remove() call so comparisons still work)
+      localPlayerId = null;
+
+      // Hard reload to reset game state
+      location.reload();
+    } else {
+      // Node still exists — can optionally sync any server-driven fields if needed
+      const data = snap.val();
+      // Example: update local UI fields if server changed them (optional)
+      if (window.localPlayer && typeof data.health === "number") {
+        window.localPlayer.health = data.health;
+        updateHealthShieldUI(window.localPlayer.health, window.localPlayer.shield);
+      }
+    }
+  });
+}
+
+export function detachOwnPlayerListener() {
+  if (ownPlayerRef && ownPlayerValueListener) {
+    ownPlayerRef.off("value", ownPlayerValueListener);
+    ownPlayerRef = null;
+    ownPlayerValueListener = null;
+  }
+}
+
 export function setupPlayersListener(playersRef) {
-    // Detach previous listeners before attaching new ones
-    playersRef.off("value");
-    playersRef.off("child_added");
-    playersRef.off("child_changed");
-    playersRef.off("child_removed");
+  // Detach previous listeners before attaching new ones
+  playersRef.off("value");
+  playersRef.off("child_added");
+  playersRef.off("child_changed");
+  playersRef.off("child_removed");
 
-    playersListener = playersRef.on("value", (fullSnap) => {
-        const allIds = [];
-        fullSnap.forEach(s => allIds.push(s.key));
-        latestValidIds = allIds;
-        purgeNamelessPlayers(latestValidIds);
+  playersListener = playersRef.on("value", (fullSnap) => {
+    const allIds = [];
+    fullSnap.forEach(s => allIds.push(s.key));
+    latestValidIds = allIds;
+    purgeNamelessPlayers(latestValidIds);
 
-        // Pass the snapshot directly to updateScoreboard to avoid an extra DB read,
-        // and to ensure updateScoreboard never receives 'undefined'.
-        updateScoreboard(fullSnap);
-    });
+    // Pass the snapshot directly to updateScoreboard to avoid an extra DB read,
+    // and to ensure updateScoreboard never receives 'undefined'.
+    updateScoreboard(fullSnap);
+  });
 
-    playersRef.on("child_added", (snap) => {
-        const data = snap.val();
-        const id = data.id;
-        console.log(`[playersRef:child_added] Event for player ID: ${id}`);
+  // If we already have a localPlayerId, attach the dedicated listener for it
+  if (localPlayerId) {
+    attachOwnPlayerListener(playersRef, localPlayerId);
+  }
 
-        if (id === localPlayerId) {
-            console.log(`[playersRef:child_added] Skipping local player ${id}.`);
-            return;
+  playersRef.on("child_added", (snap) => {
+    const data = snap.val();
+    const id = data.id;
+    console.log(`[playersRef:child_added] Event for player ID: ${id}`);
+
+    if (id === localPlayerId) {
+      console.log(`[playersRef:child_added] Skipping local player ${id}.`);
+      return;
+    }
+
+    if (permanentlyRemoved.has(id)) {
+      permanentlyRemoved.delete(id); // Player re-joined
+      console.log(`[permanentlyRemoved] Player ${id} re-joined, clearing from permanent removal list.`);
+    }
+
+    // Explicit check to prevent adding a player model if it's already in our local cache
+    if (remotePlayers[id]) {
+      console.warn(`[playersRef:child_added] Player ${id} already exists in remotePlayers. Skipping model creation.`);
+      return;
+    }
+
+    // Check for essential data before adding the player model
+    if (!data.username) {
+      console.warn(`[playersRef:child_added] Player ${id} has incomplete data (missing username). Skipping model creation.`);
+      return;
+    }
+
+    // If all checks pass, add the remote player model
+    addRemotePlayer(data);
+  });
+
+  playersRef.on("child_changed", (snap) => {
+    const data = snap.val();
+    const id = data.id;
+
+    if (permanentlyRemoved.has(id)) {
+      removeRemotePlayerModel(id); // Ensure we don't update models of removed players
+      return;
+    }
+
+    if (id === localPlayerId && window.localPlayer) {
+      // Only update localPlayer's health/shield/death status from DB if it changed
+      if (typeof data.health === "number") {
+        window.localPlayer.health = data.health;
+      }
+      if (typeof data.shield === "number") {
+        window.localPlayer.shield = data.shield;
+      }
+      if (typeof data.isDead === "boolean") {
+        if (!window.localPlayer.isDead && data.isDead) {
+          handleLocalDeath(data.killerUsername || "Unknown Player");
         }
+        window.localPlayer.isDead = data.isDead;
+      }
+      updateHealthShieldUI(window.localPlayer.health, window.localPlayer.shield);
 
-        if (permanentlyRemoved.has(id)) {
-            permanentlyRemoved.delete(id); // Player re-joined
-            console.log(`[permanentlyRemoved] Player ${id} re-joined, clearing from permanent removal list.`);
-        }
+      // Update local player's body color if changed (for visual feedback/debugging)
+      if (window.localPlayer.bodyMesh && typeof data.bodyColor === "number" &&
+          window.localPlayer.bodyMesh.material.color.getHex() !== data.bodyColor) {
+        window.localPlayer.bodyMesh.material.color.setHex(data.bodyColor);
+      }
+    } else {
+      updateRemotePlayer(data); // Update remote player's model and data
+    }
+  });
 
-        // Explicit check to prevent adding a player model if it's already in our local cache
-        if (remotePlayers[id]) {
-            console.warn(`[playersRef:child_added] Player ${id} already exists in remotePlayers. Skipping model creation.`);
-            return;
-        }
-
-        // Check for essential data before adding the player model
-        if (!data.username) {
-            console.warn(`[playersRef:child_added] Player ${id} has incomplete data (missing username). Skipping model creation.`);
-            return;
-        }
-
-        // If all checks pass, add the remote player model
-        addRemotePlayer(data);
-    });
-
-    playersRef.on("child_changed", (snap) => {
-        const data = snap.val();
-        const id = data.id;
-
-        if (permanentlyRemoved.has(id)) {
-            removeRemotePlayerModel(id); // Ensure we don't update models of removed players
-            return;
-        }
-
-        if (id === localPlayerId && window.localPlayer) {
-            // Only update localPlayer's health/shield/death status from DB if it changed
-            if (typeof data.health === "number") {
-                window.localPlayer.health = data.health;
-            }
-            if (typeof data.shield === "number") {
-                window.localPlayer.shield = data.shield;
-            }
-            if (typeof data.isDead === "boolean") {
-                if (!window.localPlayer.isDead && data.isDead) {
-                    handleLocalDeath(data.killerUsername || "Unknown Player");
-                }
-                window.localPlayer.isDead = data.isDead;
-            }
-            updateHealthShieldUI(window.localPlayer.health, window.localPlayer.shield);
-
-            // Update local player's body color if changed (for visual feedback/debugging)
-            if (window.localPlayer.bodyMesh && typeof data.bodyColor === "number" &&
-                window.localPlayer.bodyMesh.material.color.getHex() !== data.bodyColor) {
-                window.localPlayer.bodyMesh.material.color.setHex(data.bodyColor);
-            }
-        } else {
-            updateRemotePlayer(data); // Update remote player's model and data
-        }
-    });
-
-    playersRef.on("child_removed", (snap) => {
-        const id = snap.key;
-        if (id === localPlayerId) {
-            console.warn("Local player removed from Firebase. Handling disconnection.");
-            localStorage.removeItem(`playerId-${activeGameSlotName}`); // Clear slot-specific ID
-            localPlayerId = null; // Ensure game loop knows to stop
-           //  location.reload();
-            return;
-        }
-        permanentlyRemoved.add(id);
-        removeRemotePlayerModel(id);
-    });
+  playersRef.on("child_removed", (snap) => {
+    const id = snap.key;
+    // If the removed child *is* the local player, we want to make sure reload happens.
+    if (id === localPlayerId) {
+      console.warn("Local player removed from Firebase. Handling disconnection.");
+      // Note: we do not null localPlayerId here if we still want other parts of the code
+      // to be able to compare it until the own-player listener handles final cleanup.
+      localStorage.removeItem(`playerId-${activeGameSlotName}`); // Clear slot-specific ID
+      // We *do not* directly call location.reload() here — rely on attachOwnPlayerListener
+      // to detect the absence of the node and reload. This avoids races.
+      return;
+    }
+    permanentlyRemoved.add(id);
+    removeRemotePlayerModel(id);
+  });
 }
 
 function setupChatListener(chatRef) {
