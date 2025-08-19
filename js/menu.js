@@ -5338,6 +5338,7 @@ async function addDeviceIdToUser(usernameToAnnotate) {
     }
 
     // ---------- Host watcher (full implementation kept from your original code) ----------
+const hostTrackers = {};
 async function initHostWatcherForAllSlots() {
   // Ensure we have anon auth for each slot app first
   try {
