@@ -513,71 +513,81 @@ document.getElementById("crosshair").style.display = "";
 // Hit Pulse
 
 const pendingRestore = {};
-const originalColor   = {}; // local cache of originalBodyColor per player id
+const originalColor   = {};
 
 export async function pulsePlayerHit(victimId) {
   const playerRef = playersRef.child(victimId);
   const flashColor = 0xff0000;
   const PULSE_MS   = 200;
 
-  // 0) Ensure we have the ORIGINAL color (prefer DB field originalBodyColor, fall back to bodyColor and write the DB)
+  // --- 0) Ensure we have the "original" color cached ---
   if (typeof originalColor[victimId] !== 'number') {
     try {
+      // Prefer DB field originalBodyColor
       const origSnap = await playerRef.child('originalBodyColor').once('value');
       const origVal = origSnap.val();
+
       if (typeof origVal === 'number') {
         originalColor[victimId] = origVal;
+      } else if (victimId === localPlayerId && window.localPlayer && typeof window.localPlayer.originalBodyColor === 'number') {
+        // local player's original is available on the client
+        originalColor[victimId] = window.localPlayer.originalBodyColor;
+        // best-effort: ensure DB has it too
+        try {
+          await playerRef.update({ originalBodyColor: originalColor[victimId] });
+        } catch (e) {
+          console.warn('[pulsePlayerHit] could not write originalBodyColor for local player:', e);
+        }
       } else {
-        // no originalBodyColor in DB — read current bodyColor and initialize originalBodyColor in DB
+        // DB missing originalBodyColor: fall back to reading current bodyColor and initialize originalBodyColor in DB
         const curSnap = await playerRef.child('bodyColor').once('value');
         const curVal = curSnap.val();
         if (typeof curVal === 'number') {
           originalColor[victimId] = curVal;
-          // try to persist originalBodyColor for future clients (best-effort)
+          // Best-effort write so future clients/readers can use the DB-stored original
           try {
             await playerRef.update({ originalBodyColor: curVal });
           } catch (e) {
-            console.warn('[pulsePlayerHit] unable to write originalBodyColor to DB:', e);
+            console.warn('[pulsePlayerHit] unable to persist originalBodyColor to DB (best-effort):', e);
           }
         } else {
-          console.warn(`[pulsePlayerHit] Can't flash ${victimId}, no numeric bodyColor available:`, curVal);
+          console.warn(`[pulsePlayerHit] Can't flash ${victimId}, no numeric original or bodyColor available:`, curVal);
           return;
         }
       }
     } catch (err) {
-      console.error('[pulsePlayerHit] Error reading originalBodyColor from DB:', err);
+      console.error('[pulsePlayerHit] Error retrieving originalBodyColor/bodyColor:', err);
       return;
     }
   }
 
-  // 1) Cancel any pending restore so repeated hits keep flashing
+  // --- 1) Cancel any pending restore so repeated hits keep the flash visible ---
   if (pendingRestore[victimId]) {
     clearTimeout(pendingRestore[victimId]);
   }
 
-  // 2) Flash RED immediately (best-effort)
+  // --- 2) Flash RED immediately (best-effort) ---
   try {
     await playerRef.update({ bodyColor: flashColor });
   } catch (err) {
     console.error('[pulsePlayerHit] Error flashing RED:', err);
+    // continue to schedule restore even if flashing failed
   }
 
-  // 3) Schedule restore back to the DB-stored original color after PULSE_MS
+  // --- 3) Schedule restore after PULSE_MS, but only if the current color isn't already the original ---
   pendingRestore[victimId] = setTimeout(async () => {
     const orig = originalColor[victimId];
     if (typeof orig !== 'number') {
-      // nothing sensible to restore to
       delete pendingRestore[victimId];
       return;
     }
 
     try {
-      // read current color to avoid stomping a deliberate change
       const curSnap = await playerRef.child('bodyColor').once('value');
       const cur = curSnap.val();
 
+      // restore only when the current color differs from desired original
       if (cur !== orig) {
-        // restore originalBodyColor (only if current color is not already original)
         await playerRef.update({ bodyColor: orig });
       }
     } catch (err) {
@@ -588,6 +598,8 @@ export async function pulsePlayerHit(victimId) {
     // keep originalColor cached for future hits
   }, PULSE_MS);
 }
+
+
 
 
 
@@ -639,46 +651,25 @@ export async function startGame(username, mapName, initialDetailsEnabled, ffaEna
     initializeAudioManager(window.camera, scene);
     startSoundListener();
 
-    window.localPlayer = {
-        id: localPlayerId,
-        username,
-        x: 0,
-        y: 1000,
-        z: 0,
-        rotY: 0,
-        health: initialPlayerHealth,
-        shield: initialPlayerShield,
-        weapon: initialPlayerWeapon,
-        kills: 0,
-        deaths: 0,
-        ks: 0,
-        bodyColor: Math.floor(Math.random() * 0xffffff),
-        isDead: false
-    };
+const initialBodyColor = Math.floor(Math.random() * 0xffffff);
 
-    // --- NEW: store originalBodyColor in DB (but don't overwrite it if already present) ---
-    const playerDbRef = dbRefs.playersRef.child(localPlayerId);
-    try {
-      const origSnap = await playerDbRef.child('originalBodyColor').once('value');
-      if (origSnap.exists() && typeof origSnap.val() === 'number') {
-        // database already has original; cache it locally
-        originalColor[localPlayerId] = origSnap.val();
-        // update other fields (don't touch originalBodyColor)
-        await playerDbRef.update({ ...window.localPlayer });
-      } else {
-        // write originalBodyColor the first time
-        originalColor[localPlayerId] = window.localPlayer.bodyColor;
-        await playerDbRef.update({
-          ...window.localPlayer,
-          originalBodyColor: window.localPlayer.bodyColor
-        });
-      }
-    } catch (err) {
-      console.warn('[startGame] error setting player DB fields, falling back to set():', err);
-      // fallback to set everything (risk of overwriting originalBodyColor if present)
-      await playerDbRef.set({ ...window.localPlayer, originalBodyColor: window.localPlayer.bodyColor });
-      originalColor[localPlayerId] = window.localPlayer.bodyColor;
-    }
+window.localPlayer = {
+    id: localPlayerId,
+    username,
+    x: 0,
+    y: 1000,
+    z: 0,
+    rotY: 0,
+    health: initialPlayerHealth,
+    shield: initialPlayerShield,
+    weapon: initialPlayerWeapon,
+    kills: 0,
+    deaths: 0,
+    ks: 0,
+    bodyColor: initialBodyColor,
+    originalBodyColor: initialBodyColor, // <-- add this
+    isDead: false
+};
 
     await dbRefs.playersRef.child(localPlayerId).set({
         ...window.localPlayer
@@ -2906,8 +2897,6 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
-
-
 
 
 
