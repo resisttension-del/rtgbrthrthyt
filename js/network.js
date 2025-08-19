@@ -914,14 +914,28 @@ export function attachOwnPlayerListener(playersRef, playerId) {
 
       // Hard reload to reset game state
       location.reload();
-    } else {
-      // Node still exists — can optionally sync any server-driven fields if needed
-      const data = snap.val();
-      // Example: update local UI fields if server changed them (optional)
-      if (window.localPlayer && typeof data.health === "number") {
-        window.localPlayer.health = data.health;
-        updateHealthShieldUI(window.localPlayer.health, window.localPlayer.shield);
-      }
+      return;
+    }
+
+    // Node exists — check for required fields (username). If missing, force reload.
+    const data = snap.val();
+    if (!data || !data.username) {
+      console.warn("[ownPlayerListener] Local player node missing username — reloading.");
+      try {
+        localStorage.removeItem(`playerId-${activeGameSlotName}`);
+      } catch (e) { /* ignore storage errors */ }
+
+      localPlayerId = null;
+      // Hard reload to prompt the client to recreate/complete the player node (or to redirect to login).
+      location.reload();
+      return;
+    }
+
+    // Node exists and has a username — sync any server-driven fields if needed
+    // Example: update local UI fields if server changed them (optional)
+    if (window.localPlayer && typeof data.health === "number") {
+      window.localPlayer.health = data.health;
+      updateHealthShieldUI(window.localPlayer.health, window.localPlayer.shield);
     }
   });
 }
@@ -962,7 +976,17 @@ export function setupPlayersListener(playersRef) {
     const id = data.id;
     console.log(`[playersRef:child_added] Event for player ID: ${id}`);
 
+    // If this is the local player's node, check username presence and reload if missing.
     if (id === localPlayerId) {
+      if (!data.username) {
+        console.warn(`[playersRef:child_added] Local player ${id} added but missing username — reloading.`);
+        try {
+          localStorage.removeItem(`playerId-${activeGameSlotName}`);
+        } catch (e) { /* ignore storage errors */ }
+        localPlayerId = null;
+        location.reload();
+        return;
+      }
       console.log(`[playersRef:child_added] Skipping local player ${id}.`);
       return;
     }
@@ -974,7 +998,7 @@ export function setupPlayersListener(playersRef) {
 
     // Explicit check to prevent adding a player model if it's already in our local cache
     if (remotePlayers[id]) {
-      console.warn(`[playersRef:child_added] Player ${id} already exists in remotePlayers. Skipping model creation.`);
+      console.warn(`[playersRef:child_added] Player ${id} already exists in remotePlayers. Skipping model creation.`); 
       return;
     }
 
@@ -997,26 +1021,39 @@ export function setupPlayersListener(playersRef) {
       return;
     }
 
-    if (id === localPlayerId && window.localPlayer) {
-      // Only update localPlayer's health/shield/death status from DB if it changed
-      if (typeof data.health === "number") {
-        window.localPlayer.health = data.health;
+    // If the local player's DB node lost its username, force reload.
+    if (id === localPlayerId) {
+      if (!data.username) {
+        console.warn(`[playersRef:child_changed] Local player ${id} changed but is missing username — reloading.`);
+        try {
+          localStorage.removeItem(`playerId-${activeGameSlotName}`);
+        } catch (e) { /* ignore storage errors */ }
+        localPlayerId = null;
+        location.reload();
+        return;
       }
-      if (typeof data.shield === "number") {
-        window.localPlayer.shield = data.shield;
-      }
-      if (typeof data.isDead === "boolean") {
-        if (!window.localPlayer.isDead && data.isDead) {
-          handleLocalDeath(data.killerUsername || "Unknown Player");
-        }
-        window.localPlayer.isDead = data.isDead;
-      }
-      updateHealthShieldUI(window.localPlayer.health, window.localPlayer.shield);
 
-      // Update local player's body color if changed (for visual feedback/debugging)
-      if (window.localPlayer.bodyMesh && typeof data.bodyColor === "number" &&
-          window.localPlayer.bodyMesh.material.color.getHex() !== data.bodyColor) {
-        window.localPlayer.bodyMesh.material.color.setHex(data.bodyColor);
+      if (window.localPlayer) {
+        // Only update localPlayer's health/shield/death status from DB if it changed
+        if (typeof data.health === "number") {
+          window.localPlayer.health = data.health;
+        }
+        if (typeof data.shield === "number") {
+          window.localPlayer.shield = data.shield;
+        }
+        if (typeof data.isDead === "boolean") {
+          if (!window.localPlayer.isDead && data.isDead) {
+            handleLocalDeath(data.killerUsername || "Unknown Player");
+          }
+          window.localPlayer.isDead = data.isDead;
+        }
+        updateHealthShieldUI(window.localPlayer.health, window.localPlayer.shield);
+
+        // Update local player's body color if changed (for visual feedback/debugging)
+        if (window.localPlayer.bodyMesh && typeof data.bodyColor === "number" &&
+            window.localPlayer.bodyMesh.material.color.getHex() !== data.bodyColor) {
+          window.localPlayer.bodyMesh.material.color.setHex(data.bodyColor);
+        }
       }
     } else {
       updateRemotePlayer(data); // Update remote player's model and data
