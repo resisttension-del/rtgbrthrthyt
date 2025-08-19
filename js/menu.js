@@ -5544,27 +5544,35 @@ async function initHostWatcherForAllSlots() {
       };
 
       // DURATION handler
-      tracker.durationHandler = snapDur => {
-        const val = snapDur.val();
+tracker.durationHandler = snapDur => {
+  // cancel any previously scheduled handling
+  if (tracker._durationTimeout) {
+    clearTimeout(tracker._durationTimeout);
+  }
 
-        // If duration removed / missing -> end the slot
-        if (val == null || val === '') {
-          try {
-            console.log(`[hostWatcher] gameDuration missing for ${trackerKey}, setting ended=true`);
-            endedRef.set(true).catch(e => {
-              console.warn(`[hostWatcher] failed to set ended when duration missing ${trackerKey}:`, e);
-            });
-          } catch (e) {
-            console.warn(`[hostWatcher] failed to set ended when duration missing ${trackerKey}:`, e);
-          }
-          return;
-        }
+  // schedule handling after 2 seconds
+  tracker._durationTimeout = setTimeout(() => {
+    const val = snapDur.val();
 
-        if (typeof val === 'number') {
-          tracker.currentRemainingSeconds = val;
-          tracker.lastDurationTs = Date.now();
-        }
-      };
+    // If duration removed / missing -> end the slot
+    if (val == null || val === '') {
+      try {
+        console.log(`[hostWatcher] gameDuration missing for ${trackerKey}, setting ended=true`);
+        endedRef.set(true).catch(e => {
+          console.warn(`[hostWatcher] failed to set ended when duration missing ${trackerKey}:`, e);
+        });
+      } catch (e) {
+        console.warn(`[hostWatcher] failed to set ended when duration missing ${trackerKey}:`, e);
+      }
+      return;
+    }
+
+    if (typeof val === 'number') {
+      tracker.currentRemainingSeconds = val;
+      tracker.lastDurationTs = Date.now();
+    }
+  }, 2000);
+};
 
       // ENDED handler
       tracker.endedHandler = snapEnded => {
