@@ -60,6 +60,7 @@ let activeGameSlotName = null; // Stores the name of the currently claimed game 
 let playersListener = null;
 let ownPlayerValueListener = null;
 let ownPlayerRef = null; 
+let ownNodeExists = false;
 let chatListener = null;
 let killsListener = null;
 let mapStateListener = null;
@@ -162,22 +163,40 @@ export function sendPlayerUpdate(data) {
     const now = Date.now();
     if (now - lastSync < 50) return; // Limit update frequency
     lastSync = now;
-    if (dbRefs.playersRef && localPlayerId) { // Check for playersRef from the current game slot
-        dbRefs.playersRef.child(localPlayerId).update({
-            x: data.x,
-            y: data.y,
-            z: data.z,
-            rotY: data.rotY,
-            rotX: data.rotX,
-            rotZ: data.rotZ,
-            weapon: data.weapon,
-            knifeSwing: data.knifeSwing, // Include knife animation states
-            knifeHeavy: data.knifeHeavy
-        }).catch(err => console.error("Failed to send player update:", err));
-    } else {
-        // console.warn("Attempted to send player update before network initialized or localPlayerId is null."); // Too chatty
+
+    // don't attempt writes if we don't have a player id, or our own node is known missing,
+    // or we were marked permanently removed by the child_removed handler.
+    if (!dbRefs.playersRef || !localPlayerId) return;
+    if (!ownNodeExists) {
+      // Too risky to write if we know the node is gone / listener not attached.
+      // Optionally log once for debugging:
+      // console.warn("Skipping player update: own node does not exist (no DB writes).");
+      return;
     }
+    if (permanentlyRemoved.has(localPlayerId)) {
+      // If we were explicitly removed from the game, stop sending updates.
+      // Optionally run cleanup here as well.
+      return;
+    }
+
+    // Safe to update
+    dbRefs.playersRef.child(localPlayerId).update({
+        x: data.x,
+        y: data.y,
+        z: data.z,
+        rotY: data.rotY,
+        rotX: data.rotX,
+        rotZ: data.rotZ,
+        weapon: data.weapon,
+        knifeSwing: data.knifeSwing,
+        knifeHeavy: data.knifeHeavy
+    }).catch(err => {
+        console.error("Failed to send player update:", err);
+        // Consider setting ownNodeExists = false on permission errors or 404-like failures,
+        // but firebase client usually surfaces permission errors as auth issues.
+    });
 }
+
 export function updateHealth(health) {
     if (dbRefs.playersRef && localPlayerId) {
         dbRefs.playersRef.child(localPlayerId).update({ health }).catch(err => console.error("Failed to update health:", err));
@@ -892,46 +911,53 @@ export function setupDamageListener() {
 export function attachOwnPlayerListener(playersRef, playerId) {
   // detach previous own listener if any
   if (ownPlayerRef && ownPlayerValueListener) {
-    ownPlayerRef.off("value", ownPlayerValueListener);
+    try { ownPlayerRef.off("value", ownPlayerValueListener); } catch(e){}
     ownPlayerRef = null;
     ownPlayerValueListener = null;
   }
 
-  if (!playerId) return;
+  ownNodeExists = false; // assume false until we confirm
+  if (!playerId || !playersRef) return;
 
-  // Make a child ref to the local player's node and listen for existence
+  // create child ref (keeps your .child usage)
   ownPlayerRef = playersRef.child ? playersRef.child(playerId) : playersRef.ref.child(playerId);
+
   ownPlayerValueListener = ownPlayerRef.on("value", (snap) => {
     if (!snap.exists()) {
-      console.warn("[ownPlayerListener] Local player node is gone — reloading.");
-      // Clean slot-specific storage here so reload starts fresh
-      try {
-        localStorage.removeItem(`playerId-${activeGameSlotName}`);
-      } catch (e) { /* ignore storage errors */ }
+      // Node is gone
+      console.warn("[ownPlayerListener] Local player node no longer exists.");
+      ownNodeExists = false;
 
-      // Clear local id only now (keeps it during remove() call so comparisons still work)
+      // ensure slot-specific storage cleared
+      try { localStorage.removeItem(`playerId-${activeGameSlotName}`); } catch(e){}
+
+      // clear local id so other logic won't continue to rely on it
       localPlayerId = null;
 
-      // Hard reload to reset game state
+      // reload to reset the client (your existing behavior)
       location.reload();
-    } else {
-      // Node still exists — can optionally sync any server-driven fields if needed
-      const data = snap.val();
-      // Example: update local UI fields if server changed them (optional)
-      if (window.localPlayer && typeof data.health === "number") {
-        window.localPlayer.health = data.health;
-        updateHealthShieldUI(window.localPlayer.health, window.localPlayer.shield);
-      }
+      return;
+    }
+
+    // node exists
+    ownNodeExists = true;
+    const data = snap.val();
+
+    // optional: keep local fields synced from DB
+    if (window.localPlayer && typeof data.health === "number") {
+      window.localPlayer.health = data.health;
+      updateHealthShieldUI(window.localPlayer.health, window.localPlayer.shield);
     }
   });
 }
 
 export function detachOwnPlayerListener() {
   if (ownPlayerRef && ownPlayerValueListener) {
-    ownPlayerRef.off("value", ownPlayerValueListener);
-    ownPlayerRef = null;
-    ownPlayerValueListener = null;
+    try { ownPlayerRef.off("value", ownPlayerValueListener); } catch(e){}
   }
+  ownPlayerRef = null;
+  ownPlayerValueListener = null;
+  ownNodeExists = false;
 }
 
 export function setupPlayersListener(playersRef) {
