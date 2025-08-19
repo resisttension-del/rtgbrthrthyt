@@ -5338,13 +5338,9 @@ async function addDeviceIdToUser(usernameToAnnotate) {
     }
 
     // ---------- Host watcher (full implementation kept from your original code) ----------
-    const hostTrackers = {}; // key = `${slotName}/${gameId}`
+const hostTrackers = {}; // key = `${slotName}/${gameId}`
 async function initHostWatcherForAllSlots() {
-  // Global map for trackers already exists externally: const hostTrackers = {};
-  // We'll keep a small per-call map of auth unsubscribers so we can avoid double-registering.
-  const slotAuthUnsubs = {};
-
-  // Ensure we have anon auth for each slot app first (best-effort)
+  // Ensure we have anon auth for each slot app first
   try {
     await authenticateToAllSlotApps();
   } catch (e) {
@@ -5377,128 +5373,22 @@ async function initHostWatcherForAllSlots() {
     if (!app) continue;
 
     const slotAuth = app.auth();
+    try {
+      if (!slotAuth.currentUser) {
+        const cred = await slotAuth.signInAnonymously();
+        console.log(`[hostWatcher] signed into ${slotName} uid=${cred.user.uid}`);
+      } else {
+        console.log(`[hostWatcher] reusing auth for ${slotName} uid=${slotAuth.currentUser.uid}`);
+      }
+    } catch (err) {
+      console.warn(`[hostWatcher] anon sign-in failed for ${slotName}:`, err);
+      continue;
+    }
+
+    const slotUid = slotAuth.currentUser.uid;
     const dbSlot = app.database();
     const gameRootRef = dbSlot.ref('game');
 
-    // Helper: only sign in anonymously if there is NO current user for this slot.
-    async function ensureSlotHasAuth() {
-      try {
-        if (!slotAuth.currentUser) {
-          const cred = await slotAuth.signInAnonymously();
-          console.log(`[hostWatcher] signed into ${slotName} (anon) uid=${cred.user.uid}`);
-        } else {
-          console.log(`[hostWatcher] using existing auth for ${slotName} uid=${slotAuth.currentUser.uid}`);
-        }
-      } catch (err) {
-        console.warn(`[hostWatcher] anon sign-in failed for ${slotName}:`, err);
-        // don't throw; some operations will be skipped until auth exists
-      }
-    }
-
-    // Attempt to ensure auth now (best-effort)
-    try {
-      await ensureSlotHasAuth();
-    } catch (e) {
-      /* continue */
-    }
-
-    // Helper: rebind onDisconnect/heartbeat for trackers belonging to this slot when auth changes
-    async function rebindTrackersForSlotOnAuthChange() {
-      try {
-        const myUid = slotAuth.currentUser && slotAuth.currentUser.uid;
-        for (const key of Object.keys(hostTrackers)) {
-          if (!key.startsWith(slotName + '/')) continue;
-          const t = hostTrackers[key];
-          if (!t) continue;
-          const gameId = t.gameId;
-          const cfgRef = dbSlot.ref(`game/${gameId}/gameConfig`);
-          const ownerRef = cfgRef.child('owner');
-          const durationRef = cfgRef.child('gameDuration');
-
-          // read current owner
-          let ownerSnap = null;
-          try { ownerSnap = await ownerRef.once('value'); } catch (e) { ownerSnap = null; }
-          const ownerId = ownerSnap && ownerSnap.exists() ? ownerSnap.val() : null;
-
-          if (ownerId && myUid && ownerId === myUid) {
-            // We are the owner in DB and we have a UID: ensure onDisconnect and heartbeat
-            try { ownerRef.onDisconnect().remove(); } catch (e) { /* ignore */ }
-
-            if (t.ownerInterval === null) {
-              // try to populate remaining seconds if missing
-              if (t.currentRemainingSeconds == null) {
-                try {
-                  const durSnap = await durationRef.once('value');
-                  if (durSnap.exists() && typeof durSnap.val() === 'number') {
-                    t.currentRemainingSeconds = durSnap.val();
-                  }
-                } catch (e) { /* ignore */ }
-              }
-
-              if (typeof t.currentRemainingSeconds === 'number') {
-                t.ownerInterval = setInterval(async () => {
-                  if (t.currentRemainingSeconds == null) return;
-                  if (t.currentRemainingSeconds <= 0) {
-                    try { await cfgRef.child('ended').set(true); } catch (e) {}
-                    return;
-                  }
-                  t.currentRemainingSeconds--;
-                  try { await durationRef.set(t.currentRemainingSeconds); } catch (e) {}
-                }, 1000);
-                console.log(`[hostWatcher] resumed heartbeat for ${key} uid=${myUid}`);
-              }
-            }
-          } else {
-            // Not our ownership: ensure no heartbeat is running locally
-            if (t.ownerInterval !== null) {
-              clearInterval(t.ownerInterval);
-              t.ownerInterval = null;
-              console.log(`[hostWatcher] stopped heartbeat for ${key} because owner changed (${ownerId} !== ${myUid})`);
-            }
-          }
-        }
-      } catch (e) {
-        console.warn(`[hostWatcher] rebindTrackersForSlotOnAuthChange error for ${slotName}:`, e);
-      }
-    }
-
-    // React to auth state changes for this slot
-    // Avoid double-registering the listener if this function is re-run; keep unsub in map
-    try {
-      if (slotAuthUnsubs[slotName]) {
-        try { slotAuthUnsubs[slotName](); } catch (e) {}
-      }
-      slotAuthUnsubs[slotName] = slotAuth.onAuthStateChanged(async user => {
-        try {
-          console.log(`[hostWatcher] auth state changed for ${slotName} =>`, user ? user.uid : 'null');
-
-          // If we gained a UID and it's appropriate, try to claim ownerless games
-          if (user) {
-            try {
-              const rootSnap = await dbSlot.ref('game').once('value');
-              const myUidNow = slotAuth.currentUser && slotAuth.currentUser.uid;
-              rootSnap.forEach(gameSnap => {
-                const id = gameSnap.key;
-                const ownerRef = dbSlot.ref(`game/${id}/gameConfig/owner`);
-                if (!myUidNow) return;
-                ownerRef.transaction(curr => (curr === null ? myUidNow : undefined), false)
-                  .catch(e => console.warn(`[hostWatcher] re-elect tx failed ${slotName}/${id}:`, e));
-                try { ownerRef.onDisconnect().remove(); } catch (e) { /* ignore */ }
-              });
-            } catch (e) { /* ignore */ }
-          }
-
-          // Rebind trackers (start/stop heartbeats, ensure onDisconnect)
-          await rebindTrackersForSlotOnAuthChange();
-        } catch (e) {
-          console.warn(`[hostWatcher] onAuthStateChanged handler error for ${slotName}:`, e);
-        }
-      });
-    } catch (e) {
-      console.warn(`[hostWatcher] failed to attach onAuthStateChanged for ${slotName}:`, e);
-    }
-
-    // onChildAdded handler (uses live slotAuth.currentUser.uid)
     const onChildAdded = snap => {
       if (!snap || !snap.exists()) return;
       const gameId = snap.key;
@@ -5509,25 +5399,26 @@ async function initHostWatcherForAllSlots() {
       const endedRef = configRef.child('ended');
       const trackerKey = `${slotName}/${gameId}`;
       if (hostTrackers[trackerKey]) return; // already tracking
-
       const tracker = {
         slotName,
         gameId,
-        ownerInterval: null,
+        ownerInterval: null,          // heartbeat interval (when we're owner)
         currentRemainingSeconds: null,
         ownerHandler: null,
         durationHandler: null,
-        endedHandler: null
+        endedHandler: null,
+        ownerId: null,                // last seen owner id
+        lastDurationTs: null,         // timestamp (ms) of last duration update
+        ownerStaleInterval: null      // interval checking for stale duration updates
       };
       hostTrackers[trackerKey] = tracker;
 
-      // Try a quick initial election if owner absent (use current slot UID)
+      // Try a quick initial election if owner absent
       try {
         configRef.once('value', snapCfg => {
           if (!snapCfg.exists()) return;
-          const currentUid = slotAuth.currentUser && slotAuth.currentUser.uid;
-          if (!currentUid) return; // can't claim without a slot auth user
-          ownerRef.transaction(curr => (curr === null ? currentUid : undefined), false)
+          // if there's no owner property, attempt to claim
+          ownerRef.transaction(curr => (curr === null ? slotUid : undefined), false)
             .catch(e => console.warn(`[hostWatcher] initial owner tx failed ${trackerKey}:`, e));
           try { ownerRef.onDisconnect().remove(); } catch (e) { /* ignore */ }
         });
@@ -5535,88 +5426,104 @@ async function initHostWatcherForAllSlots() {
         console.warn(`[hostWatcher] once(gameConfig) failed for ${trackerKey}:`, e);
       }
 
-      // OWNER handler (always check live slotAuth.currentUser.uid)
+      // OWNER handler
       tracker.ownerHandler = snapOwner => {
-        try {
-          const ownerId = snapOwner.val();
-          const myUid = slotAuth.currentUser && slotAuth.currentUser.uid;
+        const ownerId = snapOwner.val();
+        tracker.ownerId = ownerId;
 
-          // If we're owner and haven't started heartbeat, start it
-          if (ownerId === myUid && tracker.ownerInterval === null) {
-            tracker.ownerInterval = setInterval(async () => {
-              if (tracker.currentRemainingSeconds == null) return;
-              if (tracker.currentRemainingSeconds <= 0) {
-                try { await configRef.child('ended').set(true); } catch (e) {}
-                return;
-              }
-              tracker.currentRemainingSeconds--;
-              try { await durationRef.set(tracker.currentRemainingSeconds); } catch (e) {}
-            }, 1000);
-            console.log(`[hostWatcher] became owner for ${trackerKey} uid=${myUid}`);
-          }
-
-          // If we lost ownership, stop heartbeat
-          if (ownerId !== myUid && tracker.ownerInterval !== null) {
-            clearInterval(tracker.ownerInterval);
-            tracker.ownerInterval = null;
-            console.log(`[hostWatcher] lost ownership for ${trackerKey}`);
-          }
-
-          // If owner is null, attempt re-election with jitter (uses current slot UID at time of attempt)
-          if (ownerId === null) {
-            setTimeout(() => {
-              const myUidNow = slotAuth.currentUser && slotAuth.currentUser.uid;
-              if (!myUidNow) return;
-              ownerRef.transaction(curr => (curr === null ? myUidNow : undefined), false)
-                .catch(e => console.warn(`[hostWatcher] re-elect failed ${trackerKey}:`, e));
-              try { ownerRef.onDisconnect().remove(); } catch (e) { /* ignore */ }
-            }, 300 + Math.floor(Math.random() * 700));
-          }
-        } catch (e) {
-          console.warn(`[hostWatcher] ownerHandler error for ${trackerKey}:`, e);
+        // If we're owner and haven't started heartbeat, start it
+        if (ownerId === slotUid && tracker.ownerInterval === null) {
+          tracker.ownerInterval = setInterval(async () => {
+            // only tick if we know the remaining seconds
+            if (tracker.currentRemainingSeconds == null) return;
+            if (tracker.currentRemainingSeconds <= 0) {
+              try { await configRef.child('ended').set(true); } catch (e) {}
+              return;
+            }
+            tracker.currentRemainingSeconds--;
+            try { await durationRef.set(tracker.currentRemainingSeconds); } catch (e) {}
+          }, 1000);
+          console.log(`[hostWatcher] became owner for ${trackerKey}`);
+        }
+        // If we lost ownership, stop heartbeat
+        if (ownerId !== slotUid && tracker.ownerInterval !== null) {
+          clearInterval(tracker.ownerInterval);
+          tracker.ownerInterval = null;
+          console.log(`[hostWatcher] lost ownership for ${trackerKey}`);
+        }
+        // If owner is null, attempt re-election with jitter
+        if (ownerId === null) {
+          setTimeout(() => {
+            ownerRef.transaction(curr => (curr === null ? slotUid : undefined), false)
+              .catch(e => console.warn(`[hostWatcher] re-elect failed ${trackerKey}:`, e));
+            try { ownerRef.onDisconnect().remove(); } catch (e) {}
+          }, 300 + Math.floor(Math.random() * 700));
         }
       };
 
       // DURATION handler
       tracker.durationHandler = snapDur => {
-        try {
-          const val = snapDur.val();
-          if (typeof val === 'number') {
-            tracker.currentRemainingSeconds = val;
-          }
-        } catch (e) {
-          console.warn(`[hostWatcher] durationHandler error for ${trackerKey}:`, e);
+        const val = snapDur.val();
+        if (typeof val === 'number') {
+          tracker.currentRemainingSeconds = val;
+          tracker.lastDurationTs = Date.now();
         }
       };
 
       // ENDED handler
       tracker.endedHandler = snapEnded => {
-        try {
-          if (snapEnded.val() === true) {
-            ownerRef.once('value').then(ownerSnap => {
-              const ownerId = ownerSnap.val();
-              const myUid = slotAuth.currentUser && slotAuth.currentUser.uid;
-              if (ownerId === myUid) {
-                setTimeout(async () => {
-                  try {
-                    console.log(`[hostWatcher] owner ${myUid} releasing slot ${slotName} game/${gameId}`);
-                    await releaseGameSlot(slotName);
-                  } catch (e) {
-                    console.warn(`[hostWatcher] releaseGameSlot failed for ${slotName}:`, e);
-                  }
-                }, 1000);
-              } else {
-                console.log(`[hostWatcher] ended for ${slotName}/${gameId}, owner is ${ownerId}, not releasing.`);
-              }
-            }).catch(e => {
-              console.warn('[hostWatcher] ownerRef.once failed during ended handling:', e);
-            });
-            cleanupTracker(`${slotName}/${gameId}`);
-          }
-        } catch (e) {
-          console.warn(`[hostWatcher] endedHandler error for ${trackerKey}:`, e);
+        if (snapEnded.val() === true) {
+          ownerRef.once('value').then(ownerSnap => {
+            const ownerId = ownerSnap.val();
+            if (ownerId === slotUid) {
+              setTimeout(async () => {
+                try {
+                  console.log(`[hostWatcher] owner ${slotUid} releasing slot ${slotName} game/${gameId}`);
+                  await releaseGameSlot(slotName);
+                } catch (e) {
+                  console.warn(`[hostWatcher] releaseGameSlot failed for ${slotName}:`, e);
+                }
+              }, 1000);
+            } else {
+              console.log(`[hostWatcher] ended for ${slotName}/${gameId}, owner is ${ownerId}, not releasing.`);
+            }
+          }).catch(e => {
+            console.warn('[hostWatcher] ownerRef.once failed during ended handling:', e);
+          });
+          cleanupTracker(`${slotName}/${gameId}`);
         }
       };
+
+      // Start a stale-check interval to swap owner if duration isn't updated for 3s
+      try {
+        tracker.ownerStaleInterval = setInterval(() => {
+          try {
+            // Only attempt takeover if:
+            //  - we are NOT the current owner
+            //  - we have seen a lastDurationTs
+            //  - the last update was > 3000ms ago
+            //  - there is a current owner (ownerId != null)
+            if (tracker.ownerId && tracker.ownerId !== slotUid && tracker.lastDurationTs) {
+              const ageMs = Date.now() - tracker.lastDurationTs;
+              if (ageMs > 3000) {
+                // attempt to claim IF the DB owner still matches the ownerId we saw
+                console.log(`[hostWatcher] detected stale duration (${ageMs}ms) for ${trackerKey}, attempting takeover from ${tracker.ownerId}`);
+                ownerRef.transaction(curr => (curr === tracker.ownerId ? slotUid : undefined), false)
+                  .then(result => {
+                    // transaction resolves to a snapshot in some SDKs; handle both cases gracefully
+                    try { ownerRef.onDisconnect().remove(); } catch (e) { /* ignore */ }
+                    // if transaction didn't succeed, that's fine; next tick will retry
+                  })
+                  .catch(e => console.warn(`[hostWatcher] stale takeover tx failed ${trackerKey}:`, e));
+              }
+            }
+          } catch (e) {
+            console.warn(`[hostWatcher] ownerStaleInterval error for ${trackerKey}:`, e);
+          }
+        }, 1000);
+      } catch (e) {
+        console.warn(`[hostWatcher] failed to start ownerStaleInterval for ${trackerKey}:`, e);
+      }
 
       // Attach listeners
       try {
@@ -5629,7 +5536,6 @@ async function initHostWatcherForAllSlots() {
       }
     };
 
-    // onChildRemoved handler
     const onChildRemoved = snap => {
       if (!snap) return;
       const gameId = snap.key;
@@ -5644,15 +5550,10 @@ async function initHostWatcherForAllSlots() {
       console.warn(`[hostWatcher] failed to attach root listeners for ${slotName}:`, e);
     }
 
-    // store root listeners for potential teardown (keeps parity with the existing codebase)
     if (!hostTrackers[slotName]) hostTrackers[slotName] = {};
     hostTrackers[slotName].rootListeners = { gameRootRef, onChildAdded, onChildRemoved };
-    // also store auth unsubscribe so other code (or future cleanup) can cancel it if desired
-    if (!hostTrackers[slotName]._meta) hostTrackers[slotName]._meta = {};
-    hostTrackers[slotName]._meta.authUnsubscribe = slotAuthUnsubs[slotName];
   } // end for slots
 
-  // cleanupTracker: detach handlers, clear intervals, and delete tracker entry
   function cleanupTracker(trackerKey) {
     const t = hostTrackers[trackerKey];
     if (!t) return;
@@ -5662,23 +5563,19 @@ async function initHostWatcherForAllSlots() {
         clearInterval(t.ownerInterval);
         t.ownerInterval = null;
       }
+      if (t.ownerStaleInterval) {
+        clearInterval(t.ownerStaleInterval);
+        t.ownerStaleInterval = null;
+      }
 
-      const parts = trackerKey.split('/');
-      const slotName = parts[0];
-      const gameId = parts.slice(1).join('/');
+      const [slotName, gameId] = trackerKey.split('/');
       const app = gameApps[slotName];
       if (app) {
         const db = app.database();
         const configRef = db.ref(`game/${gameId}/gameConfig`);
-        if (t.ownerHandler) {
-          try { configRef.child('owner').off('value', t.ownerHandler); } catch (e) {}
-        }
-        if (t.durationHandler) {
-          try { configRef.child('gameDuration').off('value', t.durationHandler); } catch (e) {}
-        }
-        if (t.endedHandler) {
-          try { configRef.child('ended').off('value', t.endedHandler); } catch (e) {}
-        }
+        if (t.ownerHandler) configRef.child('owner').off('value', t.ownerHandler);
+        if (t.durationHandler) configRef.child('gameDuration').off('value', t.durationHandler);
+        if (t.endedHandler) configRef.child('ended').off('value', t.endedHandler);
       }
     } catch (e) {
       console.warn("cleanupTracker error:", e);
