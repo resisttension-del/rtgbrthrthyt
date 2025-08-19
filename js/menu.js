@@ -5972,19 +5972,26 @@ async function initializeMenuDisplay() {
                     return;
                 }
 
-                if (v !== PLACEHOLDER) {
-                    if (window.Swal && typeof Swal.fire === 'function') {
-                        Swal.fire({
-                            title: 'Void.FFA Gods',
-                            text: v,
-                            icon: 'info',
-                            confirmButtonText: 'OK'
-                        });
-                    } else if (typeof Swal === 'function') {
-                        Swal('Void.FFA Gods', v, 'info');
-                    }
-                    sessionStorage.setItem('voidffa_player_alert_shown', '1');
-                }
+          if (v !== PLACEHOLDER) {
+              if (window.Swal && typeof Swal.fire === 'function') {
+                  Swal.fire({
+                      title: 'Void.FFA Gods',
+                      text: v,
+                      icon: 'info',
+                      confirmButtonText: 'OK',
+                      didOpen: () => {
+                          // Ensure it's forced to the top
+                          const swalContainer = document.querySelector('.swal2-container');
+                          if (swalContainer) swalContainer.style.zIndex = '999999';
+                      }
+                  });
+              } else if (typeof Swal === 'function') {
+                  Swal('Void.FFA Gods', v, 'info');
+                  const swalContainer = document.querySelector('.swal2-container');
+                  if (swalContainer) swalContainer.style.zIndex = '999999';
+              }
+              sessionStorage.setItem('voidffa_player_alert_shown', '1');
+          }
 
                 if (timer) clearTimeout(timer);
                 timer = setTimeout(async () => {
