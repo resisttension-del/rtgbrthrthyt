@@ -646,25 +646,13 @@ if (playerCount >= 10) {
     bodyColor: Math.floor(Math.random() * 0xffffff),
   };
 
-  // --- Write initial player to DB, but preserve originalBodyColor if already present ---
+  // --- Write initial player to DB (this should now meet the ".write": "auth.uid === $playerId" rule) ---
   try {
-    // Read originalBodyColor once to decide whether to initialize it
-    const origSnap = await playerRef.child('originalBodyColor').once('value');
-    if (origSnap.exists() && typeof origSnap.val() === 'number') {
-      // originalBodyColor already exists: update the other fields only so we don't overwrite it
-      await playerRef.update(initialPlayerState);
-      console.log("Local player state updated (originalBodyColor preserved).");
-    } else {
-      // originalBodyColor missing: initialize it to the chosen bodyColor and write all fields
-      const payload = {
-        ...initialPlayerState,
-        originalBodyColor: initialPlayerState.bodyColor
-      };
-      await playerRef.update(payload);
-      console.log("Local player created with originalBodyColor:", initialPlayerState.bodyColor);
-    }
+    await playerRef.set(initialPlayerState);
+    console.log("Local player initial state set in Firebase for slot:", activeGameSlotName);
   } catch (err) {
-    console.error("Failed to set initial player data (preserve originalBodyColor):", err);
+    console.error("Failed to set initial player data:", err);
+    // Helpful debug info for permission_denied: log error.code/message
     if (err && err.code) console.error("Firebase error code:", err.code);
     Swal.fire({
       icon: 'error',
