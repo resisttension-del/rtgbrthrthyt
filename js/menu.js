@@ -5399,6 +5399,7 @@ async function initHostWatcherForAllSlots() {
       const endedRef = configRef.child('ended');
       const trackerKey = `${slotName}/${gameId}`;
       if (hostTrackers[trackerKey]) return; // already tracking
+
       const tracker = {
         slotName,
         gameId,
@@ -5417,6 +5418,22 @@ async function initHostWatcherForAllSlots() {
       try {
         configRef.once('value', snapCfg => {
           if (!snapCfg.exists()) return;
+
+          // --- NEW: if there's no gameDuration property, mark the slot ended immediately ---
+          const hasDuration = snapCfg.child('gameDuration').exists();
+          if (!hasDuration) {
+            try {
+              console.log(`[hostWatcher] no gameDuration found for ${trackerKey}, ending slot`);
+              configRef.child('ended').set(true).catch(e => {
+                console.warn(`[hostWatcher] failed to set ended for ${trackerKey}:`, e);
+              });
+            } catch (e) {
+              console.warn(`[hostWatcher] failed to set ended for ${trackerKey}:`, e);
+            }
+            return; // nothing else to do for this tracker
+          }
+          // --- END NEW ---
+
           // if there's no owner property, attempt to claim
           ownerRef.transaction(curr => (curr === null ? slotUid : undefined), false)
             .catch(e => console.warn(`[hostWatcher] initial owner tx failed ${trackerKey}:`, e));
@@ -5464,6 +5481,20 @@ async function initHostWatcherForAllSlots() {
       // DURATION handler
       tracker.durationHandler = snapDur => {
         const val = snapDur.val();
+
+        // If duration removed / missing -> end the slot
+        if (val == null || val === '') {
+          try {
+            console.log(`[hostWatcher] gameDuration missing for ${trackerKey}, setting ended=true`);
+            endedRef.set(true).catch(e => {
+              console.warn(`[hostWatcher] failed to set ended when duration missing ${trackerKey}:`, e);
+            });
+          } catch (e) {
+            console.warn(`[hostWatcher] failed to set ended when duration missing ${trackerKey}:`, e);
+          }
+          return;
+        }
+
         if (typeof val === 'number') {
           tracker.currentRemainingSeconds = val;
           tracker.lastDurationTs = Date.now();
@@ -5509,10 +5540,8 @@ async function initHostWatcherForAllSlots() {
                 // attempt to claim IF the DB owner still matches the ownerId we saw
                 console.log(`[hostWatcher] detected stale duration (${ageMs}ms) for ${trackerKey}, attempting takeover from ${tracker.ownerId}`);
                 ownerRef.transaction(curr => (curr === tracker.ownerId ? slotUid : undefined), false)
-                  .then(result => {
-                    // transaction resolves to a snapshot in some SDKs; handle both cases gracefully
+                  .then(() => {
                     try { ownerRef.onDisconnect().remove(); } catch (e) { /* ignore */ }
-                    // if transaction didn't succeed, that's fine; next tick will retry
                   })
                   .catch(e => console.warn(`[hostWatcher] stale takeover tx failed ${trackerKey}:`, e));
               }
