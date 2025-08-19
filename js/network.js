@@ -161,66 +161,61 @@ export function startSoundListener() {
 let lastSync = 0;
 let _warnedNoUsername = false;
 let ownNodeHasUsername = false;
-
 export function sendPlayerUpdate(data) {
     const now = Date.now();
-    if (now - lastSync < 50) return; // Limit update frequency
+    if (now - lastSync < 50) return; // throttle
     lastSync = now;
 
-    // Basic network / id guards
+    // basic guards
     if (!dbRefs.playersRef || !localPlayerId) return;
-
-    // If permanently removed, don't write
     if (permanentlyRemoved && permanentlyRemoved.has(localPlayerId)) return;
 
-    // Use window-scoped cached flag/promise so we don't need to add module-level variables.
+    // lightweight window-scoped cache so we don't add module globals.
     // window.__ownNodeHasUsername: null = unknown, true/false = known
-    // window.__ownNodeHasUsernameCheckPromise: in-flight Promise for checking DB
+    // window.__ownNodeHasUsernameCheckPromise: promise in-flight
     if (typeof window.__ownNodeHasUsername === "undefined") window.__ownNodeHasUsername = null;
     if (typeof window.__ownNodeHasUsernameCheckPromise === "undefined") window.__ownNodeHasUsernameCheckPromise = null;
 
-    // If we already know the DB node does not have a username -> skip updates
+    // If we already know there's no username, skip.
     if (window.__ownNodeHasUsername === false) {
-        // optional one-time warning
         if (!window.___sendPlayerUpdate_warnedNoUsernameOnce) {
-            console.warn("Skipping sendPlayerUpdate: player node in DB has no username.");
+            console.warn("Skipping sendPlayerUpdate: player DB node currently has no username.");
             window.___sendPlayerUpdate_warnedNoUsernameOnce = true;
         }
         return;
     }
 
-    // If unknown, kick off a single check (and skip this update while checking)
+    // If unknown, do a single one-time check for the 'username' child and skip this update while checking.
     if (window.__ownNodeHasUsername === null) {
         if (!window.__ownNodeHasUsernameCheckPromise) {
             try {
-                const playerRef = dbRefs.playersRef.child(localPlayerId);
-                window.__ownNodeHasUsernameCheckPromise = playerRef.once("value")
+                const usernameRef = dbRefs.playersRef.child(localPlayerId).child("username");
+                window.__ownNodeHasUsernameCheckPromise = usernameRef.once("value")
                     .then(snap => {
-                        const val = snap && snap.val ? snap.val() : null;
-                        window.__ownNodeHasUsername = !!(val && val.username);
+                        window.__ownNodeHasUsername = !!(snap && snap.exists());
                         if (!window.__ownNodeHasUsername) {
-                            console.warn("sendPlayerUpdate check: DB node exists but no username present yet — will skip movement updates until username is added.");
+                            console.warn("sendPlayerUpdate: DB node exists but username missing — movement updates will be skipped until username is added.");
                         }
                     })
                     .catch(err => {
-                        console.error("sendPlayerUpdate: failed to read player node for username check:", err);
-                        // Be conservative and treat as "no username" to avoid writes to a bad node.
+                        console.error("sendPlayerUpdate: failed username check:", err);
+                        // be conservative and treat as no-username to avoid writing to incomplete nodes
                         window.__ownNodeHasUsername = false;
                     })
                     .finally(() => {
                         window.__ownNodeHasUsernameCheckPromise = null;
                     });
             } catch (e) {
-                console.error("sendPlayerUpdate: exception while starting username check:", e);
+                console.error("sendPlayerUpdate: exception starting username check:", e);
                 window.__ownNodeHasUsername = false;
                 window.__ownNodeHasUsernameCheckPromise = null;
             }
         }
-        // Skip this update while we determine whether username exists
+        // skip this update while the check completes
         return;
     }
 
-    // At this point window.__ownNodeHasUsername === true -> safe to update
+    // At this point window.__ownNodeHasUsername === true => safe to update
     dbRefs.playersRef.child(localPlayerId).update({
         x: data.x,
         y: data.y,
@@ -233,9 +228,9 @@ export function sendPlayerUpdate(data) {
         knifeHeavy: data.knifeHeavy
     }).catch(err => {
         console.error("Failed to send player update:", err);
-        // If we get a permission/404-style error, consider invalidating the cached flag
-        // so we re-check on next attempt:
-        // window.__ownNodeHasUsername = null;
+        // Invalidate the cached flag so we'll re-check on next attempt.
+        // This covers permission errors or unexpected failures where the node may have been removed.
+        window.__ownNodeHasUsername = null;
     });
 }
 
