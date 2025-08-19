@@ -5432,7 +5432,7 @@ async function initHostWatcherForAllSlots() {
                   });
                 }
               }).catch(e => console.warn(`[hostWatcher] failed to check gameDuration for ${trackerKey}:`, e));
-            }, 800); // wait 800ms before ending
+            }, 2000); // wait 800ms before ending
             return; // exit early; durationHandler will pick it up if it appears
           }
           // --- END NEW ---
