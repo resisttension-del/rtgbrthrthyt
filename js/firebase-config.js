@@ -390,7 +390,7 @@ export async function claimGameSlot(username, map, ffaEnabled) {
 /**
  * Release the slot by clearing /game in its own DB and marking it free in lobby.
  */
-export async function releaseGameSlot(slotName) {
+export async function releaseGameSlot(slotName, gameId = null) {
   // ensure slot app exists
   if (!gameApps[slotName]) {
     try {
@@ -412,52 +412,91 @@ export async function releaseGameSlot(slotName) {
   }
 
   const db = app.database();
-  const auth = app.auth();
 
   try {
-    // read the /game node and remove each child (gameId) under it
     const gameRootRef = db.ref("game");
-    const snap = await gameRootRef.once("value");
-    if (!snap.exists()) {
-      console.log("releaseGameSlot: nothing to remove in slot", slotName);
+
+    if (gameId) {
+      // Remove only that specific game
+      const gameRef = db.ref(`game/${gameId}`);
+      const snap = await gameRef.once("value");
+      if (!snap.exists()) {
+        console.log(`releaseGameSlot: no game/${gameId} found in slot ${slotName}`);
+      } else {
+        try {
+          await gameRef.remove();
+          console.log(`releaseGameSlot: removed game/${gameId} for slot ${slotName}`);
+        } catch (e) {
+          console.warn(`releaseGameSlot: failed to remove game/${gameId} for ${slotName}:`, e);
+        }
+      }
     } else {
-      const childRemoves = [];
-      snap.forEach(child => {
-        const gameId = child.key;
-        if (!gameId) return;
-        // remove the whole child at /game/<gameId>
-        childRemoves.push(db.ref(`game/${gameId}`).remove().catch(err => {
-          console.warn(`releaseGameSlot: failed to remove game/${gameId} for ${slotName}:`, err);
-        }));
-      });
-
-      // wait for children removal
-      await Promise.all(childRemoves);
-
-      // attempt to remove the game root itself (it will be empty most likely)
-      try {
-        await gameRootRef.remove().catch(() => {});
-      } catch (e) {}
-
-      console.log(`releaseGameSlot: cleared /game children for slot ${slotName}`);
+      // Fallback: remove every child under /game (existing behavior)
+      const snap = await gameRootRef.once("value");
+      if (!snap.exists()) {
+        console.log("releaseGameSlot: nothing to remove in slot", slotName);
+      } else {
+        const childRemoves = [];
+        snap.forEach(child => {
+          const childGameId = child.key;
+          if (!childGameId) return;
+          childRemoves.push(db.ref(`game/${childGameId}`).remove().catch(err => {
+            console.warn(`releaseGameSlot: failed to remove game/${childGameId} for ${slotName}:`, err);
+          }));
+        });
+        await Promise.all(childRemoves);
+        try { await gameRootRef.remove().catch(() => {}); } catch (e) {}
+        console.log(`releaseGameSlot: cleared /game children for slot ${slotName}`);
+      }
     }
   } catch (err) {
     console.error("releaseGameSlot failed during cleanup:", err);
   }
 
-  // Also remove any lobby entries in the menu DB that reference this slot
+  // Also remove any lobby entries in the menu DB that reference this slot/game
   if (typeof gamesRef !== "undefined" && gamesRef) {
     try {
-      const qSnap = await gamesRef.orderByChild("slot").equalTo(slotName).once("value");
+      let qSnap;
+      if (gameId) {
+        // try direct key match first
+        qSnap = await gamesRef.orderByKey().equalTo(gameId).once("value");
+      } else {
+        qSnap = await gamesRef.orderByChild("slot").equalTo(slotName).once("value");
+      }
+
       if (qSnap.exists()) {
         const removals = [];
         qSnap.forEach(child => {
-          removals.push(gamesRef.child(child.key).remove().catch(e => {
+          const childVal = child.val() || {};
+
+          // Safety checks:
+          if (gameId) {
+            // require the snapshot to match the intended gameId (either key or gameId field)
+            if (child.key !== gameId && childVal.gameId !== gameId) {
+              console.warn(`releaseGameSlot: skipping lobby entry ${child.key} - doesn't match gameId ${gameId}`, childVal);
+              return;
+            }
+            // if child has a slot field, ensure it matches
+            if (childVal.slot && childVal.slot !== slotName) {
+              console.warn(`releaseGameSlot: skipping lobby entry ${child.key} - slot mismatch ${childVal.slot} != ${slotName}`);
+              return;
+            }
+          } else {
+            // when removing all entries for a slot, enforce slot equality
+            if (childVal.slot !== slotName) {
+              console.warn(`releaseGameSlot: skipping lobby entry ${child.key} - slot mismatch ${childVal.slot} != ${slotName}`);
+              return;
+            }
+          }
+
+          // remove exactly the returned snapshot node
+          removals.push(child.ref.remove().catch(e => {
             console.warn(`releaseGameSlot: failed to remove lobby entry ${child.key}:`, e);
           }));
         });
+
         await Promise.all(removals);
-        console.log(`releaseGameSlot: removed ${qSnap.numChildren()} lobby entries for slot ${slotName}`);
+        console.log(`releaseGameSlot: pruned lobby entries for slot ${slotName}${gameId ? ` / game ${gameId}` : ''}`);
       }
     } catch (e) {
       console.warn("releaseGameSlot: could not prune menu gamesRef entries:", e);
@@ -470,6 +509,7 @@ export async function releaseGameSlot(slotName) {
       await slotsRef.child(slotName).set({
         status: "free"
       });
+      console.log(`releaseGameSlot: marked slot ${slotName} as free`);
     } catch (e) {
       console.warn("releaseGameSlot: Could not mark slot free in menu DB:", e);
     }
