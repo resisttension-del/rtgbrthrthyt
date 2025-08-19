@@ -5471,28 +5471,29 @@ async function initHostWatcherForAllSlots() {
       };
 
       // ENDED handler
-      tracker.endedHandler = snapEnded => {
-        if (snapEnded.val() === true) {
-          ownerRef.once('value').then(ownerSnap => {
-            const ownerId = ownerSnap.val();
-            if (ownerId === slotUid) {
-              setTimeout(async () => {
-                try {
-                  console.log(`[hostWatcher] owner ${slotUid} releasing slot ${slotName} game/${gameId}`);
-                  await releaseGameSlot(slotName);
-                } catch (e) {
-                  console.warn(`[hostWatcher] releaseGameSlot failed for ${slotName}:`, e);
-                }
-              }, 1000);
-            } else {
-              console.log(`[hostWatcher] ended for ${slotName}/${gameId}, owner is ${ownerId}, not releasing.`);
-            }
-          }).catch(e => {
-            console.warn('[hostWatcher] ownerRef.once failed during ended handling:', e);
-          });
-          cleanupTracker(`${slotName}/${gameId}`);
-        }
-      };
+     tracker.endedHandler = snapEnded => {
+       if (snapEnded.val() === true) {
+         ownerRef.once('value').then(ownerSnap => {
+           const ownerId = ownerSnap.val();
+           if (ownerId === slotUid) {
+             setTimeout(async () => {
+               try {
+                 console.log(`[hostWatcher] owner ${slotUid} releasing slot ${slotName} game/${gameId}`);
+                 // pass the specific gameId so releaseGameSlot only removes that game
+                 await releaseGameSlot(slotName, gameId);
+               } catch (e) {
+                 console.warn(`[hostWatcher] releaseGameSlot failed for ${slotName}/${gameId}:`, e);
+               }
+             }, 1000);
+           } else {
+             console.log(`[hostWatcher] ended for ${slotName}/${gameId}, owner is ${ownerId}, not releasing.`);
+           }
+         }).catch(e => {
+           console.warn('[hostWatcher] ownerRef.once failed during ended handling:', e);
+         });
+         cleanupTracker(`${slotName}/${gameId}`);
+       }
+     };
 
       // Start a stale-check interval to swap owner if duration isn't updated for 3s
       try {
