@@ -159,25 +159,36 @@ export function startSoundListener() {
 // --- Player Data Update Functions (from your original code) ---
 
 let lastSync = 0;
+let _warnedNoUsername = false;
+
 export function sendPlayerUpdate(data) {
     const now = Date.now();
     if (now - lastSync < 50) return; // Limit update frequency
     lastSync = now;
 
-    // don't attempt writes if we don't have a player id, or our own node is known missing,
-    // or we were marked permanently removed by the child_removed handler.
+    // Basic network / id guards
     if (!dbRefs.playersRef || !localPlayerId) return;
-    if (!ownNodeExists) {
-      // Too risky to write if we know the node is gone / listener not attached.
-      // Optionally log once for debugging:
-      // console.warn("Skipping player update: own node does not exist (no DB writes).");
+
+    // IMPORTANT: only send updates if we know the local player has a username.
+    // We prefer the in-memory local player object; fall back to checking a globally-stored value
+    // if you have one (e.g., localPlayerUsername). Adjust these lookups to match your code.
+    const username =
+      (window.localPlayer && window.localPlayer.username) ||
+      (typeof localPlayerUsername !== "undefined" ? localPlayerUsername : null);
+
+    if (!username) {
+      // skip sending updates when username not set (quietly)
+      if (!_warnedNoUsername) {
+        // optional one-time debug log; remove if you want totally silent behavior
+        console.warn("Skipping sendPlayerUpdate: local player has no username yet.");
+        _warnedNoUsername = true;
+      }
       return;
     }
-    if (permanentlyRemoved.has(localPlayerId)) {
-      // If we were explicitly removed from the game, stop sending updates.
-      // Optionally run cleanup here as well.
-      return;
-    }
+
+    // secondary guards (if you keep ownNodeExists/permanentlyRemoved logic)
+    if (typeof ownNodeExists !== "undefined" && !ownNodeExists) return;
+    if (permanentlyRemoved && permanentlyRemoved.has(localPlayerId)) return;
 
     // Safe to update
     dbRefs.playersRef.child(localPlayerId).update({
@@ -190,11 +201,7 @@ export function sendPlayerUpdate(data) {
         weapon: data.weapon,
         knifeSwing: data.knifeSwing,
         knifeHeavy: data.knifeHeavy
-    }).catch(err => {
-        console.error("Failed to send player update:", err);
-        // Consider setting ownNodeExists = false on permission errors or 404-like failures,
-        // but firebase client usually surfaces permission errors as auth issues.
-    });
+    }).catch(err => console.error("Failed to send player update:", err));
 }
 
 export function updateHealth(health) {
