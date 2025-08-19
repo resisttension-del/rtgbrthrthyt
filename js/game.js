@@ -513,63 +513,81 @@ document.getElementById("crosshair").style.display = "";
 // Hit Pulse
 
 const pendingRestore = {};
-const originalColor   = {};
+const originalColor   = {}; // local cache of originalBodyColor per player id
 
 export async function pulsePlayerHit(victimId) {
-const playerRef = playersRef.child(victimId);
-const flashColor = 0xff0000;
-const PULSE_MS   = 200;
+  const playerRef = playersRef.child(victimId);
+  const flashColor = 0xff0000;
+  const PULSE_MS   = 200;
 
-// 0) If we don't yet know their originalColor, fetch & stash it once
-if (typeof originalColor[victimId] !== 'number') {
-try {
-const snap      = await playerRef.child('bodyColor').once('value');
-const trueColor = snap.val();
-if (typeof trueColor === 'number') {
-originalColor[victimId] = trueColor;
-//  console.log(
-//    `[pulsePlayerHit] Stashed originalColor for ${victimId}: ` +
-//    `0x${trueColor.toString(16).padStart(6, '0')}`
-//   );
-} else {
-console.warn(
-`[pulsePlayerHit] Can't flash ${victimId}, bodyColor is not a number:`,
-trueColor
-);
-return;
-}
-} catch (err) {
-console.error('[pulsePlayerHit] Error reading originalColor:', err);
-return;
-}
-}
+  // 0) Ensure we have the ORIGINAL color (prefer DB field originalBodyColor, fall back to bodyColor and write the DB)
+  if (typeof originalColor[victimId] !== 'number') {
+    try {
+      const origSnap = await playerRef.child('originalBodyColor').once('value');
+      const origVal = origSnap.val();
+      if (typeof origVal === 'number') {
+        originalColor[victimId] = origVal;
+      } else {
+        // no originalBodyColor in DB — read current bodyColor and initialize originalBodyColor in DB
+        const curSnap = await playerRef.child('bodyColor').once('value');
+        const curVal = curSnap.val();
+        if (typeof curVal === 'number') {
+          originalColor[victimId] = curVal;
+          // try to persist originalBodyColor for future clients (best-effort)
+          try {
+            await playerRef.update({ originalBodyColor: curVal });
+          } catch (e) {
+            console.warn('[pulsePlayerHit] unable to write originalBodyColor to DB:', e);
+          }
+        } else {
+          console.warn(`[pulsePlayerHit] Can't flash ${victimId}, no numeric bodyColor available:`, curVal);
+          return;
+        }
+      }
+    } catch (err) {
+      console.error('[pulsePlayerHit] Error reading originalBodyColor from DB:', err);
+      return;
+    }
+  }
 
-// 1) Cancel any pending restore so we keep flashing
-if (pendingRestore[victimId]) {
-clearTimeout(pendingRestore[victimId]);
-}
+  // 1) Cancel any pending restore so repeated hits keep flashing
+  if (pendingRestore[victimId]) {
+    clearTimeout(pendingRestore[victimId]);
+  }
 
-// 2) Flash RED immediately
-//  console.log(`[pulsePlayerHit] Flashing ${victimId} RED`);
-await playerRef.update({ bodyColor: flashColor });
+  // 2) Flash RED immediately (best-effort)
+  try {
+    await playerRef.update({ bodyColor: flashColor });
+  } catch (err) {
+    console.error('[pulsePlayerHit] Error flashing RED:', err);
+  }
 
-// 3) Schedule restore back to the stashed original color
-pendingRestore[victimId] = setTimeout(async () => {
-const orig = originalColor[victimId];
-//  console.log(
-//    `[pulsePlayerHit] Restoring ${victimId} to ` +
-//    `0x${orig.toString(16).padStart(6, '0')}`
-//   );
-try {
-await playerRef.update({ bodyColor: orig });
-} catch (err) {
-console.error('[pulsePlayerHit] Error restoring color:', err);
-}
-delete pendingRestore[victimId];
-// leave originalColor in place for future hits
-}, PULSE_MS);
-}
+  // 3) Schedule restore back to the DB-stored original color after PULSE_MS
+  pendingRestore[victimId] = setTimeout(async () => {
+    const orig = originalColor[victimId];
+    if (typeof orig !== 'number') {
+      // nothing sensible to restore to
+      delete pendingRestore[victimId];
+      return;
+    }
 
+    try {
+      // read current color to avoid stomping a deliberate change
+      const curSnap = await playerRef.child('bodyColor').once('value');
+      const cur = curSnap.val();
+
+      if (cur !== orig) {
+        // restore originalBodyColor (only if current color is not already original)
+        await playerRef.update({ bodyColor: orig });
+      }
+    } catch (err) {
+      console.error('[pulsePlayerHit] Error restoring color:', err);
+    }
+
+    delete pendingRestore[victimId];
+    // keep originalColor cached for future hits
+  }, PULSE_MS);
+}
 
 
 
@@ -637,6 +655,30 @@ export async function startGame(username, mapName, initialDetailsEnabled, ffaEna
         bodyColor: Math.floor(Math.random() * 0xffffff),
         isDead: false
     };
+
+    // --- NEW: store originalBodyColor in DB (but don't overwrite it if already present) ---
+    const playerDbRef = dbRefs.playersRef.child(localPlayerId);
+    try {
+      const origSnap = await playerDbRef.child('originalBodyColor').once('value');
+      if (origSnap.exists() && typeof origSnap.val() === 'number') {
+        // database already has original; cache it locally
+        originalColor[localPlayerId] = origSnap.val();
+        // update other fields (don't touch originalBodyColor)
+        await playerDbRef.update({ ...window.localPlayer });
+      } else {
+        // write originalBodyColor the first time
+        originalColor[localPlayerId] = window.localPlayer.bodyColor;
+        await playerDbRef.update({
+          ...window.localPlayer,
+          originalBodyColor: window.localPlayer.bodyColor
+        });
+      }
+    } catch (err) {
+      console.warn('[startGame] error setting player DB fields, falling back to set():', err);
+      // fallback to set everything (risk of overwriting originalBodyColor if present)
+      await playerDbRef.set({ ...window.localPlayer, originalBodyColor: window.localPlayer.bodyColor });
+      originalColor[localPlayerId] = window.localPlayer.bodyColor;
+    }
 
     await dbRefs.playersRef.child(localPlayerId).set({
         ...window.localPlayer
@@ -2864,6 +2906,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
