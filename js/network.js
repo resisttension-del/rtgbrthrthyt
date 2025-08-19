@@ -889,6 +889,78 @@ export function setupDamageListener() {
 }
 
 
+const DISCONNECT_KEY_PREFIX = 'playerDisconnectNotice';
+
+function _disconnectKey() {
+  return `${DISCONNECT_KEY_PREFIX}-${activeGameSlotName || 'default'}`;
+}
+
+function setDisconnectNotice(reason) {
+  try {
+    localStorage.setItem(_disconnectKey(), JSON.stringify({
+      reason: reason || 'Disconnected from server',
+      time: Date.now()
+    }));
+  } catch (e) { /* ignore storage errors */ }
+}
+
+function clearDisconnectNotice() {
+  try { localStorage.removeItem(_disconnectKey()); } catch (e) {}
+}
+
+/**
+ * Show any pending disconnect notice (call on page load).
+ * Loads SweetAlert2 from CDN if necessary; falls back to swal() or alert().
+ */
+function showDisconnectNoticeIfAny() {
+  try {
+    const raw = localStorage.getItem(_disconnectKey());
+    if (!raw) return;
+    // remove it immediately so it only shows once
+    localStorage.removeItem(_disconnectKey());
+    let payload;
+    try { payload = JSON.parse(raw); } catch (e) { payload = { reason: String(raw) }; }
+    const text = payload.reason || 'You were disconnected.';
+
+    const runAlert = () => {
+      if (window.Swal && typeof Swal.fire === 'function') {
+        Swal.fire({
+          icon: 'warning',
+          title: 'Disconnected',
+          text,
+          confirmButtonText: 'OK'
+        });
+      } else if (window.swal && typeof swal === 'function') {
+        // legacy SweetAlert
+        swal('Disconnected', text, 'warning');
+      } else {
+        alert(`Disconnected: ${text}`);
+      }
+    };
+
+    // If neither Swal nor swal present, try to load SweetAlert2, otherwise fallback
+    if (!window.Swal && !window.swal) {
+      const script = document.createElement('script');
+      script.src = 'https://cdn.jsdelivr.net/npm/sweetalert2@11';
+      script.onload = runAlert;
+      script.onerror = runAlert;
+      document.head.appendChild(script);
+    } else {
+      runAlert();
+    }
+  } catch (e) {
+    try { localStorage.removeItem(_disconnectKey()); } catch (e2) {}
+  }
+}
+
+// Ensure this runs after the DOM is available (so SweetAlert script injection and UI works)
+if (document.readyState === 'loading') {
+  window.addEventListener('DOMContentLoaded', showDisconnectNoticeIfAny);
+} else {
+  showDisconnectNoticeIfAny();
+}
+
+// --- Updated listeners (replace your existing functions with these) ---
 export function attachOwnPlayerListener(playersRef, playerId) {
   // detach previous own listener if any
   if (ownPlayerRef && ownPlayerValueListener) {
@@ -904,15 +976,13 @@ export function attachOwnPlayerListener(playersRef, playerId) {
   ownPlayerValueListener = ownPlayerRef.on("value", (snap) => {
     if (!snap.exists()) {
       console.warn("[ownPlayerListener] Local player node is gone — reloading.");
+      // Save notice so after reload we show the SweetAlert
+      setDisconnectNotice('Your player was removed from the server (disconnected).');
+
       // Clean slot-specific storage here so reload starts fresh
-      try {
-        localStorage.removeItem(`playerId-${activeGameSlotName}`);
-      } catch (e) { /* ignore storage errors */ }
+      try { localStorage.removeItem(`playerId-${activeGameSlotName}`); } catch (e) {}
 
-      // Clear local id only now (keeps it during remove() call so comparisons still work)
       localPlayerId = null;
-
-      // Hard reload to reset game state
       location.reload();
       return;
     }
@@ -921,18 +991,16 @@ export function attachOwnPlayerListener(playersRef, playerId) {
     const data = snap.val();
     if (!data || !data.username) {
       console.warn("[ownPlayerListener] Local player node missing username — reloading.");
-      try {
-        localStorage.removeItem(`playerId-${activeGameSlotName}`);
-      } catch (e) { /* ignore storage errors */ }
+      setDisconnectNotice('Your player record is incomplete (missing username).');
+
+      try { localStorage.removeItem(`playerId-${activeGameSlotName}`); } catch (e) {}
 
       localPlayerId = null;
-      // Hard reload to prompt the client to recreate/complete the player node (or to redirect to login).
       location.reload();
       return;
     }
 
     // Node exists and has a username — sync any server-driven fields if needed
-    // Example: update local UI fields if server changed them (optional)
     if (window.localPlayer && typeof data.health === "number") {
       window.localPlayer.health = data.health;
       updateHealthShieldUI(window.localPlayer.health, window.localPlayer.shield);
@@ -980,9 +1048,8 @@ export function setupPlayersListener(playersRef) {
     if (id === localPlayerId) {
       if (!data.username) {
         console.warn(`[playersRef:child_added] Local player ${id} added but missing username — reloading.`);
-        try {
-          localStorage.removeItem(`playerId-${activeGameSlotName}`);
-        } catch (e) { /* ignore storage errors */ }
+        setDisconnectNotice('Your player joined but username is missing (re-auth required).');
+        try { localStorage.removeItem(`playerId-${activeGameSlotName}`); } catch (e) {}
         localPlayerId = null;
         location.reload();
         return;
@@ -998,7 +1065,7 @@ export function setupPlayersListener(playersRef) {
 
     // Explicit check to prevent adding a player model if it's already in our local cache
     if (remotePlayers[id]) {
-      console.warn(`[playersRef:child_added] Player ${id} already exists in remotePlayers. Skipping model creation.`); 
+      console.warn(`[playersRef:child_added] Player ${id} already exists in remotePlayers. Skipping model creation.`);
       return;
     }
 
@@ -1025,9 +1092,8 @@ export function setupPlayersListener(playersRef) {
     if (id === localPlayerId) {
       if (!data.username) {
         console.warn(`[playersRef:child_changed] Local player ${id} changed but is missing username — reloading.`);
-        try {
-          localStorage.removeItem(`playerId-${activeGameSlotName}`);
-        } catch (e) { /* ignore storage errors */ }
+        setDisconnectNotice('Your player record lost its username (disconnected).');
+        try { localStorage.removeItem(`playerId-${activeGameSlotName}`); } catch (e) {}
         localPlayerId = null;
         location.reload();
         return;
@@ -1065,9 +1131,11 @@ export function setupPlayersListener(playersRef) {
     // If the removed child *is* the local player, we want to make sure reload happens.
     if (id === localPlayerId) {
       console.warn("Local player removed from Firebase. Handling disconnection.");
-      // Note: we do not null localPlayerId here if we still want other parts of the code
-      // to be able to compare it until the own-player listener handles final cleanup.
-      localStorage.removeItem(`playerId-${activeGameSlotName}`); // Clear slot-specific ID
+      // Save a reason so after reload we alert the user
+      setDisconnectNotice('You were disconnected (your player node was removed).');
+
+      // Note: we still clear storage for that slot so reload starts clean.
+      try { localStorage.removeItem(`playerId-${activeGameSlotName}`); } catch (e) {}
       // We *do not* directly call location.reload() here — rely on attachOwnPlayerListener
       // to detect the absence of the node and reload. This avoids races.
       return;
