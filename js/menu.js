@@ -5422,15 +5422,18 @@ async function initHostWatcherForAllSlots() {
           // --- NEW: if there's no gameDuration property, mark the slot ended immediately ---
           const hasDuration = snapCfg.child('gameDuration').exists();
           if (!hasDuration) {
-            try {
-              console.log(`[hostWatcher] no gameDuration found for ${trackerKey}, ending slot`);
-              configRef.child('ended').set(true).catch(e => {
-                console.warn(`[hostWatcher] failed to set ended for ${trackerKey}:`, e);
-              });
-            } catch (e) {
-              console.warn(`[hostWatcher] failed to set ended for ${trackerKey}:`, e);
-            }
-            return; // nothing else to do for this tracker
+            setTimeout(() => {
+              // re-check if duration exists before ending
+              configRef.child('gameDuration').once('value').then(snapDur => {
+                if (!snapDur.exists()) {
+                  console.log(`[hostWatcher] no gameDuration found for ${trackerKey} after delay, ending slot`);
+                  endedRef.set(true).catch(e => {
+                    console.warn(`[hostWatcher] failed to set ended for ${trackerKey}:`, e);
+                  });
+                }
+              }).catch(e => console.warn(`[hostWatcher] failed to check gameDuration for ${trackerKey}:`, e));
+            }, 800); // wait 800ms before ending
+            return; // exit early; durationHandler will pick it up if it appears
           }
           // --- END NEW ---
 
