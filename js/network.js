@@ -60,7 +60,6 @@ let activeGameSlotName = null; // Stores the name of the currently claimed game 
 let playersListener = null;
 let ownPlayerValueListener = null;
 let ownPlayerRef = null; 
-let ownNodeExists = false;
 let chatListener = null;
 let killsListener = null;
 let mapStateListener = null;
@@ -159,81 +158,26 @@ export function startSoundListener() {
 // --- Player Data Update Functions (from your original code) ---
 
 let lastSync = 0;
-let _warnedNoUsername = false;
-let ownNodeHasUsername = false;
 export function sendPlayerUpdate(data) {
     const now = Date.now();
-    if (now - lastSync < 50) return; // throttle
+    if (now - lastSync < 50) return; // Limit update frequency
     lastSync = now;
-
-    // basic guards
-    if (!dbRefs.playersRef || !localPlayerId) return;
-    if (permanentlyRemoved && permanentlyRemoved.has(localPlayerId)) return;
-
-    // lightweight window-scoped cache so we don't add module globals.
-    // window.__ownNodeHasUsername: null = unknown, true/false = known
-    // window.__ownNodeHasUsernameCheckPromise: promise in-flight
-    if (typeof window.__ownNodeHasUsername === "undefined") window.__ownNodeHasUsername = null;
-    if (typeof window.__ownNodeHasUsernameCheckPromise === "undefined") window.__ownNodeHasUsernameCheckPromise = null;
-
-    // If we already know there's no username, skip.
-    if (window.__ownNodeHasUsername === false) {
-        if (!window.___sendPlayerUpdate_warnedNoUsernameOnce) {
-            console.warn("Skipping sendPlayerUpdate: player DB node currently has no username.");
-            window.___sendPlayerUpdate_warnedNoUsernameOnce = true;
-        }
-        return;
+    if (dbRefs.playersRef && localPlayerId) { // Check for playersRef from the current game slot
+        dbRefs.playersRef.child(localPlayerId).update({
+            x: data.x,
+            y: data.y,
+            z: data.z,
+            rotY: data.rotY,
+            rotX: data.rotX,
+            rotZ: data.rotZ,
+            weapon: data.weapon,
+            knifeSwing: data.knifeSwing, // Include knife animation states
+            knifeHeavy: data.knifeHeavy
+        }).catch(err => console.error("Failed to send player update:", err));
+    } else {
+        // console.warn("Attempted to send player update before network initialized or localPlayerId is null."); // Too chatty
     }
-
-    // If unknown, do a single one-time check for the 'username' child and skip this update while checking.
-    if (window.__ownNodeHasUsername === null) {
-        if (!window.__ownNodeHasUsernameCheckPromise) {
-            try {
-                const usernameRef = dbRefs.playersRef.child(localPlayerId).child("username");
-                window.__ownNodeHasUsernameCheckPromise = usernameRef.once("value")
-                    .then(snap => {
-                        window.__ownNodeHasUsername = !!(snap && snap.exists());
-                        if (!window.__ownNodeHasUsername) {
-                            console.warn("sendPlayerUpdate: DB node exists but username missing — movement updates will be skipped until username is added.");
-                        }
-                    })
-                    .catch(err => {
-                        console.error("sendPlayerUpdate: failed username check:", err);
-                        // be conservative and treat as no-username to avoid writing to incomplete nodes
-                        window.__ownNodeHasUsername = false;
-                    })
-                    .finally(() => {
-                        window.__ownNodeHasUsernameCheckPromise = null;
-                    });
-            } catch (e) {
-                console.error("sendPlayerUpdate: exception starting username check:", e);
-                window.__ownNodeHasUsername = false;
-                window.__ownNodeHasUsernameCheckPromise = null;
-            }
-        }
-        // skip this update while the check completes
-        return;
-    }
-
-    // At this point window.__ownNodeHasUsername === true => safe to update
-    dbRefs.playersRef.child(localPlayerId).update({
-        x: data.x,
-        y: data.y,
-        z: data.z,
-        rotY: data.rotY,
-        rotX: data.rotX,
-        rotZ: data.rotZ,
-        weapon: data.weapon,
-        knifeSwing: data.knifeSwing,
-        knifeHeavy: data.knifeHeavy
-    }).catch(err => {
-        console.error("Failed to send player update:", err);
-        // Invalidate the cached flag so we'll re-check on next attempt.
-        // This covers permission errors or unexpected failures where the node may have been removed.
-        window.__ownNodeHasUsername = null;
-    });
 }
-
 export function updateHealth(health) {
     if (dbRefs.playersRef && localPlayerId) {
         dbRefs.playersRef.child(localPlayerId).update({ health }).catch(err => console.error("Failed to update health:", err));
@@ -948,53 +892,46 @@ export function setupDamageListener() {
 export function attachOwnPlayerListener(playersRef, playerId) {
   // detach previous own listener if any
   if (ownPlayerRef && ownPlayerValueListener) {
-    try { ownPlayerRef.off("value", ownPlayerValueListener); } catch(e){}
+    ownPlayerRef.off("value", ownPlayerValueListener);
     ownPlayerRef = null;
     ownPlayerValueListener = null;
   }
 
-  ownNodeExists = false; // assume false until we confirm
-  if (!playerId || !playersRef) return;
+  if (!playerId) return;
 
-  // create child ref (keeps your .child usage)
+  // Make a child ref to the local player's node and listen for existence
   ownPlayerRef = playersRef.child ? playersRef.child(playerId) : playersRef.ref.child(playerId);
-
   ownPlayerValueListener = ownPlayerRef.on("value", (snap) => {
     if (!snap.exists()) {
-      // Node is gone
-      console.warn("[ownPlayerListener] Local player node no longer exists.");
-      ownNodeExists = false;
+      console.warn("[ownPlayerListener] Local player node is gone — reloading.");
+      // Clean slot-specific storage here so reload starts fresh
+      try {
+        localStorage.removeItem(`playerId-${activeGameSlotName}`);
+      } catch (e) { /* ignore storage errors */ }
 
-      // ensure slot-specific storage cleared
-      try { localStorage.removeItem(`playerId-${activeGameSlotName}`); } catch(e){}
-
-      // clear local id so other logic won't continue to rely on it
+      // Clear local id only now (keeps it during remove() call so comparisons still work)
       localPlayerId = null;
 
-      // reload to reset the client (your existing behavior)
+      // Hard reload to reset game state
       location.reload();
-      return;
-    }
-
-    // node exists
-    ownNodeExists = true;
-    const data = snap.val();
-
-    // optional: keep local fields synced from DB
-    if (window.localPlayer && typeof data.health === "number") {
-      window.localPlayer.health = data.health;
-      updateHealthShieldUI(window.localPlayer.health, window.localPlayer.shield);
+    } else {
+      // Node still exists — can optionally sync any server-driven fields if needed
+      const data = snap.val();
+      // Example: update local UI fields if server changed them (optional)
+      if (window.localPlayer && typeof data.health === "number") {
+        window.localPlayer.health = data.health;
+        updateHealthShieldUI(window.localPlayer.health, window.localPlayer.shield);
+      }
     }
   });
 }
 
 export function detachOwnPlayerListener() {
   if (ownPlayerRef && ownPlayerValueListener) {
-    try { ownPlayerRef.off("value", ownPlayerValueListener); } catch(e){}
+    ownPlayerRef.off("value", ownPlayerValueListener);
+    ownPlayerRef = null;
+    ownPlayerValueListener = null;
   }
-  ownPlayerRef = null;
-  ownPlayerValueListener = null;
-  ownNodeExists = false;
 }
 
 export function setupPlayersListener(playersRef) {
