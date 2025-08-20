@@ -127,169 +127,202 @@ function debugDistance(origin, targetPosition, markerManager, weaponController) 
 }
 
 
-function calculateDamageWithDropOff(baseDamage, distance, dropOff) {
-  // Convert dropOff object to sorted array of {d: distance, f: factor}
-  const points = Object.entries(dropOff || {})
-    .map(([k, v]) => ({ d: Number(k), f: Number(v) }))
-    .filter(p => !Number.isNaN(p.d) && !Number.isNaN(p.f))
-    .sort((a, b) => a.d - b.d);
+function calculateDamageWithDropOff(baseDamage, distance, dropOff = {}, isHead = false) {
+  // Determine if we are in the "absolute" format: dropOff.head / dropOff.body
+  let useAbsolute = false;
+  let map = dropOff || {};
 
-  if (points.length === 0) return baseDamage;
-
-  // clamp distance to >= 0
-  if (distance <= 0) return baseDamage;
-
-  // Before first defined point: interpolate between factor 1 (at 0m) and first point
-  if (distance <= points[0].d) {
-    const first = points[0];
-    const t = first.d === 0 ? 1 : (distance / first.d);
-    const factor = 1 + (first.f - 1) * t;
-    return baseDamage * factor;
+  if (dropOff && typeof dropOff === 'object' && (dropOff.head || dropOff.body)) {
+    useAbsolute = true;
+    map = isHead ? (dropOff.head || dropOff.body || {}) : (dropOff.body || dropOff.head || {});
   }
 
-  // Between defined points: find segment and interpolate
-  for (let i = 0; i < points.length - 1; i++) {
-    const a = points[i];
-    const b = points[i + 1];
-    if (distance <= b.d) {
-      const t = (distance - a.d) / (b.d - a.d);
-      const factor = a.f + (b.f - a.f) * t;
-      return baseDamage * factor;
+  // Build sorted points array from map which can be:
+  // - an array of values -> evenly spaced up to 50m (i+1)*(50/n)
+  // - an object with numeric keys -> use those distances
+  function buildPoints(m) {
+    if (Array.isArray(m)) {
+      const n = m.length;
+      if (n === 0) return [];
+      return m.map((val, i) => ({ d: (50 * (i + 1) / n), v: Number(val) }))
+              .filter(p => !Number.isNaN(p.v))
+              .sort((a, b) => a.d - b.d);
+    }
+    // object case
+    return Object.entries(m || {})
+      .map(([k, v]) => ({ d: Number(k), v: Number(v) }))
+      .filter(p => !Number.isNaN(p.d) && !Number.isNaN(p.v))
+      .sort((a, b) => a.d - b.d);
+  }
+
+  const points = buildPoints(map);
+
+  // nothing defined -> no dropoff
+  if (points.length === 0) return baseDamage;
+
+  // clamp negative distances
+  if (distance <= 0) return baseDamage;
+
+  // simple linear lerp
+  const lerp = (a, b, t) => a + (b - a) * t;
+
+  // If distance is before first point
+  if (distance <= points[0].d) {
+    const first = points[0];
+    if (useAbsolute) {
+      // return the first absolute value
+      return Math.max(0, first.v);
+    } else {
+      // interpolate between factor 1 at 0m and first factor at first.d
+      const t = first.d === 0 ? 1 : (distance / first.d);
+      const factor = lerp(1, first.v, t);
+      return Math.max(0, baseDamage * factor);
     }
   }
 
-  // Beyond last point: use last point's factor
-  return baseDamage * points[points.length - 1].f;
+  // Between points
+  for (let i = 0; i < points.length - 1; i++) {
+    const a = points[i], b = points[i + 1];
+    if (distance <= b.d) {
+      const t = (distance - a.d) / (b.d - a.d);
+      const interp = lerp(a.v, b.v, t);
+      return useAbsolute ? Math.max(0, interp) : Math.max(0, baseDamage * interp);
+    }
+  }
+
+  // Beyond last point: use last point value
+  const last = points[points.length - 1];
+  return useAbsolute ? Math.max(0, last.v) : Math.max(0, baseDamage * last.v);
 }
+
 
 export class WeaponController {
   static WEAPONS = {
-    knife: {
-      name: "Knife",
-      bodyDamage: 70,
-      isMelee: true,
-      magazineSize: Infinity,
-      swingTime: 300 / 600,
-      heavySwingTime: 300 / 600,
-      pullDuration: 300 / 600 / 2,
-      reloadDuration: null,
-      speedModifier: 1.1 - 0.1,
-      rpm: 120,
-      tracerLength: 0,
-      damageDropOff: {
-        20: 1, // Melee weapon, no damage drop-off
-        50: 1,
-      },
-    },
-    deagle: {
-      name: "Desert Eagle",
-      isMelee: false,
-      headshotDamage: 180,
-      bodyDamage: 76,
-      fireRateRPM: 125,
-      magazineSize: 8,
-      reloadDuration: 1.8,
-      pullDuration: 0.5,
-      recoilDistance: 0.08,
-      recoilDuration: 0.08,
-      tracerLength: 100,
-      speedModifier: 1 - 0.1,
-      damageDropOff: {
-        20: 0.9, // 20% damage reduction at 20 meters
-        50: 0.8, // 50% damage reduction at 50 meters
-      },
-    },
-    "ak-47": {
-      name: "AK-47",
-      isMelee: false,
-      headshotDamage: 100,
-      bodyDamage: 30,
-      fireRateRPM: 600,
-      magazineSize: 25,
-      reloadDuration: 2.5,
-      pullDuration: 0.6,
-      recoilDistance: 0.07,
-      recoilDuration: 0.06,
-      tracerLength: 100,
-      speedModifier: 0.8 - 0.1,
-      damageDropOff: {
-        20: 0.85, // 10% damage reduction
-        50: 0.7, // 30% damage reduction
-      },
-    },
-    viper: {
-      name: "Viper",
-      isMelee: false,
-      headshotDamage: 60,
-      bodyDamage: 20,
-      fireRateRPM: 800,
-      magazineSize: 35,
-      reloadDuration: 2.1,
-      pullDuration: 0.6,
-      recoilDistance: 0.07,
-      recoilDuration: 0.06,
-      tracerLength: 50,
-      speedModifier: 0.9 - 0.1,
-      damageDropOff: {
-        20: 0.8, // 30% damage reduction
-        50: 0.6, // 60% damage reduction
-      },
-    },
-    marshal: {
-      name: "Marshal",
-      isMelee: false,
-      headshotDamage: 300,
-      bodyDamage: 150,
-      fireRateRPM: 48,
-      magazineSize: 5,
-      reloadDuration: 2.8,
-      pullDuration: 48 / 60,
-      recoilDistance: 0.12,
-      recoilDuration: 0.1,
-      isSniper: true,
-      tracerLength: 100,
-      speedModifier: 0.7 - 0.1,
-      damageDropOff: {
-        20: 0.9, // Sniper rifle, no drop-off
-        50: 0.8,
-      },
-    },
-    m79: {
-      name: "M-79",
-      isMelee: false,
-      headshotDamage: 54,
-      bodyDamage: 22,
-      fireRateRPM: 405,
-      magazineSize: 12,
-      reloadDuration: 1.8,
-      pullDuration: 125 / 600 * 1.5,
-      recoilDistance: 0.08,
-      recoilDuration: 0.08,
-      speedModifier: 1 - 0.1,
-      tracerLength: 20,
-      damageDropOff: {
-        20: 0.85, // 15% damage reduction
-        50: 0.7, // 40% damage reduction
-      },
-    },
-    legion: {
-      name: "Legion",
-      isMelee: false,
-      headshotDamage: 124,
-      bodyDamage: 76,
-      fireRateRPM: 45,
-      magazineSize: 2,
-      reloadDuration: 3,
-      pullDuration: 1.33,
-      recoilDistance: 0.08,
-      recoilDuration: 0.08,
-      tracerLength: 100,
-      speedModifier: 0.9 - 0.1,
-      damageDropOff: {
-        20: 0.95, // 5% damage reduction
-        50: 0.8, // 20% damage reduction
-      },
-    },
+    knife: {
+      name: "Knife",
+      bodyDamage: 70,
+      isMelee: true,
+      magazineSize: Infinity,
+      swingTime: 300 / 600,
+      heavySwingTime: 300 / 600,
+      pullDuration: 300 / 600 / 2,
+      reloadDuration: null,
+      speedModifier: 1.1 - 0.1,
+      rpm: 120,
+      tracerLength: 0,
+      damageDropOff: {
+        body: [70]
+      },
+    },
+    deagle: {
+      name: "Desert Eagle",
+      isMelee: false,
+      headshotDamage: 180,
+      bodyDamage: 76,
+      fireRateRPM: 125,
+      magazineSize: 8,
+      reloadDuration: 1.8,
+      pullDuration: 0.5,
+      recoilDistance: 0.08,
+      recoilDuration: 0.08,
+      tracerLength: 100,
+      speedModifier: 1 - 0.1,
+      damageDropOff: {
+        head: [180, 160, 140],
+        body: [76, 66, 56]
+      },
+    },
+    "ak-47": {
+      name: "AK-47",
+      isMelee: false,
+      headshotDamage: 100,
+      bodyDamage: 30,
+      fireRateRPM: 600,
+      magazineSize: 25,
+      reloadDuration: 2.5,
+      pullDuration: 0.6,
+      recoilDistance: 0.07,
+      recoilDuration: 0.06,
+      tracerLength: 100,
+      speedModifier: 0.8 - 0.1,
+      damageDropOff: {
+        head: [100, 80, 60],
+        body: [30, 26, 22]
+      },
+    },
+    viper: {
+      name: "Viper",
+      isMelee: false,
+      headshotDamage: 60,
+      bodyDamage: 20,
+      fireRateRPM: 800,
+      magazineSize: 35,
+      reloadDuration: 2.1,
+      pullDuration: 0.6,
+      recoilDistance: 0.07,
+      recoilDuration: 0.06,
+      tracerLength: 50,
+      speedModifier: 0.9 - 0.1,
+      damageDropOff: {
+        head: [60, 50, 40],
+        body: [20, 16, 12]
+      },
+    },
+    marshal: {
+      name: "Marshal",
+      isMelee: false,
+      headshotDamage: 300,
+      bodyDamage: 150,
+      fireRateRPM: 48,
+      magazineSize: 5,
+      reloadDuration: 2.8,
+      pullDuration: 48 / 60,
+      recoilDistance: 0.12,
+      recoilDuration: 0.1,
+      isSniper: true,
+      tracerLength: 100,
+      speedModifier: 0.7 - 0.1,
+      damageDropOff: {
+        head: [300, 260, 220],
+        body: [150, 130, 120]
+      },
+    },
+    m79: {
+      name: "M-79",
+      isMelee: false,
+      headshotDamage: 54,
+      bodyDamage: 22,
+      fireRateRPM: 405,
+      magazineSize: 12,
+      reloadDuration: 1.8,
+      pullDuration: 125 / 600 * 1.5,
+      recoilDistance: 0.08,
+      recoilDuration: 0.08,
+      speedModifier: 1 - 0.1,
+      tracerLength: 20,
+      damageDropOff: {
+        head: [54, 44, 36],
+        body: [22, 18, 16]
+      },
+    },
+    legion: {
+      name: "Legion",
+      isMelee: false,
+      headshotDamage: 124,
+      bodyDamage: 76,
+      fireRateRPM: 45,
+      magazineSize: 2,
+      reloadDuration: 3,
+      pullDuration: 1.33,
+      recoilDistance: 0.08,
+      recoilDuration: 0.08,
+      tracerLength: 100,
+      speedModifier: 0.9 - 0.1,
+      damageDropOff: {
+        head: [124, 110, 100],
+        body: [76, 68, 62]
+      },
+    },
   };
 
   static SOUNDS = {
