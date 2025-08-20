@@ -4420,6 +4420,14 @@ async function createGameEntry(slotInfo, y) {
     registerListener(killsRef, 'value', killsCallback, gameId);
 }
 
+function getConsistentUsername() {
+    const username = localStorage.getItem("username");
+    if (username) {
+        return username.toLowerCase();
+    }
+    return null;
+}
+
 // --- updated gamesButtonHit: attach gamesRef-level listeners to react to deletions/changes ---
 export async function gamesButtonHit() {
     clearMenuCanvas();
@@ -4435,7 +4443,8 @@ createSearchInput();
     add(loadingText);
     currentMenuObjects.push(loadingText);
 
-    username = localStorage.getItem("username").toLowerCase();
+    const username = getConsistentUsername();
+    
     localStorage.setItem("playerVersion", CLIENT_GAME_VERSION);
     if (username) {
         await assignPlayerVersion(username, CLIENT_GAME_VERSION);
