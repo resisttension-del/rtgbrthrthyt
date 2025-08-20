@@ -10,7 +10,7 @@
  *     scene,            // THREE.Scene (optional) used for raycast intersections
  *     unitsPerMeter: 1, // game units per meter (100 for Unreal) - default 1
  *     domParent: document.body,
- *     autoListenKey: true,   // listen for 'z' automatically
+ *     autoListenKey: true,   // listen for 't' automatically
  *     defaultDistance: 1000, // fallback distance (game units) when no hit
  *   });
  *
@@ -207,11 +207,35 @@ export default class RangeMarker {
 
     // Project to NDC using THREE if available
     if (this._THREE && this._THREE.Vector3) {
-      const v = (wp.clone) ? wp.clone() : new this._THREE.Vector3(wp.x, wp.y, wp.z);
+      // get world vector for point
+      const worldPt = (wp.clone) ? wp.clone() : new this._THREE.Vector3(wp.x, wp.y, wp.z);
+
+      // project point to normalized device coordinates
+      const v = worldPt.clone();
       v.project(cam);
 
-      // hide if behind camera or offscreen
-      if (v.z < -1 || v.z > 1 || v.x < -1.1 || v.x > 1.1 || v.y < -1.1 || v.y > 1.1) {
+      // compute camera position and forward direction (world space)
+      let camPos;
+      let camForward;
+      try {
+        camPos = new this._THREE.Vector3().setFromMatrixPosition(cam.matrixWorld);
+        camForward = new this._THREE.Vector3();
+        cam.getWorldDirection(camForward); // normalized forward (points where camera looks)
+      } catch (e) {
+        // if we can't compute camera world data, hide
+        dom.style.display = 'none';
+        return;
+      }
+
+      // hide if point is actually behind the camera (use dot product on world vectors)
+      const vecToPoint = worldPt.clone().sub(camPos);
+      if (camForward.dot(vecToPoint) <= 0) {
+        dom.style.display = 'none';
+        return;
+      }
+
+      // hide if offscreen in X/Y NDC (allow a small margin)
+      if (v.x < -1.05 || v.x > 1.05 || v.y < -1.05 || v.y > 1.05) {
         dom.style.display = 'none';
         return;
       }
@@ -228,13 +252,13 @@ export default class RangeMarker {
       dom.style.top = `${sy}px`;
 
       // update distance
-      let camPos;
+      let camPosForDist;
       try {
-        camPos = new this._THREE.Vector3().setFromMatrixPosition(cam.matrixWorld);
+        camPosForDist = new this._THREE.Vector3().setFromMatrixPosition(cam.matrixWorld);
       } catch (e) {
-        camPos = { x: 0, y: 0, z: 0, distanceTo() { return 0; } };
+        camPosForDist = { x: 0, y: 0, z: 0, distanceTo() { return 0; } };
       }
-      const distUnits = camPos.distanceTo ? camPos.distanceTo(wp) : Math.hypot(camPos.x - wp.x, camPos.y - wp.y, camPos.z - wp.z);
+      const distUnits = camPosForDist.distanceTo ? camPosForDist.distanceTo(worldPt) : Math.hypot(camPosForDist.x - worldPt.x, camPosForDist.y - worldPt.y, camPosForDist.z - worldPt.z);
       const meters = distUnits / this.unitsPerMeter;
       const val = dom.querySelector('.val');
       if (val) val.textContent = meters.toFixed(2);
