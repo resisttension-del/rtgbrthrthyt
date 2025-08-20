@@ -4984,13 +4984,17 @@ async function attachShutdownListener() {
                         doImmediateReload();
                     } else {
                         // This case handles a subsequent shutdown, maybe after the server came back up and went down again
-                        await Swal.fire({
-                            title: 'Server Offline',
-                            html: `<div style="text-align:left; font-size:14px; max-width:420px;">The server has been shut down for maintenance. The page will reload now.</div>`,
-                            icon: 'info',
-                            confirmButtonText: 'OK'
-                        });
-                        location.reload();
+                         Swal.fire({
+                             title: 'Server Offline',
+                             html: `<div style="text-align:left; font-size:14px; max-width:420px;">The server has been shut down for maintenance. The page will reload now.</div>`,
+                             icon: 'info',
+                             confirmButtonText: 'OK'
+                         }).then((result) => {
+                             // This code will run AFTER the user clicks a button to close the alert
+                             if (result.isConfirmed) {
+                                 location.reload(); // <--- This line reloads the page
+                             }
+                         });
                     }
                     return;
                 }
