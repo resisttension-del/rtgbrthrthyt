@@ -83,7 +83,7 @@ menuSong.volume = 0.4;
 menuSong.loop = true;
 
 let waitSong = new Audio("https://codehs.com/uploads/64f06f691ebbcaafd7c4aaeee8d6cda9");
-waitSong.volume = 0.4;
+waitSong.volume = 0.7;
 waitSong.loop = true;
 /**
  * Sets the canvas dimensions to a fixed size (1920x1080) and updates
@@ -5899,20 +5899,11 @@ async function initializeMenuDisplay() {
         return;
     }
 
-         if (serverShutdown) {
-        console.warn("initializeMenuDisplay: aborting because server shutdown flag is set.");
-        try {
-            await Swal.fire({
-                title: 'Server Offline',
-                text: 'The server is currently offline for maintenance. Please try again later.',
-                icon: 'info',
-                confirmButtonText: 'OK'
-            });
-        } catch (e) {}
-        disableUIControls();
-        setAuthMessage("Server is temporarily offline for maintenance.", true);
-        return;
-    }
+        if (serverShutdown) {
+            console.warn("authenticateUser: blocked because server shutdown flag is set.");
+             setAuthMessage("This device is banned.", true);
+             return;
+        }
 
     // Step 1: compute & cache fingerprint up-front (store in localStorage)
     let deviceHash = null;
