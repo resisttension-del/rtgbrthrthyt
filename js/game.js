@@ -610,6 +610,11 @@ export async function startGame(username, mapName, initialDetailsEnabled, ffaEna
 
     const gameTimerElement = document.getElementById('game-timer');
 
+
+    manager = new MarkerManager(window.scene, window.camera, {
+      unitsPerMeter: 100, // example
+      checkBulletPenetration: (o,d,max) => game.checkBulletPenetration(o,d,max)
+    });
     
     // The rest of your startGame function remains the same
     initGlobalFogAndShadowParams();
@@ -2109,11 +2114,6 @@ export function animate(timestamp) {
     // even if an error occurs later in this frame.
     requestAnimationFrame(animate);
 
-    manager = new MarkerManager(window.scene, window.camera, {
-      unitsPerMeter: 100, // example
-      checkBulletPenetration: (o,d,max) => game.checkBulletPenetration(o,d,max)
-    });
-
     
     manager.update();
     // --- Disconnection/Pause Logic ---
@@ -2905,6 +2905,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
