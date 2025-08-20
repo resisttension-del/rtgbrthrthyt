@@ -143,57 +143,72 @@ function calculateDamageWithDropOff(baseDamage, distance, dropOff = {}, isHead =
   function buildPoints(m) {
     if (Array.isArray(m)) {
       const n = m.length;
-      if (n === 0) return [];
-      return m.map((val, i) => ({ d: (50 * (i + 1) / n), v: Number(val) }))
-              .filter(p => !Number.isNaN(p.v))
-              .sort((a, b) => a.d - b.d);
+      if (n === 0) return { points: [], sourceWasArray: true };
+      const pts = m
+        .map((val, i) => ({ d: (50 * (i + 1) / n), v: Number(val) }))
+        .filter(p => !Number.isNaN(p.v))
+        .sort((a, b) => a.d - b.d);
+      return { points: pts, sourceWasArray: true };
     }
     // object case
-    return Object.entries(m || {})
+    const pts = Object.entries(m || {})
       .map(([k, v]) => ({ d: Number(k), v: Number(v) }))
       .filter(p => !Number.isNaN(p.d) && !Number.isNaN(p.v))
       .sort((a, b) => a.d - b.d);
+    return { points: pts, sourceWasArray: false };
   }
 
-  const points = buildPoints(map);
+  const { points, sourceWasArray } = buildPoints(map);
 
   // nothing defined -> no dropoff
-  if (points.length === 0) return baseDamage;
+  if (!points || points.length === 0) return baseDamage;
 
   // clamp negative distances
   if (distance <= 0) return baseDamage;
 
-  // simple linear lerp
+  // simple linear lerp (used only for multiplier format)
   const lerp = (a, b, t) => a + (b - a) * t;
 
-  // If distance is before first point
-  if (distance <= points[0].d) {
-    const first = points[0];
-    if (useAbsolute) {
-      // return the first absolute value
-      return Math.max(0, first.v);
-    } else {
-      // interpolate between factor 1 at 0m and first factor at first.d
-      const t = first.d === 0 ? 1 : (distance / first.d);
-      const factor = lerp(1, first.v, t);
-      return Math.max(0, baseDamage * factor);
+  // ---------- ABSOLUTE MODE (STEP / exact meter cutoff) ----------
+  if (useAbsolute) {
+    // If distance is before or equal to first point -> return first value
+    if (distance <= points[0].d) {
+      return Math.max(0, points[0].v);
     }
+    // Find the last point whose distance <= given distance (step behavior)
+    for (let i = points.length - 1; i >= 0; i--) {
+      if (distance >= points[i].d) {
+        return Math.max(0, points[i].v);
+      }
+    }
+    // Fallback (shouldn't happen) -> return last
+    return Math.max(0, points[points.length - 1].v);
   }
 
-  // Between points
+  // ---------- MULTIPLIER / INTERPOLATION MODE ----------
+  // If distance is before first point: interpolate from factor 1 at 0m to first.v at first.d
+  if (distance <= points[0].d) {
+    const first = points[0];
+    const t = first.d === 0 ? 1 : (distance / first.d);
+    const factor = lerp(1, first.v, t);
+    return Math.max(0, baseDamage * factor);
+  }
+
+  // Between points -> interpolate multipliers
   for (let i = 0; i < points.length - 1; i++) {
     const a = points[i], b = points[i + 1];
     if (distance <= b.d) {
       const t = (distance - a.d) / (b.d - a.d);
       const interp = lerp(a.v, b.v, t);
-      return useAbsolute ? Math.max(0, interp) : Math.max(0, baseDamage * interp);
+      return Math.max(0, baseDamage * interp);
     }
   }
 
-  // Beyond last point: use last point value
+  // Beyond last point: use last point multiplier
   const last = points[points.length - 1];
-  return useAbsolute ? Math.max(0, last.v) : Math.max(0, baseDamage * last.v);
+  return Math.max(0, baseDamage * last.v);
 }
+
 
 
 export class WeaponController {
