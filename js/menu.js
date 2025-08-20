@@ -3983,7 +3983,7 @@ createBtn.addEventListener("click", async () => {
  * Uses SweetAlert2 for input and pushes game data to Firebase.
  */
 export async function createGameButtonHit() {
-    username = localStorage.getItem("username");
+        username = localStorage.getItem("username").toLowerCase();
     localStorage.setItem("playerVersion", CLIENT_GAME_VERSION);
     await assignPlayerVersion(username, CLIENT_GAME_VERSION);
 
@@ -4435,7 +4435,7 @@ createSearchInput();
     add(loadingText);
     currentMenuObjects.push(loadingText);
 
-    username = localStorage.getItem("username");
+    username = localStorage.getItem("username").toLowerCase();
     localStorage.setItem("playerVersion", CLIENT_GAME_VERSION);
     if (username) {
         await assignPlayerVersion(username, CLIENT_GAME_VERSION);
