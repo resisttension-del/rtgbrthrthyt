@@ -4993,9 +4993,8 @@ async function attachShutdownListener() {
                              icon: 'info',
                              confirmButtonText: 'OK'
                          }).then((result) => {
-                              waitSong.play();
                              if (result.isConfirmed) {
-                                  // idk
+                                 waitSong.play();
                              }
                          });
                     }
