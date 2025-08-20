@@ -112,106 +112,165 @@ function capitalize(name) {
 }
 let swingTime;
 
+function calculateDamageWithDropOff(baseDamage, distance, dropOff) {
+  // Find the closest drop-off point that is less than or equal to the current distance
+  const sortedDistances = Object.keys(dropOff).map(Number).sort((a, b) => a - b);
+  let dropOffFactor = 1;
+
+  for (let i = sortedDistances.length - 1; i >= 0; i--) {
+    const dropOffDistance = sortedDistances[i];
+    if (distance >= dropOffDistance) {
+      dropOffFactor = dropOff[dropOffDistance];
+      break;
+    }
+  }
+
+  // Linear interpolation for distances between drop-off points
+  if (dropOffFactor === 1) { // No drop off has been applied yet
+    const closestBelow = sortedDistances.find(d => distance < d);
+    const closestAbove = sortedDistances.slice().reverse().find(d => distance > d);
+
+    if (closestBelow && closestAbove) {
+      const dropOffFactorBelow = dropOff[closestBelow];
+      const dropOffFactorAbove = dropOff[closestAbove];
+
+      const range = closestBelow - closestAbove;
+      const progress = (distance - closestAbove) / range;
+      dropOffFactor = dropOffFactorAbove + (dropOffFactorBelow - dropOffFactorAbove) * progress;
+    }
+  }
+
+  return baseDamage * dropOffFactor;
+}
+
 export class WeaponController {
   static WEAPONS = {
-    knife: {
-      name: "Knife",
-      bodyDamage: 70,
-      isMelee: true,
-      magazineSize: Infinity,
-      swingTime: 300/600,
-      heavySwingTime: 300/600,
-      pullDuration: 300/600/2,
-      reloadDuration: null,
-      speedModifier: 1.1 - 0.1,
-      rpm: 120,
-      tracerLength: 0,
-    },
-    deagle: {
-      name: "Desert Eagle",
-      isMelee: false,
-      headshotDamage: 180,
-      bodyDamage: 76,
-      fireRateRPM: 125,
-      magazineSize: 8,
-      reloadDuration: 1.8,
-      pullDuration: 0.5, // 60000/125/1000 = 0.35
-      recoilDistance: 0.08,
-      recoilDuration: 0.08,
-      tracerLength: 100,
-      speedModifier: 1 - 0.1,
-    },
-    "ak-47": {
-      name: "AK-47",
-      isMelee: false,
-      headshotDamage: 100,
-      bodyDamage: 30,
-      fireRateRPM: 600,
-      magazineSize: 25,
-      reloadDuration: 2.5,
-      pullDuration: 0.6,
-      recoilDistance: 0.07,
-      recoilDuration: 0.06,
-      tracerLength: 100,
-      speedModifier: 0.8 - 0.1,
-    },
-    "viper": {
-      name: "Viper",
-      isMelee: false,
-      headshotDamage: 60,
-      bodyDamage: 20,
-      fireRateRPM: 800,
-      magazineSize: 35,
-      reloadDuration: 2.1,
-      pullDuration: 0.6,
-      recoilDistance: 0.07,
-      recoilDuration: 0.06,
-      tracerLength: 50,
-      speedModifier: 0.9 - 0.1,
-    },
-    marshal: {
-      name: "Marshal",
-      isMelee: false,
-      headshotDamage: 300,
-      bodyDamage: 150,
-      fireRateRPM: 48,
-      magazineSize: 5,
-      reloadDuration: 2.8,
-      pullDuration: 48/60,
-      recoilDistance: 0.12,
-      recoilDuration: 0.1,
-      isSniper: true,
-      tracerLength: 100,
-      speedModifier: 0.7 - 0.1,
-    },
-    m79: {
-      name: "M-79",
-      isMelee: false,
-      headshotDamage: 54,
-      bodyDamage: 22,
-      fireRateRPM: 405,
-      magazineSize: 12,
-      reloadDuration: 1.8,
-      pullDuration: 125/600*1.5,
-      recoilDistance: 0.08,
-      recoilDuration: 0.08,
-      speedModifier: 1 - 0.1,
-      tracerLength: 20,
-    },
-    legion: {
-      name: "Legion",
-      isMelee: false,
-      headshotDamage: 124,
-      bodyDamage: 76,
-      fireRateRPM: 45,
-      magazineSize: 2,
-      reloadDuration: 3,
-      pullDuration: 1.33, // 60000/45/1000
-      recoilDistance: 0.08,
-      recoilDuration: 0.08,
-      tracerLength: 100,
-      speedModifier: 0.9 - 0.1,
-    },
+    knife: {
+      name: "Knife",
+      bodyDamage: 70,
+      isMelee: true,
+      magazineSize: Infinity,
+      swingTime: 300 / 600,
+      heavySwingTime: 300 / 600,
+      pullDuration: 300 / 600 / 2,
+      reloadDuration: null,
+      speedModifier: 1.1 - 0.1,
+      rpm: 120,
+      tracerLength: 0,
+      damageDropOff: {
+        20: 1, // Melee weapon, no damage drop-off
+        50: 1,
+      },
+    },
+    deagle: {
+      name: "Desert Eagle",
+      isMelee: false,
+      headshotDamage: 180,
+      bodyDamage: 76,
+      fireRateRPM: 125,
+      magazineSize: 8,
+      reloadDuration: 1.8,
+      pullDuration: 0.5,
+      recoilDistance: 0.08,
+      recoilDuration: 0.08,
+      tracerLength: 100,
+      speedModifier: 1 - 0.1,
+      damageDropOff: {
+        20: 0.8, // 20% damage reduction at 20 meters
+        50: 0.5, // 50% damage reduction at 50 meters
+      },
+    },
+    "ak-47": {
+      name: "AK-47",
+      isMelee: false,
+      headshotDamage: 100,
+      bodyDamage: 30,
+      fireRateRPM: 600,
+      magazineSize: 25,
+      reloadDuration: 2.5,
+      pullDuration: 0.6,
+      recoilDistance: 0.07,
+      recoilDuration: 0.06,
+      tracerLength: 100,
+      speedModifier: 0.8 - 0.1,
+      damageDropOff: {
+        20: 0.9, // 10% damage reduction
+        50: 0.7, // 30% damage reduction
+      },
+    },
+    viper: {
+      name: "Viper",
+      isMelee: false,
+      headshotDamage: 60,
+      bodyDamage: 20,
+      fireRateRPM: 800,
+      magazineSize: 35,
+      reloadDuration: 2.1,
+      pullDuration: 0.6,
+      recoilDistance: 0.07,
+      recoilDuration: 0.06,
+      tracerLength: 50,
+      speedModifier: 0.9 - 0.1,
+      damageDropOff: {
+        20: 0.7, // 30% damage reduction
+        50: 0.4, // 60% damage reduction
+      },
+    },
+    marshal: {
+      name: "Marshal",
+      isMelee: false,
+      headshotDamage: 300,
+      bodyDamage: 150,
+      fireRateRPM: 48,
+      magazineSize: 5,
+      reloadDuration: 2.8,
+      pullDuration: 48 / 60,
+      recoilDistance: 0.12,
+      recoilDuration: 0.1,
+      isSniper: true,
+      tracerLength: 100,
+      speedModifier: 0.7 - 0.1,
+      damageDropOff: {
+        20: 1, // Sniper rifle, no drop-off
+        50: 1,
+      },
+    },
+    m79: {
+      name: "M-79",
+      isMelee: false,
+      headshotDamage: 54,
+      bodyDamage: 22,
+      fireRateRPM: 405,
+      magazineSize: 12,
+      reloadDuration: 1.8,
+      pullDuration: 125 / 600 * 1.5,
+      recoilDistance: 0.08,
+      recoilDuration: 0.08,
+      speedModifier: 1 - 0.1,
+      tracerLength: 20,
+      damageDropOff: {
+        20: 0.85, // 15% damage reduction
+        50: 0.6, // 40% damage reduction
+      },
+    },
+    legion: {
+      name: "Legion",
+      isMelee: false,
+      headshotDamage: 124,
+      bodyDamage: 76,
+      fireRateRPM: 45,
+      magazineSize: 2,
+      reloadDuration: 3,
+      pullDuration: 1.33,
+      recoilDistance: 0.08,
+      recoilDuration: 0.08,
+      tracerLength: 100,
+      speedModifier: 0.9 - 0.1,
+      damageDropOff: {
+        20: 0.95, // 5% damage reduction
+        50: 0.8, // 20% damage reduction
+      },
+    },
   };
 
   static SOUNDS = {
@@ -1157,17 +1216,23 @@ fireBullet(spreadAngle) {
     if (mesh && mesh.userData.playerId != null) {
       const isHead          = hit.isHead;
       const baseDamage      = isHead ? this.stats.headshotDamage : this.stats.bodyDamage;
-      // halve damage on penetration
-      const damageToApply   = baseDamage * (traj.isPenetrationShot ? 0.5 : 1.0);
-
-
       
-      
-      if (damageToApply != baseDamage) {
-          realPenetrate = true;
+      // Calculate distance to the hit point
+      const distance = origin.distanceTo(hit.intersection) / this.unitsPerMeter;
+
+      // Apply damage drop-off
+      let damageToApply = calculateDamageWithDropOff(baseDamage, distance, this.stats.damageDropOff);
+
+      // Halve damage on penetration
+      if (traj.isPenetrationShot) {
+        damageToApply *= 0.5;
+        realPenetrate = true;
       }
 
-      
+      // Ensure damage is an integer (no decimals). Use Math.round to nearest integer.
+      // Change to Math.floor or Math.ceil if you want different behavior.
+      damageToApply = Math.round(damageToApply); // <-- integer damage
+
       window.applyDamageToRemote?.(
         mesh.userData.playerId,
         damageToApply,
@@ -1181,7 +1246,7 @@ fireBullet(spreadAngle) {
       );
       realPenetrate = false;
       // play sound
-    traj.isPenetrationShot
+      traj.isPenetrationShot
         ? {} // Do nothing if it's a penetration shot
         : (isHead ? playBodyHeadshot()
                   : playBodyHit());
