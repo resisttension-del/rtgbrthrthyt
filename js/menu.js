@@ -4969,20 +4969,19 @@ async function attachShutdownListener() {
                 const val = snap.exists() ? snap.val() : false;
                 const isShutdown = !!val;
 
-                if (isFirst) {
-                    isFirst = false;
-                    serverShutdown = isShutdown;
-                        if (serverShutdown) {
-                            console.warn("attachShutdownListener: initial server shutdown detected. Disabling UI and scheduling reload.");
-                            setAuthMessage("Server is temporarily offline for maintenance.", true);
-                            disableUIControls();
-                            scheduleReloadOnce(5000);
-                        }
-                        return;
-                    }
-
-                    return;
-                }
+               if (isFirst) {
+                   isFirst = false;
+                   serverShutdown = isShutdown;
+               
+                   if (serverShutdown) {
+                       console.warn("attachShutdownListener: initial server shutdown detected. Disabling UI and scheduling reload.");
+                       setAuthMessage("Server is temporarily offline for maintenance.", true);
+                       disableUIControls();
+                       scheduleReloadOnce(5000);
+                   }
+               
+                   return;
+               }
 
                 // transition handling
                 if (isShutdown && !serverShutdown) {
