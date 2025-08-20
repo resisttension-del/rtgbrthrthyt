@@ -33,21 +33,18 @@ export default class RangeMarker {
     this.autoListenKey = (opts.autoListenKey === undefined) ? true : Boolean(opts.autoListenKey);
     this.defaultDistance = (opts.defaultDistance && Number(opts.defaultDistance) > 0) ? Number(opts.defaultDistance) : 1000;
 
-    // Accept THREE via opts (useful in some module setups) or fall back to global
     this._THREE = opts.THREE || (typeof THREE !== 'undefined' ? THREE : null);
     if (!this._THREE) {
       console.warn('RangeMarker: THREE not found; marker will be disabled.');
     }
 
-    // internal marker state
-    this._marker = null; // { dom, worldPos: Vector3, timeoutId }
+    this._marker = null;
 
     this._injectStyles();
 
     this._onKeyDown = this._onKeyDown.bind(this);
     if (this.autoListenKey) window.addEventListener('keydown', this._onKeyDown);
 
-    // internal raycaster
     if (this._THREE && this._THREE.Raycaster) {
       this._raycaster = new this._THREE.Raycaster();
       this._raycaster.near = 0.0001;
@@ -91,20 +88,11 @@ export default class RangeMarker {
     }
   }
 
-  /**
-   * Build a conservative list of candidate meshes to raycast against.
-   * We include visible Mesh/InstancedMesh objects that have geometry.
-   * This avoids hitting common non-surface objects (helpers, cameras, lights).
-   * Note: This is an internal helper and will not be used in the new logic,
-   * but is kept for compatibility.
-   */
   _collectCandidates() {
     const candidates = [];
     if (!this.scene || !this._THREE) return candidates;
     this.scene.traverse((o) => {
-      // include Mesh and InstancedMesh only, and only if visible and has geometry
       if ((o.isMesh || o.isInstancedMesh) && o.visible && o.geometry) {
-        // optional: skip explicit markers (allow user to add userData.ignoreRangeMarker = true)
         if (o.userData && o.userData.ignoreRangeMarker) return;
         candidates.push(o);
       }
@@ -112,9 +100,6 @@ export default class RangeMarker {
     return candidates;
   }
   
-  /**
-   * New logic to check for a hit against remote players, just like a bullet.
-   */
   _checkPlayerHit(origin, direction) {
     let closest = null;
     if (!window.remotePlayers) return null;
@@ -125,8 +110,6 @@ export default class RangeMarker {
       if (rp.headMesh) meshes.push(rp.headMesh);
 
       for (const mesh of meshes) {
-        // We'll skip the boundsTree check here for simplicity, assuming the raycaster
-        // can handle standard geometry. If you use a BVH, you'll need to adapt this.
         const hits = this._raycaster.intersectObject(mesh, true);
         if (!hits.length) continue;
         const hit = hits[0];
@@ -143,26 +126,21 @@ export default class RangeMarker {
     return closest;
   }
 
-  /**
-   * Place marker using camera + built-in raycast logic.
-   * This version prioritizes player hits first, then falls back to the world.
-   */
   placeMarker() {
     if (!this._THREE || !this._raycaster || !this.scene) {
       return;
     }
 
+    // CRITICAL: Ensure the camera's matrix is up-to-date before raycasting
     this.camera.updateMatrixWorld();
 
     const origin = new this._THREE.Vector3().setFromMatrixPosition(this.camera.matrixWorld);
     const direction = new this._THREE.Vector3();
     this.camera.getWorldDirection(direction);
 
-    // Set the raycaster with the camera's new origin and direction
     this._raycaster.set(origin, direction);
     this._raycaster.far = Number.isFinite(this.defaultDistance) ? this.defaultDistance : this._raycaster.far;
 
-    // First, check for a hit on a remote player
     const playerHit = this._checkPlayerHit(origin, direction);
 
     let chosen = null;
@@ -174,7 +152,6 @@ export default class RangeMarker {
       markerWorldPos = playerHit.intersection;
       distUnits = playerHit.distance;
     } else {
-      // If no player hit, check against the general scene
       const candidates = this._collectCandidates();
       if (!candidates.length) return;
 
@@ -183,7 +160,6 @@ export default class RangeMarker {
         return;
       }
 
-      // Find first valid hit
       for (let i = 0; i < hits.length; i++) {
         const h = hits[i];
         if (!h) continue;
@@ -201,17 +177,14 @@ export default class RangeMarker {
     if (!chosen) return;
     if (distUnits == null || !isFinite(distUnits)) return;
 
-    // Remove existing marker
     if (this._marker) this._clearMarkerImmediate();
 
     const meters = distUnits / this.unitsPerMeter;
 
-    // create DOM element
     const dom = document.createElement('div');
     dom.className = 'rm-marker';
     let textContent = `<span class="val">${meters.toFixed(2)}</span><span class="unit">m</span>`;
     if (playerHit) {
-      // Add a special label for player hits
       textContent += `<span> (Player Hit)</span>`;
     }
     dom.innerHTML = textContent;
@@ -223,10 +196,8 @@ export default class RangeMarker {
       timeoutId: null
     };
 
-    // auto remove after 5 seconds
     this._marker.timeoutId = setTimeout(() => this._clearMarkerImmediate(), 5000);
 
-    // position right away so it appears immediately
     this._positionMarkerDOM();
   }
 
@@ -237,11 +208,13 @@ export default class RangeMarker {
     this._marker = null;
   }
 
-  /**
-   * Call every frame so the DOM marker follows the world point and updates distance.
-   */
+  // 👇 The fix is here
   update() {
     if (!this._marker) return;
+
+    // CRITICAL: Ensure the camera's matrix is up-to-date for projection.
+    this.camera.updateMatrixWorld();
+
     this._positionMarkerDOM();
   }
 
@@ -253,37 +226,32 @@ export default class RangeMarker {
     const wp = this._marker.worldPos;
     if (!cam || !renderer || !dom || !wp || !this._THREE) return;
 
-    // Project to NDC using THREE
     const worldPt = (wp.clone) ? wp.clone() : new this._THREE.Vector3(wp.x, wp.y, wp.z);
     const v = worldPt.clone();
     v.project(cam);
 
-    // guard against invalid projections
     if (!isFinite(v.x) || !isFinite(v.y) || !isFinite(v.z)) {
       dom.style.display = 'none';
       return;
     }
 
-    // compute camera position and forward direction (world space)
     let camPos;
     let camForward;
     try {
       camPos = new this._THREE.Vector3().setFromMatrixPosition(cam.matrixWorld);
       camForward = new this._THREE.Vector3();
-      cam.getWorldDirection(camForward); // normalized forward
+      cam.getWorldDirection(camForward);
     } catch (e) {
       dom.style.display = 'none';
       return;
     }
 
-    // hide if point is behind the camera
     const vecToPoint = worldPt.clone().sub(camPos);
     if (camForward.dot(vecToPoint) <= 0) {
       dom.style.display = 'none';
       return;
     }
 
-    // hide if offscreen in X/Y NDC (allow small margin)
     if (v.x < -1.05 || v.x > 1.05 || v.y < -1.05 || v.y > 1.05) {
       dom.style.display = 'none';
       return;
@@ -300,7 +268,6 @@ export default class RangeMarker {
     dom.style.left = `${sx}px`;
     dom.style.top = `${sy}px`;
 
-    // update distance text live
     let camPosForDist;
     try {
       camPosForDist = new this._THREE.Vector3().setFromMatrixPosition(cam.matrixWorld);
