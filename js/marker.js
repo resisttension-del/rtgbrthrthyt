@@ -1,8 +1,8 @@
 /**
  * Minimal standalone range marker (self-contained raycast logic).
  *
- * This version creates a 3D THREE.Mesh that acts as a screen-space overlay,
- * always positioned in front of the camera and facing the player.
+ * This version places a 3D THREE.Mesh in the world but ensures it always
+ * rotates to face the player's camera.
  *
  * Usage:
  * import RangeMarker from './RangeMarker.js';
@@ -157,11 +157,10 @@ export default class RangeMarker {
       text += ' (PLAYER)';
     }
 
-    // Create the 3D text/mesh for the marker
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d');
     canvas.width = 512;
-    canvas.height = 128; // Increased height for longer text
+    canvas.height = 128;
     ctx.fillStyle = 'rgba(0, 0, 0, 0.72)';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     ctx.font = '64px monospace';
@@ -183,23 +182,28 @@ export default class RangeMarker {
     });
     const marker = new this._THREE.Mesh(markerGeometry, markerMaterial);
 
-    // CRITICAL: Set renderOrder and parent it to the camera
+    // Position the marker at the hit point in world space
+    marker.position.copy(hitPoint);
+
+    // Set its render order to render on top
     marker.renderOrder = 999;
     marker.onBeforeRender = (renderer) => renderer.clearDepth();
-    this.camera.add(marker);
-    
-    // Position it in front of the camera in the camera's local space
-    marker.position.set(0, 0, -5); // Position 5 units in front of the camera
+
+    // Add the marker to the scene
+    this.scene.add(marker);
 
     this._marker = marker;
     this._markerStartTime = performance.now();
   }
 
-  // The update method now handles the fading. You MUST call this every frame.
   update() {
     if (!this._marker) return;
 
-    const fadeDuration = 5000; // 5 seconds
+    // Make the marker always face the camera
+    this.camera.updateMatrixWorld();
+    this._marker.lookAt(this.camera.position);
+
+    const fadeDuration = 5000;
     const elapsed = performance.now() - this._markerStartTime;
 
     if (elapsed >= fadeDuration) {
@@ -207,7 +211,6 @@ export default class RangeMarker {
       return;
     }
 
-    // Calculate fade based on elapsed time
     const opacity = this._THREE.MathUtils.lerp(0.8, 0, elapsed / fadeDuration);
     if (this._marker.material.opacity !== opacity) {
       this._marker.material.opacity = opacity;
@@ -217,10 +220,7 @@ export default class RangeMarker {
   _clearMarkerImmediate() {
     if (!this._marker) return;
 
-    // Remove the marker from the camera's children
-    if (this._marker.parent === this.camera) {
-      this.camera.remove(this._marker);
-    } else if (this._marker.parent) {
+    if (this._marker.parent) {
       this._marker.parent.remove(this._marker);
     }
 
