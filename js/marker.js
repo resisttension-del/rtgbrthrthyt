@@ -255,28 +255,48 @@ marker.position.copy(worldPosWithOffset);
     // Make the marker always face the camera/player and ensure it's drawn on top.
     // Use world position when computing vector to camera so parent transforms won't break it.
 marker.onBeforeRender = function (renderer, scene, camera) {
-  // world position of marker
+  // world position of marker & camera
   const worldPos = new THREE.Vector3();
   this.getWorldPosition(worldPos);
 
-  // world position of camera (important: use world position, not camera.position)
   const camWorldPos = new THREE.Vector3();
-  camera.getWorldPosition(camWorldPos);
+  camera.getWorldPosition(camWorldPos); // IMPORTANT: world position, not camera.position
 
-  // Construct a rotation matrix so the marker faces the camera.
-  // Matrix4.lookAt(eye, target, up) builds a matrix that looks from `eye` to `target`.
-  // Use (worldPos, camWorldPos, up) so the plane's +Z faces the camera.
+  // optional debug: enable by setting window.__RM_DEBUG__ = true in console
+  if (window.__RM_DEBUG__) {
+    const camQuat = new THREE.Quaternion();
+    camera.getWorldQuaternion(camQuat);
+    console.log('RangeMarker debug - camWorldPos', camWorldPos, 'camQuat', camQuat.toArray());
+  }
+
+  // direction from marker -> camera (forward)
+  const toCam = new THREE.Vector3().subVectors(camWorldPos, worldPos).normalize();
+  if (!isFinite(toCam.x) || !isFinite(toCam.y) || !isFinite(toCam.z)) return;
+
+  // build orthonormal basis that keeps marker upright relative to world Y
+  const worldUp = new THREE.Vector3(0, 1, 0);
+
+  // right = up x forward  (note the order)
+  let right = new THREE.Vector3().crossVectors(worldUp, toCam);
+  if (right.lengthSq() < 1e-8) {
+    // camera mostly exactly above/below the marker: pick arbitrary right
+    right = new THREE.Vector3(1, 0, 0);
+  } else {
+    right.normalize();
+  }
+
+  // corrected up = forward x right
+  const up = new THREE.Vector3().crossVectors(toCam, right).normalize();
+
+  // create rotation matrix from basis and apply
   const m = new THREE.Matrix4();
-  m.lookAt(worldPos, camWorldPos, new THREE.Vector3(0, 1, 0));
+  m.makeBasis(right, up, toCam); // X = right, Y = up, Z = forward (toCam)
   this.quaternion.setFromRotationMatrix(m);
 
-  // Optionally remove roll so the marker remains "upright".
-  // This preserves pitch and yaw but sets roll to zero.
-  const e = new THREE.Euler().setFromQuaternion(this.quaternion, 'YXZ');
-  e.z = 0;
-  this.quaternion.setFromEuler(e);
+  // If the plane's texture is flipped/backwards, flip around Y:
+  // this.rotateY(Math.PI); // uncomment if needed
 
-  // make sure it draws on top
+  // ensure marker renders on top
   renderer.clearDepth();
 };
 
