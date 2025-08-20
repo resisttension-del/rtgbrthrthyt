@@ -2103,11 +2103,27 @@ function round2(n) {
   return Math.round(n * 100) / 100;
 }
 
+
+
+import RangeMarker from './three-range-marker-standalone.js';
+
+// somewhere after camera & renderer exist:
+const rm = new RangeMarker({
+  camera,
+  renderer,
+  getSpreadDirection,       // your function
+  checkBulletPenetration,   // your function
+  stats: { tracerLength: 2000 }, // optional
+  unitsPerMeter: 1,         // or 100 for Unreal
+});
+
+
+
 export function animate(timestamp) {
     // Schedule the next frame *first*. This ensures the loop continues
     // even if an error occurs later in this frame.
     requestAnimationFrame(animate);
-
+  rm.update();
     // --- Disconnection/Pause Logic ---
     // If localPlayerId is null, it means the local player has disconnected.
     // The game state should already be paused and UI updated by the handler
@@ -2897,6 +2913,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
