@@ -147,9 +147,7 @@ export default class RangeMarker {
         markerWorldPos = camPos.clone().add(dir.clone().multiplyScalar(this.defaultDistance));
       } else {
         markerWorldPos = {
-          x: camPos.x + (dir.x || 0) * this.defaultDistance,
-          y: camPos.y + (dir.y || 0) * this.defaultDistance,
-          z: camPos.z + (dir.z || 0) * this.defaultDistance
+            return;
         };
       }
     }
@@ -197,97 +195,77 @@ export default class RangeMarker {
     this._positionMarkerDOM();
   }
 
-_positionMarkerDOM() {
-  if (!this._marker) return;
-  const cam = this.camera;
-  const renderer = this.renderer;
-  const dom = this._marker.dom;
-  const wp = this._marker.worldPos;
-  if (!cam || !renderer || !dom || !wp) return;
+  _positionMarkerDOM() {
+    if (!this._marker) return;
+    const cam = this.camera;
+    const renderer = this.renderer;
+    const dom = this._marker.dom;
+    const wp = this._marker.worldPos;
+    if (!cam || !renderer || !dom || !wp) return;
 
-  if (this._THREE && this._THREE.Vector3) {
-    // world point
-    const worldPt = (wp.clone) ? wp.clone() : new this._THREE.Vector3(wp.x, wp.y, wp.z);
+    // Project to NDC using THREE if available
+    if (this._THREE && this._THREE.Vector3) {
+      // get world vector for point
+      const worldPt = (wp.clone) ? wp.clone() : new this._THREE.Vector3(wp.x, wp.y, wp.z);
 
-    // --- make sure camera world/inverse matrices are current ---
-    if (typeof cam.updateMatrixWorld === 'function') {
-      // keep world matrices up-to-date
-      cam.updateMatrixWorld();
-    }
-    // try to refresh camera.matrixWorldInverse in a way compatible with several three.js versions
-    try {
-      if (cam.matrixWorldInverse) {
-        if (typeof cam.matrixWorldInverse.copy === 'function' && typeof cam.matrixWorldInverse.invert === 'function') {
-          // newer three.js: copy then invert
-          cam.matrixWorldInverse.copy(cam.matrixWorld).invert();
-        } else if (typeof cam.matrixWorldInverse.getInverse === 'function') {
-          // older three.js
-          cam.matrixWorldInverse.getInverse(cam.matrixWorld);
-        }
+      // project point to normalized device coordinates
+      const v = worldPt.clone();
+      v.project(cam);
+
+      // compute camera position and forward direction (world space)
+      let camPos;
+      let camForward;
+      try {
+        camPos = new this._THREE.Vector3().setFromMatrixPosition(cam.matrixWorld);
+        camForward = new this._THREE.Vector3();
+        cam.getWorldDirection(camForward); // normalized forward (points where camera looks)
+      } catch (e) {
+        // if we can't compute camera world data, hide
+        dom.style.display = 'none';
+        return;
       }
-    } catch (e) {
-      // continue even if inverse update failed
-    }
 
-    // project to NDC
-    const v = worldPt.clone();
-    v.project(cam);
-
-    // compute camera position and forward direction (world space)
-    let camPos, camForward;
-    try {
-      camPos = new this._THREE.Vector3().setFromMatrixPosition(cam.matrixWorld);
-      camForward = new this._THREE.Vector3();
-      if (typeof cam.getWorldDirection === 'function') {
-        cam.getWorldDirection(camForward);
-      } else {
-        // fallback: forward is negative Z in camera space transformed by world matrix
-        camForward.set(0, 0, -1).applyQuaternion(cam.quaternion || cam.rotation || new this._THREE.Quaternion());
+      // hide if point is actually behind the camera (use dot product on world vectors)
+      const vecToPoint = worldPt.clone().sub(camPos);
+      if (camForward.dot(vecToPoint) <= 0) {
+        dom.style.display = 'none';
+        return;
       }
-    } catch (e) {
+
+      // hide if offscreen in X/Y NDC (allow a small margin)
+      if (v.x < -1.05 || v.x > 1.05 || v.y < -1.05 || v.y > 1.05) {
+        dom.style.display = 'none';
+        return;
+      }
+
+      const canvas = renderer.domElement;
+      const cw = canvas.clientWidth || canvas.width || window.innerWidth;
+      const ch = canvas.clientHeight || canvas.height || window.innerHeight;
+
+      const sx = (v.x * 0.5 + 0.5) * cw;
+      const sy = (-v.y * 0.5 + 0.5) * ch;
+
+      dom.style.display = '';
+      dom.style.left = `${sx}px`;
+      dom.style.top = `${sy}px`;
+
+      // update distance
+      let camPosForDist;
+      try {
+        camPosForDist = new this._THREE.Vector3().setFromMatrixPosition(cam.matrixWorld);
+      } catch (e) {
+        camPosForDist = { x: 0, y: 0, z: 0, distanceTo() { return 0; } };
+      }
+      const distUnits = camPosForDist.distanceTo ? camPosForDist.distanceTo(worldPt) : Math.hypot(camPosForDist.x - worldPt.x, camPosForDist.y - worldPt.y, camPosForDist.z - worldPt.z);
+      const meters = distUnits / this.unitsPerMeter;
+      const val = dom.querySelector('.val');
+      if (val) val.textContent = meters.toFixed(2);
+
+    } else {
+      // no THREE available — hide marker (can't project)
       dom.style.display = 'none';
-      return;
     }
-
-    // hide if actually behind camera (world-space dot product)
-    const vecToPoint = worldPt.clone().sub(camPos);
-    if (camForward.dot(vecToPoint) <= 0) {
-      dom.style.display = 'none';
-      return;
-    }
-
-    // hide if offscreen in X/Y NDC (small margin)
-    if (v.x < -1.05 || v.x > 1.05 || v.y < -1.05 || v.y > 1.05) {
-      dom.style.display = 'none';
-      return;
-    }
-
-    // Use canvas bounding rect for precise mapping (handles CSS scaling/offsets)
-    const canvas = renderer.domElement;
-    const rect = canvas.getBoundingClientRect();
-    const sx = rect.left + (v.x * 0.5 + 0.5) * rect.width + window.scrollX;
-    const sy = rect.top  + (-v.y * 0.5 + 0.5) * rect.height + window.scrollY;
-
-    dom.style.display = '';
-    dom.style.left = `${Math.round(sx)}px`;
-    dom.style.top  = `${Math.round(sy)}px`;
-
-    // update distance text
-    let camPosForDist;
-    try {
-      camPosForDist = new this._THREE.Vector3().setFromMatrixPosition(cam.matrixWorld);
-    } catch (e) {
-      camPosForDist = { x: 0, y: 0, z: 0, distanceTo() { return 0; } };
-    }
-    const distUnits = camPosForDist.distanceTo ? camPosForDist.distanceTo(worldPt) : Math.hypot(camPosForDist.x - worldPt.x, camPosForDist.y - worldPt.y, camPosForDist.z - worldPt.z);
-    const meters = distUnits / this.unitsPerMeter;
-    const val = dom.querySelector('.val');
-    if (val) val.textContent = meters.toFixed(2);
-
-  } else {
-    dom.style.display = 'none';
   }
-}
 
   dispose() {
     if (this.autoListenKey) window.removeEventListener('keydown', this._onKeyDown);
