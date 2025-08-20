@@ -4972,21 +4972,39 @@ async function attachShutdownListener() {
                 if (isFirst) {
                     isFirst = false;
                     serverShutdown = isShutdown;
-                    if (serverShutdown) {
-                        console.warn("attachShutdownListener: initial server shutdown detected. Disabling UI and reloading now.");
-                        setAuthMessage("Server is temporarily offline for maintenance.", true);
-                        disableUIControls();
-                          location.reload();
-                        try {
-                            await Swal.fire({
-                                title: 'Server Offline',
-                                html: `<div style="text-align:left; font-size:14px; max-width:420px;">The server is currently shut down for maintenance. You cannot start games or sign in right now. The page will reload automatically when the server is back online.</div>`,
-                                icon: 'info',
-                                confirmButtonText: 'OK'
-                            });
-                        } catch (e) { console.warn("attachShutdownListener: Swal modal failed:", e); }
-                        doImmediateReload();
-                    }
+if (serverShutdown) {
+  console.warn("attachShutdownListener: initial server shutdown detected. Disabling UI and reloading now.");
+  setAuthMessage("Server is temporarily offline for maintenance.", true);
+  disableUIControls();
+
+  // schedule reload *before* the SweetAlert (2 seconds)
+  if (reloadTimer) clearTimeout(reloadTimer);
+  reloadTimer = setTimeout(() => {
+    try {
+      window.location.reload();
+    } catch (e) {
+      try { window.location.href = window.location.href; } catch (err) { console.error("reload fallback failed", err); }
+    }
+  }, 2000);
+
+  try {
+    await Swal.fire({
+      title: 'Server Offline',
+      html: `<div style="text-align:left; font-size:14px; max-width:420px;">The server is currently shut down for maintenance. You cannot start games or sign in right now. The page will reload automatically when the server is back online.</div>`,
+      icon: 'info',
+      confirmButtonText: 'OK'
+    });
+  } catch (e) {
+    console.warn("attachShutdownListener: Swal modal failed:", e);
+  } finally {
+    // If the modal was acted on before the timer fired, cancel the scheduled reload.
+    // If the reload already happened, this code won't run because the page was reloaded.
+    if (reloadTimer) {
+      clearTimeout(reloadTimer);
+      reloadTimer = null;
+    }
+  }
+}
                     return;
                 }
 
