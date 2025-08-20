@@ -308,22 +308,49 @@ export async function claimGameSlot(username, map, ffaEnabled) {
     };
 
     // Transaction on /game root: only insert { [gameId]: gameData } if /game is empty
+    // OR all existing children are "stale" (gameConfig.ended === true OR no gameDuration).
     try {
       const slotGameRef = db.ref('game');
       const txResult = await slotGameRef.transaction(current => {
         // free if null or empty object
         if (current === null || (typeof current === "object" && Object.keys(current).length === 0)) {
-          // create a child under /game with our chosen gameId
           const obj = {};
           obj[gameId] = gameData;
           return obj;
         }
-        // already occupied -> abort
+
+        // If there's existing child(ren), check if they are stale:
+        // stale if gameConfig.ended === true OR no gameDuration present.
+        // Only permit overwrite if EVERY child is stale.
+        if (typeof current === "object") {
+          const entries = Object.entries(current);
+          let allStale = true;
+          for (const [, child] of entries) {
+            // child may be null/primitive, guard with optional chaining
+            const cfg = child && child.gameConfig;
+            const ended = cfg?.ended === true;
+            const noDuration = cfg == null || cfg.gameDuration == null;
+            if (!(ended || noDuration)) {
+              // this child is still active -> cannot claim
+              allStale = false;
+              break;
+            }
+          }
+
+          if (allStale) {
+            // replace the whole /game with our new game object
+            const obj = {};
+            obj[gameId] = gameData;
+            return obj;
+          }
+        }
+
+        // already occupied by an active game -> abort
         return;
       }, /* applyLocally */ false);
 
       if (!txResult.committed) {
-        console.info(`[claimGameSlot] ${slotName} already taken (slot /game non-empty).`);
+        console.info(`[claimGameSlot] ${slotName} already taken (slot /game non-empty and active).`);
         continue; // try next slot
       }
 
