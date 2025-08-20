@@ -58,33 +58,90 @@ constructor(scene, camera, options = {}) {
 createMarkerFromCamera() {
   if (!this.camera) return;
   try {
-    // origin & direction
+    // ensure matrices are up-to-date
     this.camera.updateMatrixWorld();
+    if (this.scene) this.scene.updateMatrixWorld(true);
+
     const origin = new THREE.Vector3().setFromMatrixPosition(this.camera.matrixWorld);
     const direction = new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion).normalize();
 
-    // reinforce camera
+    // Optional: use setFromCamera to target the screen center (safe)
+    // const ndc = new THREE.Vector2(0, 0); // center of screen
+    // this._ray.setFromCamera(ndc, this.camera);
+
+    // Use manual set (keeps your origin/direction)
     const ray = this._ray;
     ray.camera = this.camera;
     ray.set(origin, direction);
+    ray.near = 0.01;
+    ray.far = this.maxRange;
 
+    // Visualize ray in scene for debugging (line + arrow)
+    (function drawDebugRay(scene, origin, dir, len = 10) {
+      const points = [origin.clone(), origin.clone().add(dir.clone().multiplyScalar(len))];
+      const geom = new THREE.BufferGeometry().setFromPoints(points);
+      const mat = new THREE.LineBasicMaterial({ linewidth: 2 });
+      const line = new THREE.Line(geom, mat);
+      line.name = "__marker_debug_line";
+      scene.add(line);
+      const arrow = new THREE.ArrowHelper(dir.clone(), origin.clone(), len, 0xff0000);
+      arrow.name = "__marker_debug_arrow";
+      scene.add(arrow);
+      setTimeout(() => {
+        scene.remove(line); line.geometry.dispose(); line.material.dispose();
+        scene.remove(arrow);
+      }, 3000);
+    })(this.scene, origin, direction, Math.min(this.maxRange, 200));
+
+    // build candidate list
     let candidates = [];
     if (this.playerObjects && this.playerObjects.length) candidates = candidates.concat(this.playerObjects);
     if (this.worldObjects && this.worldObjects.length) candidates = candidates.concat(this.worldObjects);
+    if (!candidates.length) candidates = this.scene.children.slice();
 
-    if (!candidates.length) candidates = this.scene.children;
+    console.log("[MarkerManager DEBUG] origin:", origin, "dir:", direction, "candidates:", candidates.length);
 
+    // Per-candidate debug (helps find objects that are not raycastable or have no geometry)
+    for (let i = 0; i < candidates.length; i++) {
+      const o = candidates[i];
+      // attempt to print name/type/visibility/geometry info
+      let info = {
+        idx: i,
+        id: o.id,
+        name: o.name || "(noname)",
+        type: o.type,
+        visible: !!o.visible,
+        hasGeometry: !!(o.geometry),
+        isInstancedMesh: (o.isInstancedMesh === true)
+      };
+      console.log("[MarkerManager DEBUG] candidate:", info);
+
+      // ensure its world matrix is updated
+      o.updateMatrixWorld && o.updateMatrixWorld(true);
+
+      // do an intersect check just for this object (recurses into children)
+      try {
+        const r = ray.intersectObject(o, true);
+        if (r && r.length) {
+          console.log(`[MarkerManager DEBUG] intersected candidate[${i}]`, info.name, "hits:", r.length, "first:", r[0]);
+        }
+      } catch (err) {
+        console.warn("[MarkerManager DEBUG] intersectObject threw for candidate", info, err);
+      }
+    }
+
+    // full intersect against all candidates
     const hits = ray.intersectObjects(candidates, true);
     if (hits && hits.length) {
       const hit = hits[0];
-      const point = hit.point.clone();
-      console.log("[MarkerManager] ray hit:", hit.object.name || hit.object.id, "pos:", point);
-      this.createMarkerAt(point);
+      console.log("[MarkerManager] ray hit:", hit.object.name || hit.object.type || hit.object.id, hit.point);
+      this.createMarkerAt(hit.point.clone());
+      return;
     } else {
-      // no hit, place at maxRange along direction for feedback
       const fallback = origin.clone().add(direction.clone().multiplyScalar(this.maxRange));
       console.log("[MarkerManager] no hit, placing fallback at", fallback);
       this.createMarkerAt(fallback);
+      return;
     }
   } catch (err) {
     console.error("MarkerManager.createMarkerFromCamera threw:", err);
