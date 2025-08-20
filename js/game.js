@@ -177,21 +177,15 @@ function destroyFog() {
 window.scene.fog = null;
 }
 
-function ensureRM() {
-  if (!rm && window.camera && window.renderer) {
-    rm = new RangeMarker({
-      camera: window.camera,
-      renderer: window.renderer,
-      scene:  window.scene,
-      unitsPerMeter: 1,
-      defaultDistance: 2000,
-        THREE,
-    });
-    // optional: attach to window so other modules see it
-    window.rm = rm;
-  }
-}
-
+const rm = new RangeMarker({
+  camera,
+  renderer,
+  scene,
+  THREE,
+  unitsPerMeter: 1,      // depends on your unit convention
+  markerDuration: 10000, // ms, 0 = persistent
+  autoListenKey: true    // listens for 't' key to place marker
+});
 
 function enableShadows() {
 if (!dirLight) {
@@ -2125,8 +2119,6 @@ export function animate(timestamp) {
     // Schedule the next frame *first*. This ensures the loop continues
     // even if an error occurs later in this frame.
     requestAnimationFrame(animate);
-      ensureRM();
-    rm.update();
     // --- Disconnection/Pause Logic ---
     // If localPlayerId is null, it means the local player has disconnected.
     // The game state should already be paused and UI updated by the handler
@@ -2916,6 +2908,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
