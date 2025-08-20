@@ -82,6 +82,9 @@ let menuSong = new Audio("https://codehs.com/uploads/7ab8d31b9bb147e3952841963f6
 menuSong.volume = 0.4;
 menuSong.loop = true;
 
+let waitSong = new Audio("https://codehs.com/uploads/7ab8d31b9bb147e3952841963f6f3769");
+waitSong.volume = 0.4;
+waitSong.loop = true;
 /**
  * Sets the canvas dimensions to a fixed size (1920x1080) and updates
  * the global canvasWidth and canvasHeight variables.
@@ -4983,6 +4986,7 @@ async function attachShutdownListener() {
                     if (!sessionStorage.getItem(RELOAD_FLAG)) {
                         doImmediateReload();
                     } else {
+                         waitSong.play();
                         // This case handles a subsequent shutdown, maybe after the server came back up and went down again
                          Swal.fire({
                              title: 'Server Offline',
