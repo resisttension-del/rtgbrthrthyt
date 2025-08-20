@@ -3,9 +3,24 @@
 import * as THREE from "https://cdnjs.cloudflare.com/ajax/libs/three.js/0.152.0/three.module.js";
 
 
+// marker.js
+// Exportable MarkerManager for Three.js
+// Requirements: THREE is available globally or imported.
 
 export class MarkerManager {
-
+  /**
+   * scene - THREE.Scene
+   * camera - THREE.Camera (player camera)
+   * options:
+   *  - unitsPerMeter: number (how many world-units == 1 meter). Default 1 (i.e. 1 unit = 1 meter).
+   *      NOTE: If your world uses centimeters, set unitsPerMeter = 100.
+   *  - lifetimeMs: marker lifetime in ms (default 10000)
+   *  - maxRange: raycast max range in world units (default 2000)
+   *  - worldObjects: array of meshes to raycast against (optional)
+   *  - playerObjects: array of meshes representing players (optional)
+   *  - checkBulletPenetration: optional function(origin, direction, maxPen) -> result
+   *        (If provided it will be used in preference to raw raycast for better parity with your shooting code.)
+   */
   constructor(scene, camera, options = {}) {
     this.scene = scene;
     this.camera = camera;
