@@ -177,7 +177,19 @@ function destroyFog() {
 window.scene.fog = null;
 }
 
-
+function ensureRM() {
+  if (!rm && window.camera && window.renderer) {
+    rm = new RangeMarker({
+      camera: window.camera,
+      renderer: window.renderer,
+      scene:  window.scene,
+      unitsPerMeter: 1,
+      defaultDistance: 2000,
+    });
+    // optional: attach to window so other modules see it
+    window.rm = rm;
+  }
+}
 
 
 function enableShadows() {
@@ -2120,6 +2132,7 @@ export function animate(timestamp) {
     // Schedule the next frame *first*. This ensures the loop continues
     // even if an error occurs later in this frame.
     requestAnimationFrame(animate);
+      ensureRM();
     rm.update();
     // --- Disconnection/Pause Logic ---
     // If localPlayerId is null, it means the local player has disconnected.
