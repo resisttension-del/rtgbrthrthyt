@@ -53,58 +53,39 @@ export class MarkerManager {
    * Create a marker where the camera is pointing.
    * If your project has a penetration-aware raycast function, pass it to the constructor as checkBulletPenetration
    */
-  createMarkerFromCamera() {
-    if (!this.camera) return;
+createMarkerFromCamera() {
+  if (!this.camera) return;
 
-    // origin & direction
-    this.camera.updateMatrixWorld();
-    const origin = new THREE.Vector3().setFromMatrixPosition(this.camera.matrixWorld);
-    const direction = new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion).normalize();
+  // origin & direction
+  this.camera.updateMatrixWorld();
+  const origin = new THREE.Vector3().setFromMatrixPosition(this.camera.matrixWorld);
+  const direction = new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion).normalize();
 
-    // If user provided a bullet-penetration function (their existing code), use it:
-    if (typeof this.checkBulletPenetration === "function") {
-      try {
-        // ask for 0 penetrations so we just find the first hit (keep parity with their code)
-        const traj = this.checkBulletPenetration(origin, direction, 0);
-        if (traj.playerHitResult) {
-          const p = traj.playerHitResult.intersection.clone();
-          this.createMarkerAt(p);
-          return;
-        } else if (traj.allWorldHits && traj.allWorldHits.length) {
-          const p = traj.allWorldHits[traj.allWorldHits.length - 1].point.clone();
-          this.createMarkerAt(p);
-          return;
-        }
-        // fallthrough to broad raycast (in case checkBulletPenetration returned nothing)
-      } catch (err) {
-        console.warn("checkBulletPenetration threw:", err);
-      }
-    }
+  // simple raycast fallback (we removed the checkBulletPenetration code)
+  const ray = this._ray;
+  ray.camera = this.camera; // reinforce current camera (safe)
+  ray.set(origin, direction);
 
-    // Fallback: basic raycast against provided worldObjects/playerObjects or entire scene
-    const ray = this._ray;
-    ray.set(origin, direction);
+  let candidates = [];
+  if (this.playerObjects && this.playerObjects.length) candidates = candidates.concat(this.playerObjects);
+  if (this.worldObjects && this.worldObjects.length) candidates = candidates.concat(this.worldObjects);
 
-    let candidates = [];
-    if (this.playerObjects && this.playerObjects.length) candidates = candidates.concat(this.playerObjects);
-    if (this.worldObjects && this.worldObjects.length) candidates = candidates.concat(this.worldObjects);
-
-    // If no candidates were supplied, raycast against scene.children (not ideal for huge scenes).
-    if (!candidates.length) {
-      candidates = this.scene.children;
-    }
-
-    const hits = ray.intersectObjects(candidates, true);
-    if (hits && hits.length) {
-      const hit = hits[0];
-      const point = hit.point.clone();
-      this.createMarkerAt(point);
-    } else {
-      // no hit, place at maxRange along direction for feedback
-      const fallback = origin.clone().add(direction.clone().multiplyScalar(this.maxRange));
-      this.createMarkerAt(fallback);
-    }
+  // If no candidates were supplied, raycast against scene.children (not ideal for huge scenes).
+  if (!candidates.length) {
+    candidates = this.scene.children;
   }
+
+  const hits = ray.intersectObjects(candidates, true);
+  if (hits && hits.length) {
+    const hit = hits[0];
+    const point = hit.point.clone();
+    this.createMarkerAt(point);
+  } else {
+    // no hit, place at maxRange along direction for feedback
+    const fallback = origin.clone().add(direction.clone().multiplyScalar(this.maxRange));
+    this.createMarkerAt(fallback);
+  }
+}
 
   /**
    * createMarkerAt(position: THREE.Vector3)
