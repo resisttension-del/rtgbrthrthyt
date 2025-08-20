@@ -1,43 +1,29 @@
 // marker.js
-// Exportable MarkerManager for Three.js
-// Requirements: THREE is available globally or imported.
+
 import * as THREE from "https://cdnjs.cloudflare.com/ajax/libs/three.js/0.152.0/three.module.js";
 
+
+
 export class MarkerManager {
-  /**
-   * scene - THREE.Scene
-   * camera - THREE.Camera (player camera)
-   * options:
-   *  - unitsPerMeter: number (how many world-units == 1 meter). Default 1 (i.e. 1 unit = 1 meter).
-   *      NOTE: If your world uses centimeters, set unitsPerMeter = 100.
-   *  - lifetimeMs: marker lifetime in ms (default 10000)
-   *  - maxRange: raycast max range in world units (default 2000)
-   *  - worldObjects: array of meshes to raycast against (optional)
-   *  - playerObjects: array of meshes representing players (optional)
-   *  - checkBulletPenetration: optional function(origin, direction, maxPen) -> result
-   *        (If provided it will be used in preference to raw raycast for better parity with your shooting code.)
-   */
-constructor(scene, camera, options = {}) {
-  this.scene = scene;
-  this.camera = camera;
-  this.unitsPerMeter = options.unitsPerMeter ?? 1;
-  this.lifetimeMs = options.lifetimeMs ?? 10000;
-  this.maxRange = options.maxRange ?? 2000;
-  this.worldObjects = options.worldObjects ?? null;
-  this.playerObjects = options.playerObjects ?? null;
-  this.checkBulletPenetration = options.checkBulletPenetration ?? null;
 
-  this._ray = new THREE.Raycaster();
-  // ensure ray has camera set initially and again before each cast
-  this._ray.camera = this.camera;
-  this._markers = new Set();
+  constructor(scene, camera, options = {}) {
+    this.scene = scene;
+    this.camera = camera;
+    this.unitsPerMeter = options.unitsPerMeter ?? 1;
+    this.lifetimeMs = options.lifetimeMs ?? 10000;
+    this.maxRange = options.maxRange ?? 2000;
+    this.worldObjects = options.worldObjects ?? null;
+    this.playerObjects = options.playerObjects ?? null;
+    this.checkBulletPenetration = options.checkBulletPenetration ?? null;
 
-  // bind handlers
-  this._onKey = this._onKey.bind(this);
+    this._ray = new THREE.Raycaster();
+    this._markers = new Set();
 
-  // prefer document for key events (more reliable with canvas/pointerlock)
-  document.addEventListener("keydown", this._onKey);
-}
+    // bind handlers
+    this._onKey = this._onKey.bind(this);
+
+    window.addEventListener("keydown", this._onKey);
+  }
 
   dispose() {
     window.removeEventListener("keydown", this._onKey);
@@ -55,141 +41,101 @@ constructor(scene, camera, options = {}) {
    * Create a marker where the camera is pointing.
    * If your project has a penetration-aware raycast function, pass it to the constructor as checkBulletPenetration
    */
-createMarkerFromCamera() {
-  if (!this.camera) return;
-  try {
-    // keep matrices fresh
-    this.camera.updateMatrixWorld();
-    if (this.scene) this.scene.updateMatrixWorld(true);
+  createMarkerFromCamera() {
+    if (!this.camera) return;
 
+    // origin & direction
+    this.camera.updateMatrixWorld();
     const origin = new THREE.Vector3().setFromMatrixPosition(this.camera.matrixWorld);
     const direction = new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion).normalize();
 
-    // prefer setFromCamera for screen-center accuracy (uncomment if desired)
-    // this._ray.setFromCamera(new THREE.Vector2(0, 0), this.camera);
+    // If user provided a bullet-penetration function (their existing code), use it:
+    if (typeof this.checkBulletPenetration === "function") {
+      try {
+        // ask for 0 penetrations so we just find the first hit (keep parity with their code)
+        const traj = this.checkBulletPenetration(origin, direction, 0);
+        if (traj.playerHitResult) {
+          const p = traj.playerHitResult.intersection.clone();
+          this.createMarkerAt(p);
+          return;
+        } else if (traj.allWorldHits && traj.allWorldHits.length) {
+          const p = traj.allWorldHits[traj.allWorldHits.length - 1].point.clone();
+          this.createMarkerAt(p);
+          return;
+        }
+        // fallthrough to broad raycast (in case checkBulletPenetration returned nothing)
+      } catch (err) {
+        console.warn("checkBulletPenetration threw:", err);
+      }
+    }
 
+    // Fallback: basic raycast against provided worldObjects/playerObjects or entire scene
     const ray = this._ray;
-    ray.camera = this.camera;
     ray.set(origin, direction);
-    ray.near = 0.01;
-    ray.far = this.maxRange;
 
-    // --- debug visuals: keep them separate so they won't be included in candidates ---
-    if (!this._debugGroup) {
-      this._debugGroup = new THREE.Group();
-      this._debugGroup.name = "__marker_debug_group";
-      // do not include debug group in worldObjects; it's purely scene-helper
-      this.scene.add(this._debugGroup);
-    }
-    // clear previous debug children
-    while (this._debugGroup.children.length) {
-      const c = this._debugGroup.children.pop();
-      c.geometry && c.geometry.dispose && c.geometry.dispose();
-      c.material && c.material.dispose && c.material.dispose();
-    }
-    // add a short debug line+arrow (not part of scene.children root)
-    const dbgLen = Math.min(this.maxRange, 200);
-    const pts = [origin.clone(), origin.clone().add(direction.clone().multiplyScalar(dbgLen))];
-    const geom = new THREE.BufferGeometry().setFromPoints(pts);
-    const lineMat = new THREE.LineBasicMaterial({ linewidth: 2 });
-    const line = new THREE.Line(geom, lineMat);
-    line.name = "__marker_debug_line";
-    this._debugGroup.add(line);
-    const arrow = new THREE.ArrowHelper(direction.clone(), origin.clone(), dbgLen, 0xff0000);
-    arrow.name = "__marker_debug_arrow";
-    this._debugGroup.add(arrow);
-    // auto-remove after 3s
-    setTimeout(() => {
-      if (!this._debugGroup) return;
-      this._debugGroup.remove(line);
-      this._debugGroup.remove(arrow);
-      geom.dispose(); lineMat.dispose();
-    }, 3000);
-
-    // build candidate list (prefer explicit arrays if supplied)
     let candidates = [];
     if (this.playerObjects && this.playerObjects.length) candidates = candidates.concat(this.playerObjects);
     if (this.worldObjects && this.worldObjects.length) candidates = candidates.concat(this.worldObjects);
-    if (!candidates.length) candidates = this.scene.children.slice();
 
-    // filter out debug group + non-raycastable objects
-    const isDebug = (o) => (o.name && o.name.startsWith("__marker_debug")) || (o === this._debugGroup);
-    const hasRaycast = (o) => (typeof o.raycast === "function") || o.isMesh || o.isInstancedMesh || o.isSkinnedMesh;
-    // Also include parents that contain meshes by counting children meshes (helpful for Group)
-    const childMeshCount = (o) => {
-      let c = 0;
-      o.traverse && o.traverse((n) => { if (n.isMesh) c++; });
-      return c;
-    };
+    // If no candidates were supplied, raycast against scene.children (not ideal for huge scenes).
+    if (!candidates.length) {
+      candidates = this.scene.children;
+    }
 
-    const filtered = candidates.filter(o => {
-      if (!o) return false;
-      if (isDebug(o)) return false;
-      if (o.visible === false) return false;
-      if (hasRaycast(o)) return true;
-      // allow groups that actually contain meshes
-      return childMeshCount(o) > 0;
-    });
-
-    console.log("[MarkerManager DEBUG] original candidates:", candidates.length, "filtered:", filtered.length);
-    // optional: log candidate mesh counts for quick inspection
-    filtered.forEach((o, i) => {
-      console.log(`[MarkerManager DEBUG] candidate[${i}] type=${o.type} name=${o.name||'(noname)'} meshes=${childMeshCount(o)}`);
-    });
-
-    // now intersect only against filtered list
-    const hits = ray.intersectObjects(filtered, true);
+    const hits = ray.intersectObjects(candidates, true);
     if (hits && hits.length) {
       const hit = hits[0];
-      console.log("[MarkerManager] ray hit:", hit.object.name || hit.object.type || hit.object.id, hit.point);
-      this.createMarkerAt(hit.point.clone());
-      return;
+      const point = hit.point.clone();
+      this.createMarkerAt(point);
     } else {
+      // no hit, place at maxRange along direction for feedback
       const fallback = origin.clone().add(direction.clone().multiplyScalar(this.maxRange));
-      console.log("[MarkerManager] no hit, placing fallback at", fallback);
       this.createMarkerAt(fallback);
-      return;
     }
-  } catch (err) {
-    console.error("MarkerManager.createMarkerFromCamera threw:", err);
   }
-}
 
   /**
    * createMarkerAt(position: THREE.Vector3)
    */
-createMarkerAt(position) {
-  const root = new THREE.Object3D();
-  root.position.copy(position);
+  createMarkerAt(position) {
+    // root container so we can rotate/scale both icon+label easily
+    const root = new THREE.Object3D();
+    root.position.copy(position);
 
-  // use MeshBasicMaterial for visibility even if there are no lights
-  const coneGeo = new THREE.ConeGeometry(0.08, 0.25, 8);
-  coneGeo.translate(0, -0.125, 0);
-  const coneMat = new THREE.MeshBasicMaterial({ color: 0x88ccff });
-  const cone = new THREE.Mesh(coneGeo, coneMat);
-  cone.rotation.x = Math.PI;
-  root.add(cone);
+    // tiny arrow indicator (a cone pointing up in local space)
+    const coneGeo = new THREE.ConeGeometry(0.08, 0.25, 8);
+    coneGeo.translate(0, -0.125, 0); // put tip at origin so cone sits above the point
+    const coneMat = new THREE.MeshStandardMaterial({ emissive: 0x88ccff, emissiveIntensity: 0.6, metalness: 0.2, roughness: 0.6 });
+    const cone = new THREE.Mesh(coneGeo, coneMat);
+    cone.rotation.x = Math.PI; // point down towards the surface (adjust visually)
+    root.add(cone);
 
-  const label = this._makeLabelSprite("…");
-  label.position.set(0, 0.35, 0);
+    // label sprite that shows distance in meters and optionally coordinates
+    const label = this._makeLabelSprite("…"); // placeholder
+    label.position.set(0, 0.35, 0);
+    root.add(label);
 
-  // make label render on top while debugging
-  label.renderOrder = 999;
-  if (label.material) {
-    label.material.depthTest = false;
-    label.material.depthWrite = false;
+    // small billboard background (optional)
+    // add to scene and to set for update
+    this.scene.add(root);
+    const marker = {
+      root,
+      label,
+      createdAt: performance.now(),
+      removeHandle: null
+    };
+    this._markers.add(marker);
+
+    // schedule removal after lifetime
+    marker.removeHandle = setTimeout(() => {
+      this._removeMarker(marker);
+    }, this.lifetimeMs);
+
+    // immediately set a proper label value (distance)
+    this._updateMarkerLabel(marker);
+
+    return marker;
   }
-
-  root.add(label);
-
-  this.scene.add(root);
-  const marker = { root, label, createdAt: performance.now(), removeHandle: null };
-  this._markers.add(marker);
-
-  marker.removeHandle = setTimeout(() => this._removeMarker(marker), this.lifetimeMs);
-  this._updateMarkerLabel(marker);
-  return marker;
-}
 
   _removeMarker(marker) {
     if (!marker) return;
@@ -295,19 +241,14 @@ createMarkerAt(position) {
     }
 
     // create texture
-  const tex = new THREE.CanvasTexture(canvas);
-  tex.anisotropy = 16;
-  const mat = new THREE.SpriteMaterial({
-    map: tex,
-    depthTest: true,  // keep true normally, but we override per-sprite at runtime if needed
-    depthWrite: false,
-    sizeAttenuation: true
-  });
-  const sprite = new THREE.Sprite(mat);
-  // make slightly bigger for easier debugging
-  sprite.scale.set(1.2, 0.6, 1);
-  mat.map.image = canvas;
-  return sprite;
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.anisotropy = 16;
+    const mat = new THREE.SpriteMaterial({ map: tex, depthTest: true, depthWrite: false, sizeAttenuation: true });
+    const sprite = new THREE.Sprite(mat);
+    sprite.scale.set(0.8, 0.4, 1); // tweak as needed
+    // store reference to canvas for updates
+    mat.map.image = canvas;
+    return sprite;
 
     function roundRect(ctx, x, y, w, h, r) {
       ctx.beginPath();
@@ -353,3 +294,4 @@ createMarkerAt(position) {
     }
   }
 }
+
