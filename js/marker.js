@@ -158,6 +158,8 @@ placeMarker() {
 
   const meters = distUnits / this.unitsPerMeter;
 
+console.log(meters);
+  
   // create DOM element
   const dom = document.createElement('div');
   dom.className = 'rm-marker';
