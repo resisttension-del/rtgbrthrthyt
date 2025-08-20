@@ -176,16 +176,6 @@ function destroyFog() {
 window.scene.fog = null;
 }
 
-const rm = new RangeMarker({
-  camera,
-  renderer,
-  scene,
-  THREE,
-  unitsPerMeter: 1,      // depends on your unit convention
-  markerDuration: 10000, // ms, 0 = persistent
-  autoListenKey: true    // listens for 't' key to place marker
-});
-
 function enableShadows() {
 if (!dirLight) {
 dirLight = new THREE.DirectionalLight(0xffffff, 0.8); // Color, intensity
@@ -760,6 +750,19 @@ window.localPlayer = {
         const spawn = findFurthestSpawn();
         window.camera.position.copy(spawn).add(new THREE.Vector3(0, 1.6, 0));
     createLeaderboardOverlay();
+
+
+const rm = new RangeMarker({
+  camera,
+  renderer,
+  scene,
+  THREE,
+  unitsPerMeter: 1,      // depends on your unit convention
+  markerDuration: 10000, // ms, 0 = persistent
+  autoListenKey: true    // listens for 't' key to place marker
+});
+
+    
 }
 
 export function hideGameUI() {
@@ -2907,6 +2910,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
