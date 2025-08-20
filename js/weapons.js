@@ -113,34 +113,38 @@ function capitalize(name) {
 let swingTime;
 
 function calculateDamageWithDropOff(baseDamage, distance, dropOff) {
-  // Find the closest drop-off point that is less than or equal to the current distance
-  const sortedDistances = Object.keys(dropOff).map(Number).sort((a, b) => a - b);
-  let dropOffFactor = 1;
+  // Convert dropOff object to sorted array of {d: distance, f: factor}
+  const points = Object.entries(dropOff || {})
+    .map(([k, v]) => ({ d: Number(k), f: Number(v) }))
+    .filter(p => !Number.isNaN(p.d) && !Number.isNaN(p.f))
+    .sort((a, b) => a.d - b.d);
 
-  for (let i = sortedDistances.length - 1; i >= 0; i--) {
-    const dropOffDistance = sortedDistances[i];
-    if (distance >= dropOffDistance) {
-      dropOffFactor = dropOff[dropOffDistance];
-      break;
+  if (points.length === 0) return baseDamage;
+
+  // clamp distance to >= 0
+  if (distance <= 0) return baseDamage;
+
+  // Before first defined point: interpolate between factor 1 (at 0m) and first point
+  if (distance <= points[0].d) {
+    const first = points[0];
+    const t = first.d === 0 ? 1 : (distance / first.d);
+    const factor = 1 + (first.f - 1) * t;
+    return baseDamage * factor;
+  }
+
+  // Between defined points: find segment and interpolate
+  for (let i = 0; i < points.length - 1; i++) {
+    const a = points[i];
+    const b = points[i + 1];
+    if (distance <= b.d) {
+      const t = (distance - a.d) / (b.d - a.d);
+      const factor = a.f + (b.f - a.f) * t;
+      return baseDamage * factor;
     }
   }
 
-  // Linear interpolation for distances between drop-off points
-  if (dropOffFactor === 1) { // No drop off has been applied yet
-    const closestBelow = sortedDistances.find(d => distance < d);
-    const closestAbove = sortedDistances.slice().reverse().find(d => distance > d);
-
-    if (closestBelow && closestAbove) {
-      const dropOffFactorBelow = dropOff[closestBelow];
-      const dropOffFactorAbove = dropOff[closestAbove];
-
-      const range = closestBelow - closestAbove;
-      const progress = (distance - closestAbove) / range;
-      dropOffFactor = dropOffFactorAbove + (dropOffFactorBelow - dropOffFactorAbove) * progress;
-    }
-  }
-
-  return baseDamage * dropOffFactor;
+  // Beyond last point: use last point's factor
+  return baseDamage * points[points.length - 1].f;
 }
 
 export class WeaponController {
