@@ -102,120 +102,118 @@ export default class RangeMarker {
     return closest;
   }
 
-  placeMarker() {
-    if (!this._THREE || !this._raycaster || !this.scene) {
-      return;
-    }
+update() {
+  if (!this._marker) return;
 
-    this.camera.updateMatrixWorld();
+  // Make the marker a "billboard" that always faces the camera
+  // This is a more robust way to do it than lookAt()
+  this._marker.quaternion.copy(this.camera.quaternion);
 
-    const origin = new this._THREE.Vector3().setFromMatrixPosition(this.camera.matrixWorld);
-    const direction = new this._THREE.Vector3();
-    this.camera.getWorldDirection(direction);
+  const fadeDuration = 5000;
+  const elapsed = performance.now() - this._markerStartTime;
 
-    this._raycaster.set(origin, direction);
-    this._raycaster.far = Number.isFinite(this.defaultDistance) ? this.defaultDistance : this._raycaster.far;
-
-    const playerHit = this._checkPlayerHit(origin, direction);
-
-    let chosen = null;
-    let hitPoint = null;
-
-    if (playerHit) {
-      chosen = playerHit;
-      hitPoint = playerHit.intersection;
-    } else {
-      const candidates = this._collectCandidates();
-      if (!candidates.length) return;
-
-      const hits = this._raycaster.intersectObjects(candidates, true);
-      if (!hits || !hits.length) {
-        return;
-      }
-
-      for (let i = 0; i < hits.length; i++) {
-        const h = hits[i];
-        if (!h) continue;
-        if (!isFinite(h.distance) || !h.point) continue;
-        const p = h.point;
-        if (!isFinite(p.x) || !isFinite(p.y) || !isFinite(p.z)) continue;
-        if (h.object && h.object.userData && h.object.userData.ignoreRangeMarker) continue;
-        chosen = h;
-        hitPoint = chosen.point.clone();
-        break;
-      }
-    }
-    
-    if (!chosen) return;
-
+  if (elapsed >= fadeDuration) {
     this._clearMarkerImmediate();
-
-    const distUnits = origin.distanceTo(hitPoint);
-    const meters = distUnits / this.unitsPerMeter;
-    let text = `${meters.toFixed(2)} m`;
-    if (playerHit) {
-      text += ' (PLAYER)';
-    }
-
-    const canvas = document.createElement('canvas');
-    const ctx = canvas.getContext('2d');
-    canvas.width = 512;
-    canvas.height = 128;
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.72)';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.font = '64px monospace';
-    ctx.fillStyle = '#fff';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(text, canvas.width / 2, canvas.height / 2);
-
-    const texture = new this._THREE.CanvasTexture(canvas);
-    texture.minFilter = this._THREE.LinearFilter;
-    texture.magFilter = this._THREE.LinearFilter;
-
-    const markerGeometry = new this._THREE.PlaneGeometry(1, 0.25);
-    const markerMaterial = new this._THREE.MeshBasicMaterial({
-      map: texture,
-      side: this._THREE.DoubleSide,
-      transparent: true,
-      opacity: 0.8
-    });
-    const marker = new this._THREE.Mesh(markerGeometry, markerMaterial);
-
-    // Position the marker at the hit point in world space
-    marker.position.copy(hitPoint);
-
-    // Set its render order to render on top
-    marker.renderOrder = 999;
-    marker.onBeforeRender = (renderer) => renderer.clearDepth();
-
-    // Add the marker to the scene
-    this.scene.add(marker);
-
-    this._marker = marker;
-    this._markerStartTime = performance.now();
+    return;
   }
 
-  update() {
-    if (!this._marker) return;
+  const opacity = this._THREE.MathUtils.lerp(0.8, 0, elapsed / fadeDuration);
+  if (this._marker.material.opacity !== opacity) {
+    this._marker.material.opacity = opacity;
+  }
+}
 
-    // Make the marker always face the camera
-    this.camera.updateMatrixWorld();
-    this._marker.lookAt(this.camera.position);
+// And placeMarker should be slightly adjusted for simplicity.
+placeMarker() {
+  if (!this._THREE || !this._raycaster || !this.scene) {
+    return;
+  }
 
-    const fadeDuration = 5000;
-    const elapsed = performance.now() - this._markerStartTime;
+  this.camera.updateMatrixWorld();
 
-    if (elapsed >= fadeDuration) {
-      this._clearMarkerImmediate();
+  const origin = new this._THREE.Vector3().setFromMatrixPosition(this.camera.matrixWorld);
+  const direction = new this._THREE.Vector3();
+  this.camera.getWorldDirection(direction);
+
+  this._raycaster.set(origin, direction);
+  this._raycaster.far = Number.isFinite(this.defaultDistance) ? this.defaultDistance : this._raycaster.far;
+
+  const playerHit = this._checkPlayerHit(origin, direction);
+
+  let chosen = null;
+  let hitPoint = null;
+
+  if (playerHit) {
+    chosen = playerHit;
+    hitPoint = playerHit.intersection;
+  } else {
+    const candidates = this._collectCandidates();
+    if (!candidates.length) return;
+
+    const hits = this._raycaster.intersectObjects(candidates, true);
+    if (!hits || !hits.length) {
       return;
     }
 
-    const opacity = this._THREE.MathUtils.lerp(0.8, 0, elapsed / fadeDuration);
-    if (this._marker.material.opacity !== opacity) {
-      this._marker.material.opacity = opacity;
+    for (let i = 0; i < hits.length; i++) {
+      const h = hits[i];
+      if (!h) continue;
+      if (!isFinite(h.distance) || !h.point) continue;
+      const p = h.point;
+      if (!isFinite(p.x) || !isFinite(p.y) || !isFinite(p.z)) continue;
+      if (h.object && h.object.userData && h.object.userData.ignoreRangeMarker) continue;
+      chosen = h;
+      hitPoint = chosen.point.clone();
+      break;
     }
   }
+  
+  if (!chosen) return;
+
+  this._clearMarkerImmediate();
+
+  const distUnits = origin.distanceTo(hitPoint);
+  const meters = distUnits / this.unitsPerMeter;
+  let text = `${meters.toFixed(2)} m`;
+  if (playerHit) {
+    text += ' (PLAYER)';
+  }
+
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d');
+  canvas.width = 512;
+  canvas.height = 128;
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.72)';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.font = '64px monospace';
+  ctx.fillStyle = '#fff';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(text, canvas.width / 2, canvas.height / 2);
+
+  const texture = new this._THREE.CanvasTexture(canvas);
+  texture.minFilter = this._THREE.LinearFilter;
+  texture.magFilter = this._THREE.LinearFilter;
+
+  const markerGeometry = new this._THREE.PlaneGeometry(1, 0.25);
+  const markerMaterial = new this._THREE.MeshBasicMaterial({
+    map: texture,
+    side: this._THREE.DoubleSide,
+    transparent: true,
+    opacity: 0.8
+  });
+  const marker = new this._THREE.Mesh(markerGeometry, markerMaterial);
+
+  marker.position.copy(hitPoint);
+
+  marker.renderOrder = 999;
+  marker.onBeforeRender = (renderer) => renderer.clearDepth();
+
+  this.scene.add(marker);
+
+  this._marker = marker;
+  this._markerStartTime = performance.now();
+}
 
   _clearMarkerImmediate() {
     if (!this._marker) return;
