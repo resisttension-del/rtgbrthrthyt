@@ -10,7 +10,7 @@ import { ShaderPass } from "https://cdn.jsdelivr.net/npm/three@0.152.0/examples/
 import { CopyShader } from "https://cdn.jsdelivr.net/npm/three@0.152.0/examples/jsm/shaders/CopyShader.js";
 import Stats from 'stats.js';
 import { dbRefs, disposeGame, fullCleanup, activeGameId, setupDamageListener } from "./network.js";
-
+import RangeMarker from './marker.js';
 import * as BufferGeometryUtils from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import {
     computeBoundsTree,
@@ -75,6 +75,7 @@ let physicsController;
 let weaponController;
 let spawnPoints = [];
 let skyMesh, starField;
+let rm = null;
 
 export const KILLSTREAK_SOUNDS = {
 1:  'https://codehs.com/uploads/5626b4ea9d389c0936a1971b1f3a6beb',
@@ -614,6 +615,16 @@ export async function startGame(username, mapName, initialDetailsEnabled, ffaEna
 
     const gameTimerElement = document.getElementById('game-timer');
 
+  rm = new RangeMarker({
+    camera,
+    renderer,
+    getSpreadDirection,
+    checkBulletPenetration,
+    stats: { tracerLength: 2000 },
+    unitsPerMeter: 1,
+  });
+
+    
     // The rest of your startGame function remains the same
     initGlobalFogAndShadowParams();
     window.isGamePaused = false;
@@ -2105,19 +2116,6 @@ function round2(n) {
 
 
 
-import RangeMarker from './marker.js';
-
-// somewhere after camera & renderer exist:
-const rm = new RangeMarker({
-  camera,
-  renderer,
-  getSpreadDirection,       // your function
-  checkBulletPenetration,   // your function
-  stats: { tracerLength: 2000 }, // optional
-  unitsPerMeter: 1,         // or 100 for Unreal
-});
-
-
 
 export function animate(timestamp) {
     // Schedule the next frame *first*. This ensures the loop continues
@@ -2913,6 +2911,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
