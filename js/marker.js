@@ -11,10 +11,10 @@ export default class RangeMarker {
     this.autoListenKey = (opts.autoListenKey === undefined) ? true : Boolean(opts.autoListenKey);
     this.defaultDistance = (opts.defaultDistance && Number(opts.defaultDistance) > 0) ? Number(opts.defaultDistance) : 1000;
 
-    // NEW: how long marker should stay (ms). set to 0 to never auto-remove.
+    // how long marker should stay (ms). set to 0 to never auto-remove.
     this.markerDuration = (opts.markerDuration !== undefined && Number(opts.markerDuration) >= 0) ? Number(opts.markerDuration) : 10000;
 
-    // NEW: store timeout id so old timeouts can be cancelled
+    // store timeout id so old timeouts can be cancelled
     this._markerTimeoutId = null;
 
     this._THREE = opts.THREE || (typeof THREE !== 'undefined' ? THREE : null);
@@ -182,9 +182,14 @@ export default class RangeMarker {
 
     const marker = new this._THREE.Mesh(markerGeometry, markerMaterial);
 
-    // Position: slightly above the surface to avoid z-fighting
-    const offset = hitNormal.clone().multiplyScalar(0.01); // small offset
-    marker.position.copy(hitPoint).add(offset);
+    // Compute a clearer offset (bigger than tiny 0.01 so it's visible in most scenes).
+    const offsetWorld = hitNormal.clone().normalize().multiplyScalar(0.05); // 0.05 units offset (tweak)
+
+    // world position with offset
+    const worldPosWithOffset = hitPoint.clone().add(offsetWorld);
+
+    // Set position in world coordinates (we add to the scene, so marker.position==world position)
+    marker.position.copy(worldPosWithOffset);
 
     // Keep the surface normal in userData (if you need it later)
     marker.userData.surfaceNormal = hitNormal.clone();
@@ -196,24 +201,25 @@ export default class RangeMarker {
     const THREE = this._THREE;
 
     // Make the marker always face the camera/player and ensure it's drawn on top.
-    // We use onBeforeRender which runs every frame for this mesh.
+    // Use world position when computing vector to camera so parent transforms won't break it.
     marker.onBeforeRender = function (renderer, scene, camera) {
-      // compute unit vector from marker to camera
-      const toCam = new THREE.Vector3().subVectors(camera.position, this.position).normalize();
+      // get true world-position of this mesh
+      const worldPos = new THREE.Vector3();
+      this.getWorldPosition(worldPos);
+
+      // compute unit vector from marker world-position to camera world-position
+      const toCam = new THREE.Vector3().subVectors(camera.position, worldPos).normalize();
 
       // Compute quaternion that rotates plane's +Z (0,0,1) to point toward camera
       const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), toCam);
       this.quaternion.copy(q);
 
-      // Optionally, you might want the text always upright in Y (no roll).
-      // To keep the marker upright (preserve Y axis up), zero out roll:
+      // Keep the marker upright (preserve Y axis up) by removing roll
       const euler = new THREE.Euler().setFromQuaternion(this.quaternion, 'YXZ');
       euler.z = 0; // remove roll
       this.quaternion.setFromEuler(euler);
 
       // Ensure marker renders on top by clearing depth before it draws.
-      // This is a small, localized trick; it keeps the rest of the scene's depth intact
-      // because we clear depth just before rendering this mesh.
       renderer.clearDepth();
     };
 
@@ -225,7 +231,29 @@ export default class RangeMarker {
     this.scene.add(marker);
     this._marker = marker;
 
-    // NEW: set a timeout to auto-remove marker only if duration > 0
+    // Debug checks - useful to diagnose missing Z/local->world issues
+    try {
+      // hit point and offset (world)
+      console.debug('RangeMarker debug - hitPoint (world):', hitPoint.clone());
+      console.debug('RangeMarker debug - offsetWorld:', offsetWorld.clone());
+      // marker.local position (position property)
+      console.debug('RangeMarker debug - marker.position (local):', marker.position.clone());
+      // marker world position
+      const wp = new THREE.Vector3();
+      marker.getWorldPosition(wp);
+      console.debug('RangeMarker debug - marker.getWorldPosition():', wp);
+      // parent info
+      console.debug('RangeMarker debug - marker.parent:', marker.parent ? (marker.parent.name || marker.parent.type) : '(none)');
+      // sanity checks
+      if (!isFinite(wp.x) || !isFinite(wp.y) || !isFinite(wp.z)) {
+        console.warn('RangeMarker debug - marker world position contains non-finite values', wp);
+      }
+    } catch (e) {
+      // don't break runtime if debug logging fails
+      console.warn('RangeMarker debug - logging failed', e);
+    }
+
+    // set a timeout to auto-remove marker only if duration > 0
     if (this.markerDuration > 0) {
       this._markerTimeoutId = setTimeout(() => {
         this._clearMarkerImmediate();
