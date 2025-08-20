@@ -10,13 +10,9 @@ export default class RangeMarker {
     this.unitsPerMeter = (opts.unitsPerMeter && Number(opts.unitsPerMeter) > 0) ? Number(opts.unitsPerMeter) : 1;
     this.autoListenKey = (opts.autoListenKey === undefined) ? true : Boolean(opts.autoListenKey);
     this.defaultDistance = (opts.defaultDistance && Number(opts.defaultDistance) > 0) ? Number(opts.defaultDistance) : 1000;
-
-    // how long marker should stay (ms). set to 0 to never auto-remove.
     this.markerDuration = (opts.markerDuration !== undefined && Number(opts.markerDuration) >= 0) ? Number(opts.markerDuration) : 10000;
 
-    // store timeout id so old timeouts can be cancelled
     this._markerTimeoutId = null;
-
     this._THREE = opts.THREE || (typeof THREE !== 'undefined' ? THREE : null);
     if (!this._THREE) {
       console.warn('RangeMarker: THREE not found; marker will be disabled.');
@@ -112,7 +108,6 @@ export default class RangeMarker {
   }
 
   placeMarker() {
-    // early log - proves this function is reached
     console.log('placeMarker() called', {
       hasThree: !!this._THREE,
       hasRaycaster: !!this._raycaster,
@@ -128,15 +123,16 @@ export default class RangeMarker {
       return;
     }
 
-    // Cancel any outstanding timeout from a previous marker so it won't clear the new one.
     if (this._markerTimeoutId) {
       console.log('placeMarker - clearing previous timeout', this._markerTimeoutId);
       clearTimeout(this._markerTimeoutId);
       this._markerTimeoutId = null;
     }
 
+    // Ensure camera world matrices are up to date
     this.camera.updateMatrixWorld();
 
+    // origin & direction in world space
     const origin = new this._THREE.Vector3().setFromMatrixPosition(this.camera.matrixWorld);
     const direction = new this._THREE.Vector3();
     this.camera.getWorldDirection(direction);
@@ -156,8 +152,7 @@ export default class RangeMarker {
     if (playerHit) {
       chosen = playerHit;
       hitPoint = playerHit.intersection;
-      // approximate normal facing the camera
-      hitNormal = direction.clone().negate();
+      hitNormal = direction.clone().negate().normalize();
       console.log('placeMarker - playerHit chosen', { distance: playerHit.distance });
     } else {
       const candidates = this._collectCandidates();
@@ -172,6 +167,10 @@ export default class RangeMarker {
         return;
       }
 
+      // We'll compute robust hitNormal here, considering InstancedMesh and BufferGeometry.
+      const tmpMat4 = new this._THREE.Matrix4();
+      const tmpMat3 = new this._THREE.Matrix3();
+
       for (let i = 0; i < hits.length; i++) {
         const h = hits[i];
         if (!h) continue;
@@ -179,13 +178,85 @@ export default class RangeMarker {
         const p = h.point;
         if (!isFinite(p.x) || !isFinite(p.y) || !isFinite(p.z)) continue;
         if (h.object && h.object.userData && h.object.userData.ignoreRangeMarker) continue;
+
         chosen = h;
         hitPoint = chosen.point.clone();
-        hitNormal = (chosen.face && chosen.object) ? chosen.face.normal.clone().transformDirection(chosen.object.matrixWorld).normalize() : direction.clone().negate();
+
+        try {
+          // Debug logging for hit entries (temporary)
+          // console.log('hit:', {
+          //   object: chosen.object && (chosen.object.name || chosen.object.type),
+          //   isInstanced: chosen.object && chosen.object.isInstancedMesh,
+          //   instanceId: chosen.instanceId,
+          //   face: !!chosen.face,
+          //   distance: chosen.distance,
+          //   point: chosen.point.clone()
+          // });
+
+          // Primary: if face normal provided, transform to world (and include instance transform)
+          if (chosen.face && chosen.face.normal) {
+            if (typeof chosen.instanceId === 'number' && chosen.object.isInstancedMesh) {
+              chosen.object.getMatrixAt(chosen.instanceId, tmpMat4);
+              tmpMat4.premultiply(chosen.object.matrixWorld);
+              tmpMat3.getNormalMatrix(tmpMat4);
+              hitNormal = chosen.face.normal.clone().applyMatrix3(tmpMat3).normalize();
+            } else {
+              tmpMat3.getNormalMatrix(chosen.object.matrixWorld);
+              hitNormal = chosen.face.normal.clone().applyMatrix3(tmpMat3).normalize();
+            }
+          } else {
+            // If face missing, attempt to derive average vertex normal from attributes
+            const geom = chosen.object.geometry;
+            if (geom && geom.isBufferGeometry) {
+              // If geometry has no normals, compute them (mutates geometry; optional)
+              if (!geom.attributes.normal) {
+                try {
+                  geom.computeVertexNormals();
+                } catch (e) {
+                  // ignore compute failure
+                }
+              }
+
+              const nAttr = geom.attributes.normal;
+              if (nAttr && chosen.face && typeof chosen.face.a === 'number') {
+                try {
+                  const na = new this._THREE.Vector3().fromBufferAttribute(nAttr, chosen.face.a);
+                  const nb = new this._THREE.Vector3().fromBufferAttribute(nAttr, chosen.face.b);
+                  const nc = new this._THREE.Vector3().fromBufferAttribute(nAttr, chosen.face.c);
+                  hitNormal = new this._THREE.Vector3().addVectors(na, nb).add(nc).multiplyScalar(1 / 3).normalize();
+
+                  if (typeof chosen.instanceId === 'number' && chosen.object.isInstancedMesh) {
+                    chosen.object.getMatrixAt(chosen.instanceId, tmpMat4);
+                    tmpMat4.premultiply(chosen.object.matrixWorld);
+                    tmpMat3.getNormalMatrix(tmpMat4);
+                    hitNormal.applyMatrix3(tmpMat3).normalize();
+                  } else {
+                    tmpMat3.getNormalMatrix(chosen.object.matrixWorld);
+                    hitNormal.applyMatrix3(tmpMat3).normalize();
+                  }
+                } catch (e) {
+                  hitNormal = null;
+                }
+              }
+            }
+          }
+        } catch (err) {
+          console.warn('RangeMarker: error computing hit normal', err);
+          hitNormal = null;
+        }
+
+        // fallback to ray direction if all else fails
+        if (!hitNormal) {
+          hitNormal = direction.clone().negate().normalize();
+          console.warn('RangeMarker: falling back to ray direction for surface normal');
+        }
+
         console.log('placeMarker - geometry hit chosen', {
           distance: chosen.distance,
-          point: hitPoint.clone()
+          point: hitPoint.clone(),
+          hitNormal: hitNormal.clone()
         });
+
         break;
       }
     }
@@ -223,7 +294,7 @@ export default class RangeMarker {
 
     // Plane for marker (aspect ratio matches canvas)
     const aspect = canvas.width / canvas.height;
-    const baseHeight = 2.0; // adjust visual size (0.2 * 10 = 2.0)
+    const baseHeight = 2.0;
     const markerGeometry = new this._THREE.PlaneGeometry(baseHeight * aspect, baseHeight);
 
     const markerMaterial = new this._THREE.MeshBasicMaterial({
@@ -231,81 +302,72 @@ export default class RangeMarker {
       transparent: true,
       opacity: 0.95,
       side: this._THREE.DoubleSide,
-      // the critical bits that force draw-on-top:
       depthTest: false,
       depthWrite: false,
     });
 
     const marker = new this._THREE.Mesh(markerGeometry, markerMaterial);
 
-    // Compute a clearer offset (bigger than tiny 0.01 so it's visible in most scenes).
-const offsetWorld = direction.clone().negate().normalize().multiplyScalar(0.05); // toward camera
-const worldPosWithOffset = hitPoint.clone().add(offsetWorld);
-marker.position.copy(worldPosWithOffset);
+    // Offset along the surface normal (so it sits slightly above the face)
+    const offsetWorld = hitNormal.clone().multiplyScalar(0.05);
+    const worldPosWithOffset = hitPoint.clone().add(offsetWorld);
+    marker.position.copy(worldPosWithOffset);
 
-    // Keep the surface normal in userData (if you need it later)
     marker.userData.surfaceNormal = hitNormal.clone();
 
     // Ensure it's rendered last / on top
-    marker.renderOrder = 0x7fffffff; // very large number
+    marker.renderOrder = 0x7fffffff;
 
-    // Keep references for closures
     const THREE = this._THREE;
 
-    // Make the marker always face the camera/player and ensure it's drawn on top.
-    // Use world position when computing vector to camera so parent transforms won't break it.
-marker.onBeforeRender = function (renderer, scene, camera) {
-  // world position of marker & camera
-  const worldPos = new THREE.Vector3();
-  this.getWorldPosition(worldPos);
+    // Billboard so marker faces camera; keep upright relative to world Y
+    marker.onBeforeRender = function (renderer, scene, camera) {
+      // marker world position
+      const worldPos = new THREE.Vector3();
+      this.getWorldPosition(worldPos);
 
-  const camWorldPos = new THREE.Vector3();
-  camera.getWorldPosition(camWorldPos); // IMPORTANT: world position, not camera.position
+      // camera world position (make sure to use world position)
+      const camWorldPos = new THREE.Vector3();
+      camera.getWorldPosition(camWorldPos);
 
-  // optional debug: enable by setting window.__RM_DEBUG__ = true in console
-  if (window.__RM_DEBUG__) {
-    const camQuat = new THREE.Quaternion();
-    camera.getWorldQuaternion(camQuat);
-    console.log('RangeMarker debug - camWorldPos', camWorldPos, 'camQuat', camQuat.toArray());
-  }
+      // optional debug
+      if (window.__RM_DEBUG__) {
+        const camQuat = new THREE.Quaternion();
+        camera.getWorldQuaternion(camQuat);
+        console.log('RangeMarker debug - camWorldPos', camWorldPos, 'camQuat', camQuat.toArray());
+      }
 
-  // direction from marker -> camera (forward)
-  const toCam = new THREE.Vector3().subVectors(camWorldPos, worldPos).normalize();
-  if (!isFinite(toCam.x) || !isFinite(toCam.y) || !isFinite(toCam.z)) return;
+      // vector from marker to camera
+      const toCam = new THREE.Vector3().subVectors(camWorldPos, worldPos).normalize();
+      if (!isFinite(toCam.x) || !isFinite(toCam.y) || !isFinite(toCam.z)) return;
 
-  // build orthonormal basis that keeps marker upright relative to world Y
-  const worldUp = new THREE.Vector3(0, 1, 0);
+      // construct stable orthonormal basis keeping marker upright relative to world Y
+      const worldUp = new THREE.Vector3(0, 1, 0);
+      let right = new THREE.Vector3().crossVectors(worldUp, toCam);
+      if (right.lengthSq() < 1e-8) {
+        right = new THREE.Vector3(1, 0, 0);
+      } else {
+        right.normalize();
+      }
+      const up = new THREE.Vector3().crossVectors(toCam, right).normalize();
 
-  // right = up x forward  (note the order)
-  let right = new THREE.Vector3().crossVectors(worldUp, toCam);
-  if (right.lengthSq() < 1e-8) {
-    // camera mostly exactly above/below the marker: pick arbitrary right
-    right = new THREE.Vector3(1, 0, 0);
-  } else {
-    right.normalize();
-  }
+      const m = new THREE.Matrix4();
+      m.makeBasis(right, up, toCam); // X = right, Y = up, Z = forward
+      this.quaternion.setFromRotationMatrix(m);
 
-  // corrected up = forward x right
-  const up = new THREE.Vector3().crossVectors(toCam, right).normalize();
+      // keep it upright by clearing roll (optional but often desired)
+      const e = new THREE.Euler().setFromQuaternion(this.quaternion, 'YXZ');
+      e.z = 0;
+      this.quaternion.setFromEuler(e);
 
-  // create rotation matrix from basis and apply
-  const m = new THREE.Matrix4();
-  m.makeBasis(right, up, toCam); // X = right, Y = up, Z = forward (toCam)
-  this.quaternion.setFromRotationMatrix(m);
+      // ensure marker renders on top
+      renderer.clearDepth();
+    };
 
-  // If the plane's texture is flipped/backwards, flip around Y:
-  // this.rotateY(Math.PI); // uncomment if needed
-
-  // ensure marker renders on top
-  renderer.clearDepth();
-};
-
-
-    // Scale with distance a bit so text stays readable (tweak multiplier as desired)
+    // Scale with distance a bit so text stays readable
     const scaleFactor = Math.max(0.6, meters * 0.03);
     marker.scale.setScalar(scaleFactor);
 
-    // Add to scene and track
     this.scene.add(marker);
     this._marker = marker;
 
@@ -315,7 +377,6 @@ marker.onBeforeRender = function (renderer, scene, camera) {
       parent: marker.parent ? (marker.parent.name || marker.parent.type) : '(none)'
     });
 
-    // Debug checks - useful to diagnose missing Z/local->world issues
     try {
       console.log('RangeMarker debug - hitPoint (world):', hitPoint.clone());
       console.log('RangeMarker debug - offsetWorld:', offsetWorld.clone());
@@ -331,7 +392,6 @@ marker.onBeforeRender = function (renderer, scene, camera) {
       console.log('RangeMarker debug - logging failed', e);
     }
 
-    // set a timeout to auto-remove marker only if duration > 0
     if (this.markerDuration > 0) {
       this._markerTimeoutId = setTimeout(() => {
         console.log('marker timeout firing - clearing marker');
@@ -349,7 +409,6 @@ marker.onBeforeRender = function (renderer, scene, camera) {
 
   _clearMarkerImmediate() {
     console.log('_clearMarkerImmediate called');
-    // Cancel any pending timeout (important to avoid stale timeouts clearing later markers)
     if (this._markerTimeoutId) {
       console.log('_clearMarkerImmediate - clearing timeout', this._markerTimeoutId);
       clearTimeout(this._markerTimeoutId);
@@ -361,7 +420,6 @@ marker.onBeforeRender = function (renderer, scene, camera) {
       return;
     }
 
-    // Clear per-frame hook to avoid lingering functions
     try {
       this._marker.onBeforeRender = null;
     } catch (e) {
