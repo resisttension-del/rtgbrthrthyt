@@ -82,7 +82,7 @@ let menuSong = new Audio("https://codehs.com/uploads/7ab8d31b9bb147e3952841963f6
 menuSong.volume = 0.4;
 menuSong.loop = true;
 
-let waitSong = new Audio("https://codehs.com/uploads/7ab8d31b9bb147e3952841963f6f3769");
+let waitSong = new Audio("https://codehs.com/uploads/64f06f691ebbcaafd7c4aaeee8d6cda9");
 waitSong.volume = 0.4;
 waitSong.loop = true;
 /**
