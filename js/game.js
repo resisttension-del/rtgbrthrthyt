@@ -615,14 +615,13 @@ export async function startGame(username, mapName, initialDetailsEnabled, ffaEna
 
     const gameTimerElement = document.getElementById('game-timer');
 
-  rm = new RangeMarker({
-    camera,
-    renderer,
-    getSpreadDirection,
-    checkBulletPenetration,
-    stats: { tracerLength: 2000 },
-    unitsPerMeter: 1,
-  });
+const rm = new RangeMarker({
+  camera,
+  renderer,
+  scene,            // optional — pass a THREE.Scene to enable raycast hits
+  unitsPerMeter: 1, // or 100 for Unreal
+  defaultDistance: 2000,
+});
 
     
     // The rest of your startGame function remains the same
@@ -2911,6 +2910,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
