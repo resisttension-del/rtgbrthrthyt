@@ -254,26 +254,32 @@ marker.position.copy(worldPosWithOffset);
 
     // Make the marker always face the camera/player and ensure it's drawn on top.
     // Use world position when computing vector to camera so parent transforms won't break it.
-    marker.onBeforeRender = function (renderer, scene, camera) {
-      // get true world-position of this mesh
-      const worldPos = new THREE.Vector3();
-      this.getWorldPosition(worldPos);
+marker.onBeforeRender = function (renderer, scene, camera) {
+  // world position of marker
+  const worldPos = new THREE.Vector3();
+  this.getWorldPosition(worldPos);
 
-      // compute unit vector from marker world-position to camera world-position
-      const toCam = new THREE.Vector3().subVectors(camera.position, worldPos).normalize();
+  // world position of camera (important: use world position, not camera.position)
+  const camWorldPos = new THREE.Vector3();
+  camera.getWorldPosition(camWorldPos);
 
-      // Compute quaternion that rotates plane's +Z (0,0,1) to point toward camera
-      const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), toCam);
-      this.quaternion.copy(q);
+  // Construct a rotation matrix so the marker faces the camera.
+  // Matrix4.lookAt(eye, target, up) builds a matrix that looks from `eye` to `target`.
+  // Use (worldPos, camWorldPos, up) so the plane's +Z faces the camera.
+  const m = new THREE.Matrix4();
+  m.lookAt(worldPos, camWorldPos, new THREE.Vector3(0, 1, 0));
+  this.quaternion.setFromRotationMatrix(m);
 
-      // Keep the marker upright (preserve Y axis up) by removing roll
-      const euler = new THREE.Euler().setFromQuaternion(this.quaternion, 'YXZ');
-      euler.z = 0; // remove roll
-      this.quaternion.setFromEuler(euler);
+  // Optionally remove roll so the marker remains "upright".
+  // This preserves pitch and yaw but sets roll to zero.
+  const e = new THREE.Euler().setFromQuaternion(this.quaternion, 'YXZ');
+  e.z = 0;
+  this.quaternion.setFromEuler(e);
 
-      // Ensure marker renders on top by clearing depth before it draws.
-      renderer.clearDepth();
-    };
+  // make sure it draws on top
+  renderer.clearDepth();
+};
+
 
     // Scale with distance a bit so text stays readable (tweak multiplier as desired)
     const scaleFactor = Math.max(0.6, meters * 0.03);
