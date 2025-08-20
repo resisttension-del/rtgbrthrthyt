@@ -4,14 +4,14 @@
  * Usage:
  * import RangeMarker from './RangeMarker.js';
  * const rm = new RangeMarker({
- * camera,               // THREE.Camera (required)
- * renderer,             // THREE.WebGLRenderer (required)
- * scene,                // THREE.Scene (required for raycasting)
- * unitsPerMeter: 1,     // game units per meter - default 1
+ * camera,           // THREE.Camera (required)
+ * renderer,         // THREE.WebGLRenderer (required)
+ * scene,            // THREE.Scene (required for raycasting)
+ * unitsPerMeter: 1,  // game units per meter - default 1
  * domParent: document.body,
- * autoListenKey: true,   // listen for 't' automatically
+ * autoListenKey: true, // listen for 't' automatically
  * defaultDistance: 1000, // max ray distance (world units)
- * THREE,                // Pass THREE from your project's import
+ * THREE,            // Pass THREE from your project's import
  * });
  *
  * // in your RAF loop:
@@ -95,6 +95,8 @@ export default class RangeMarker {
    * Build a conservative list of candidate meshes to raycast against.
    * We include visible Mesh/InstancedMesh objects that have geometry.
    * This avoids hitting common non-surface objects (helpers, cameras, lights).
+   * Note: This is an internal helper and will not be used in the new logic,
+   * but is kept for compatibility.
    */
   _collectCandidates() {
     const candidates = [];
@@ -109,114 +111,115 @@ export default class RangeMarker {
     });
     return candidates;
   }
+  
+  /**
+   * New logic to check for a hit against remote players, just like a bullet.
+   */
+  _checkPlayerHit(origin, direction) {
+    let closest = null;
+    if (!window.remotePlayers) return null;
+
+    for (const rp of Object.values(window.remotePlayers)) {
+      const meshes = [];
+      if (rp.bodyMesh) meshes.push(rp.bodyMesh);
+      if (rp.headMesh) meshes.push(rp.headMesh);
+
+      for (const mesh of meshes) {
+        // We'll skip the boundsTree check here for simplicity, assuming the raycaster
+        // can handle standard geometry. If you use a BVH, you'll need to adapt this.
+        const hits = this._raycaster.intersectObject(mesh, true);
+        if (!hits.length) continue;
+        const hit = hits[0];
+        if (!closest || hit.distance < closest.distance) {
+          closest = {
+            mesh,
+            isHead: mesh.userData.isPlayerHead === true,
+            intersection: hit.point.clone(),
+            distance: hit.distance
+          };
+        }
+      }
+    }
+    return closest;
+  }
 
   /**
    * Place marker using camera + built-in raycast logic.
-   * No fallbacks: if nothing hit within defaultDistance, we don't create a marker.
+   * This version prioritizes player hits first, then falls back to the world.
    */
   placeMarker() {
     if (!this._THREE || !this._raycaster || !this.scene) {
-      // nothing we can do without THREE/scene/raycaster
       return;
     }
-    
-    // CRITICAL FIX: Ensure the camera's matrix is up-to-date before raycasting
-    // This is especially important when using external controls (like OrbitControls).
+
     this.camera.updateMatrixWorld();
 
-    // compute camera world position
-    let camPos;
-    try {
-      camPos = new this._THREE.Vector3().setFromMatrixPosition(this.camera.matrixWorld);
-    } catch (e) {
-      // fallback: try reading matrixWorld elements or zero
-      camPos = { x: 0, y: 0, z: 0, clone() { return { x: this.x, y: this.y, z: this.z }; } };
-      try {
-        const el = this.camera.matrixWorld.elements;
-        camPos.x = el[12]; camPos.y = el[13]; camPos.z = el[14];
-      } catch (err) {}
-    }
+    const origin = new this._THREE.Vector3().setFromMatrixPosition(this.camera.matrixWorld);
+    const direction = new this._THREE.Vector3();
+    this.camera.getWorldDirection(direction);
 
-    // compute forward direction (where camera looks)
-    let dir;
-    try {
-      dir = new this._THREE.Vector3();
-      this.camera.getWorldDirection(dir); // normalized
-    } catch (e) {
-      dir = new this._THREE.Vector3(0, 0, -1);
-      try {
-        if (this.camera.quaternion) dir.applyQuaternion(this.camera.quaternion).normalize();
-      } catch (err) {}
-    }
-
-    // prepare raycaster
-    const origin = (camPos && typeof camPos.clone === 'function') ? camPos.clone() : new this._THREE.Vector3(camPos.x || 0, camPos.y || 0, camPos.z || 0);
-    const direction = (dir && typeof dir.clone === 'function') ? dir.clone() : new this._THREE.Vector3(0, 0, -1);
-    if (typeof direction.normalize === 'function') direction.normalize();
-
+    // Set the raycaster with the camera's new origin and direction
     this._raycaster.set(origin, direction);
     this._raycaster.far = Number.isFinite(this.defaultDistance) ? this.defaultDistance : this._raycaster.far;
 
-    // collect candidates and intersect
-    const candidates = this._collectCandidates();
-    if (!candidates.length) return;
+    // First, check for a hit on a remote player
+    const playerHit = this._checkPlayerHit(origin, direction);
 
-    let hits;
-    try {
-      hits = this._raycaster.intersectObjects(candidates, true);
-    } catch (e) {
-      // raycast failed
-      console.warn('RangeMarker: raycast failed', e);
-      return;
-    }
-
-    if (!hits || !hits.length) {
-      // no hit within defaultDistance
-      return;
-    }
-
-    // find first valid hit with finite distance and finite point components
     let chosen = null;
-    for (let i = 0; i < hits.length; i++) {
-      const h = hits[i];
-      if (!h) continue;
-      if (!isFinite(h.distance)) continue;
-      if (!h.point) continue;
-      const p = h.point;
-      if (!isFinite(p.x) || !isFinite(p.y) || !isFinite(p.z)) continue;
-      // optional: ignore hits on objects marked as sky/huge by userData
-      if (h.object && h.object.userData && h.object.userData.ignoreRangeMarker) continue;
-      chosen = h;
-      break;
+    let markerWorldPos = null;
+    let distUnits = null;
+
+    if (playerHit) {
+      chosen = playerHit;
+      markerWorldPos = playerHit.intersection;
+      distUnits = playerHit.distance;
+    } else {
+      // If no player hit, check against the general scene
+      const candidates = this._collectCandidates();
+      if (!candidates.length) return;
+
+      const hits = this._raycaster.intersectObjects(candidates, true);
+      if (!hits || !hits.length) {
+        return;
+      }
+
+      // Find first valid hit
+      for (let i = 0; i < hits.length; i++) {
+        const h = hits[i];
+        if (!h) continue;
+        if (!isFinite(h.distance) || !h.point) continue;
+        const p = h.point;
+        if (!isFinite(p.x) || !isFinite(p.y) || !isFinite(p.z)) continue;
+        if (h.object && h.object.userData && h.object.userData.ignoreRangeMarker) continue;
+        chosen = h;
+        markerWorldPos = chosen.point.clone();
+        distUnits = origin.distanceTo(markerWorldPos);
+        break;
+      }
     }
-
+    
     if (!chosen) return;
-
-    const markerWorldPos = (chosen.point && chosen.point.clone) ? chosen.point.clone() : { x: chosen.point.x, y: chosen.point.y, z: chosen.point.z };
+    if (distUnits == null || !isFinite(distUnits)) return;
 
     // Remove existing marker
     if (this._marker) this._clearMarkerImmediate();
-
-    // compute distance (units -> meters)
-    const distUnits = (typeof camPos.distanceTo === 'function' && markerWorldPos && typeof markerWorldPos.distanceTo === 'function')
-      ? camPos.distanceTo(markerWorldPos)
-      : (markerWorldPos && typeof markerWorldPos.x === 'number'
-          ? Math.hypot(camPos.x - markerWorldPos.x, camPos.y - markerWorldPos.y, camPos.z - markerWorldPos.z)
-          : null);
-
-    if (distUnits == null || !isFinite(distUnits)) return;
 
     const meters = distUnits / this.unitsPerMeter;
 
     // create DOM element
     const dom = document.createElement('div');
     dom.className = 'rm-marker';
-    dom.innerHTML = `<span class="val">${meters.toFixed(2)}</span><span class="unit">m</span>`;
+    let textContent = `<span class="val">${meters.toFixed(2)}</span><span class="unit">m</span>`;
+    if (playerHit) {
+      // Add a special label for player hits
+      textContent += `<span> (Player Hit)</span>`;
+    }
+    dom.innerHTML = textContent;
     this.domParent.appendChild(dom);
 
     this._marker = {
       dom,
-      worldPos: (markerWorldPos.clone ? markerWorldPos.clone() : { x: markerWorldPos.x, y: markerWorldPos.y, z: markerWorldPos.z }),
+      worldPos: markerWorldPos,
       timeoutId: null
     };
 
