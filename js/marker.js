@@ -58,80 +58,87 @@ constructor(scene, camera, options = {}) {
 createMarkerFromCamera() {
   if (!this.camera) return;
   try {
-    // ensure matrices are up-to-date
+    // keep matrices fresh
     this.camera.updateMatrixWorld();
     if (this.scene) this.scene.updateMatrixWorld(true);
 
     const origin = new THREE.Vector3().setFromMatrixPosition(this.camera.matrixWorld);
     const direction = new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion).normalize();
 
-    // Optional: use setFromCamera to target the screen center (safe)
-    // const ndc = new THREE.Vector2(0, 0); // center of screen
-    // this._ray.setFromCamera(ndc, this.camera);
+    // prefer setFromCamera for screen-center accuracy (uncomment if desired)
+    // this._ray.setFromCamera(new THREE.Vector2(0, 0), this.camera);
 
-    // Use manual set (keeps your origin/direction)
     const ray = this._ray;
     ray.camera = this.camera;
     ray.set(origin, direction);
     ray.near = 0.01;
     ray.far = this.maxRange;
 
-    // Visualize ray in scene for debugging (line + arrow)
-    (function drawDebugRay(scene, origin, dir, len = 10) {
-      const points = [origin.clone(), origin.clone().add(dir.clone().multiplyScalar(len))];
-      const geom = new THREE.BufferGeometry().setFromPoints(points);
-      const mat = new THREE.LineBasicMaterial({ linewidth: 2 });
-      const line = new THREE.Line(geom, mat);
-      line.name = "__marker_debug_line";
-      scene.add(line);
-      const arrow = new THREE.ArrowHelper(dir.clone(), origin.clone(), len, 0xff0000);
-      arrow.name = "__marker_debug_arrow";
-      scene.add(arrow);
-      setTimeout(() => {
-        scene.remove(line); line.geometry.dispose(); line.material.dispose();
-        scene.remove(arrow);
-      }, 3000);
-    })(this.scene, origin, direction, Math.min(this.maxRange, 200));
+    // --- debug visuals: keep them separate so they won't be included in candidates ---
+    if (!this._debugGroup) {
+      this._debugGroup = new THREE.Group();
+      this._debugGroup.name = "__marker_debug_group";
+      // do not include debug group in worldObjects; it's purely scene-helper
+      this.scene.add(this._debugGroup);
+    }
+    // clear previous debug children
+    while (this._debugGroup.children.length) {
+      const c = this._debugGroup.children.pop();
+      c.geometry && c.geometry.dispose && c.geometry.dispose();
+      c.material && c.material.dispose && c.material.dispose();
+    }
+    // add a short debug line+arrow (not part of scene.children root)
+    const dbgLen = Math.min(this.maxRange, 200);
+    const pts = [origin.clone(), origin.clone().add(direction.clone().multiplyScalar(dbgLen))];
+    const geom = new THREE.BufferGeometry().setFromPoints(pts);
+    const lineMat = new THREE.LineBasicMaterial({ linewidth: 2 });
+    const line = new THREE.Line(geom, lineMat);
+    line.name = "__marker_debug_line";
+    this._debugGroup.add(line);
+    const arrow = new THREE.ArrowHelper(direction.clone(), origin.clone(), dbgLen, 0xff0000);
+    arrow.name = "__marker_debug_arrow";
+    this._debugGroup.add(arrow);
+    // auto-remove after 3s
+    setTimeout(() => {
+      if (!this._debugGroup) return;
+      this._debugGroup.remove(line);
+      this._debugGroup.remove(arrow);
+      geom.dispose(); lineMat.dispose();
+    }, 3000);
 
-    // build candidate list
+    // build candidate list (prefer explicit arrays if supplied)
     let candidates = [];
     if (this.playerObjects && this.playerObjects.length) candidates = candidates.concat(this.playerObjects);
     if (this.worldObjects && this.worldObjects.length) candidates = candidates.concat(this.worldObjects);
     if (!candidates.length) candidates = this.scene.children.slice();
 
-    console.log("[MarkerManager DEBUG] origin:", origin, "dir:", direction, "candidates:", candidates.length);
+    // filter out debug group + non-raycastable objects
+    const isDebug = (o) => (o.name && o.name.startsWith("__marker_debug")) || (o === this._debugGroup);
+    const hasRaycast = (o) => (typeof o.raycast === "function") || o.isMesh || o.isInstancedMesh || o.isSkinnedMesh;
+    // Also include parents that contain meshes by counting children meshes (helpful for Group)
+    const childMeshCount = (o) => {
+      let c = 0;
+      o.traverse && o.traverse((n) => { if (n.isMesh) c++; });
+      return c;
+    };
 
-    // Per-candidate debug (helps find objects that are not raycastable or have no geometry)
-    for (let i = 0; i < candidates.length; i++) {
-      const o = candidates[i];
-      // attempt to print name/type/visibility/geometry info
-      let info = {
-        idx: i,
-        id: o.id,
-        name: o.name || "(noname)",
-        type: o.type,
-        visible: !!o.visible,
-        hasGeometry: !!(o.geometry),
-        isInstancedMesh: (o.isInstancedMesh === true)
-      };
-      console.log("[MarkerManager DEBUG] candidate:", info);
+    const filtered = candidates.filter(o => {
+      if (!o) return false;
+      if (isDebug(o)) return false;
+      if (o.visible === false) return false;
+      if (hasRaycast(o)) return true;
+      // allow groups that actually contain meshes
+      return childMeshCount(o) > 0;
+    });
 
-      // ensure its world matrix is updated
-      o.updateMatrixWorld && o.updateMatrixWorld(true);
+    console.log("[MarkerManager DEBUG] original candidates:", candidates.length, "filtered:", filtered.length);
+    // optional: log candidate mesh counts for quick inspection
+    filtered.forEach((o, i) => {
+      console.log(`[MarkerManager DEBUG] candidate[${i}] type=${o.type} name=${o.name||'(noname)'} meshes=${childMeshCount(o)}`);
+    });
 
-      // do an intersect check just for this object (recurses into children)
-      try {
-        const r = ray.intersectObject(o, true);
-        if (r && r.length) {
-          console.log(`[MarkerManager DEBUG] intersected candidate[${i}]`, info.name, "hits:", r.length, "first:", r[0]);
-        }
-      } catch (err) {
-        console.warn("[MarkerManager DEBUG] intersectObject threw for candidate", info, err);
-      }
-    }
-
-    // full intersect against all candidates
-    const hits = ray.intersectObjects(candidates, true);
+    // now intersect only against filtered list
+    const hits = ray.intersectObjects(filtered, true);
     if (hits && hits.length) {
       const hit = hits[0];
       console.log("[MarkerManager] ray hit:", hit.object.name || hit.object.type || hit.object.id, hit.point);
