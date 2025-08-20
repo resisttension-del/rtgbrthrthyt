@@ -753,9 +753,9 @@ window.localPlayer = {
 
 
 const rm = new RangeMarker({
-  camera,
-  renderer,
-  scene,
+  camera: window.camera,
+  renderer: window.renderer,
+  scene: window.scene,
   THREE,
   unitsPerMeter: 1,      // depends on your unit convention
   markerDuration: 10000, // ms, 0 = persistent
@@ -2910,6 +2910,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
