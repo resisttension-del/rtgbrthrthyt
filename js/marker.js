@@ -14,8 +14,7 @@
  * THREE,            // Pass THREE from your project's import
  * });
  *
- * // in your RAF loop:
- * rm.update();
+ * // NOTE: No need to call rm.update() in your RAF loop anymore.
  *
  * // cleanup:
  * rm.dispose();
@@ -131,7 +130,7 @@ export default class RangeMarker {
       return;
     }
 
-    // CRITICAL: Ensure the camera's matrix is up-to-date before raycasting
+    // The key change: The camera's matrix is only updated here, just before the raycast.
     this.camera.updateMatrixWorld();
 
     const origin = new this._THREE.Vector3().setFromMatrixPosition(this.camera.matrixWorld);
@@ -198,6 +197,7 @@ export default class RangeMarker {
 
     this._marker.timeoutId = setTimeout(() => this._clearMarkerImmediate(), 5000);
 
+    // Position the marker once, just like a bullet hole is created once.
     this._positionMarkerDOM();
   }
 
@@ -208,14 +208,10 @@ export default class RangeMarker {
     this._marker = null;
   }
 
-  // 👇 The fix is here
+  // The update() method is now a no-op since the marker is static.
   update() {
-    if (!this._marker) return;
-
-    // CRITICAL: Ensure the camera's matrix is up-to-date for projection.
-    this.camera.updateMatrixWorld();
-
-    this._positionMarkerDOM();
+    // We no longer update the marker's position every frame.
+    // Its position is "baked" at the time of placement, just like a bullet hole.
   }
 
   _positionMarkerDOM() {
@@ -226,33 +222,15 @@ export default class RangeMarker {
     const wp = this._marker.worldPos;
     if (!cam || !renderer || !dom || !wp || !this._THREE) return;
 
+    // Get the camera's current state for this one-time projection.
+    // This is the same logic as your bullet raycast.
+    cam.updateMatrixWorld();
+
     const worldPt = (wp.clone) ? wp.clone() : new this._THREE.Vector3(wp.x, wp.y, wp.z);
     const v = worldPt.clone();
     v.project(cam);
 
     if (!isFinite(v.x) || !isFinite(v.y) || !isFinite(v.z)) {
-      dom.style.display = 'none';
-      return;
-    }
-
-    let camPos;
-    let camForward;
-    try {
-      camPos = new this._THREE.Vector3().setFromMatrixPosition(cam.matrixWorld);
-      camForward = new this._THREE.Vector3();
-      cam.getWorldDirection(camForward);
-    } catch (e) {
-      dom.style.display = 'none';
-      return;
-    }
-
-    const vecToPoint = worldPt.clone().sub(camPos);
-    if (camForward.dot(vecToPoint) <= 0) {
-      dom.style.display = 'none';
-      return;
-    }
-
-    if (v.x < -1.05 || v.x > 1.05 || v.y < -1.05 || v.y > 1.05) {
       dom.style.display = 'none';
       return;
     }
@@ -268,6 +246,7 @@ export default class RangeMarker {
     dom.style.left = `${sx}px`;
     dom.style.top = `${sy}px`;
 
+    // The distance text is also calculated only once during placement.
     let camPosForDist;
     try {
       camPosForDist = new this._THREE.Vector3().setFromMatrixPosition(cam.matrixWorld);
