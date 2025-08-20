@@ -611,10 +611,7 @@ export async function startGame(username, mapName, initialDetailsEnabled, ffaEna
     const gameTimerElement = document.getElementById('game-timer');
 
 
-    manager = new MarkerManager(scene, window.camera, {
-      unitsPerMeter: 100, // example
-    //  checkBulletPenetration: (o,d,max) => game.checkBulletPenetration(o,d,max)
-    });
+
     
     // The rest of your startGame function remains the same
     initGlobalFogAndShadowParams();
@@ -652,6 +649,12 @@ export async function startGame(username, mapName, initialDetailsEnabled, ffaEna
     initBulletHoles();
     initializeAudioManager(window.camera, scene);
     startSoundListener();
+
+
+        manager = new MarkerManager(scene, window.camera, {
+      unitsPerMeter: 100, // example
+    //  checkBulletPenetration: (o,d,max) => game.checkBulletPenetration(o,d,max)
+    });
 
 const initialBodyColor = Math.floor(Math.random() * 0xffffff);
 
@@ -2905,6 +2908,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
