@@ -25,7 +25,12 @@ export default class RangeMarker {
     this._marker = null;
 
     this._onKeyDown = this._onKeyDown.bind(this);
-    if (this.autoListenKey) window.addEventListener('keydown', this._onKeyDown);
+    if (this.autoListenKey) {
+      window.addEventListener('keydown', this._onKeyDown);
+      console.log('RangeMarker: key listener added (autoListenKey=true)');
+    } else {
+      console.log('RangeMarker: key listener not added (autoListenKey=false)');
+    }
 
     if (this._THREE && this._THREE.Raycaster) {
       this._raycaster = new this._THREE.Raycaster();
@@ -34,32 +39,54 @@ export default class RangeMarker {
     } else {
       this._raycaster = null;
     }
+
+    console.log('RangeMarker constructed', {
+      defaultDistance: this.defaultDistance,
+      markerDuration: this.markerDuration,
+      hasTHREE: !!this._THREE,
+      hasRaycaster: !!this._raycaster
+    });
   }
 
   _onKeyDown(ev) {
+    console.log('_onKeyDown', ev.key);
     const active = document.activeElement;
-    if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable)) return;
-    if (ev.repeat) return;
+    if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable)) {
+      console.log('_onKeyDown - ignored because focus is input/textarea/contentEditable', active.tagName);
+      return;
+    }
+    if (ev.repeat) {
+      console.log('_onKeyDown - ignored repeat');
+      return;
+    }
     if (ev.key === 't' || ev.key === 'T') {
+      console.log('_onKeyDown - triggering placeMarker()');
       this.placeMarker();
     }
   }
 
   _collectCandidates() {
     const candidates = [];
-    if (!this.scene || !this._THREE) return candidates;
+    if (!this.scene || !this._THREE) {
+      console.log('_collectCandidates - no scene or THREE');
+      return candidates;
+    }
     this.scene.traverse((o) => {
       if ((o.isMesh || o.isInstancedMesh) && o.visible && o.geometry) {
         if (o.userData && o.userData.ignoreRangeMarker) return;
         candidates.push(o);
       }
     });
+    console.log('_collectCandidates - found candidates:', candidates.length);
     return candidates;
   }
 
   _checkPlayerHit(origin, direction) {
     let closest = null;
-    if (!window.remotePlayers) return null;
+    if (!window.remotePlayers) {
+      console.log('_checkPlayerHit - no window.remotePlayers');
+      return null;
+    }
 
     for (const rp of Object.values(window.remotePlayers)) {
       const meshes = [];
@@ -80,16 +107,30 @@ export default class RangeMarker {
         }
       }
     }
+    console.log('_checkPlayerHit - result:', closest ? { distance: closest.distance } : null);
     return closest;
   }
 
   placeMarker() {
+    // early log - proves this function is reached
+    console.log('placeMarker() called', {
+      hasThree: !!this._THREE,
+      hasRaycaster: !!this._raycaster,
+      hasScene: !!this.scene
+    });
+
     if (!this._THREE || !this._raycaster || !this.scene) {
+      console.log('placeMarker - exiting early: missing THREE/raycaster/scene', {
+        hasThree: !!this._THREE,
+        hasRaycaster: !!this._raycaster,
+        hasScene: !!this.scene
+      });
       return;
     }
 
     // Cancel any outstanding timeout from a previous marker so it won't clear the new one.
     if (this._markerTimeoutId) {
+      console.log('placeMarker - clearing previous timeout', this._markerTimeoutId);
       clearTimeout(this._markerTimeoutId);
       this._markerTimeoutId = null;
     }
@@ -100,8 +141,11 @@ export default class RangeMarker {
     const direction = new this._THREE.Vector3();
     this.camera.getWorldDirection(direction);
 
+    console.log('placeMarker - origin/direction', { origin: origin.clone(), direction: direction.clone() });
+
     this._raycaster.set(origin, direction);
     this._raycaster.far = Number.isFinite(this.defaultDistance) ? this.defaultDistance : this._raycaster.far;
+    console.log('placeMarker - raycaster.far set to', this._raycaster.far);
 
     const playerHit = this._checkPlayerHit(origin, direction);
 
@@ -114,12 +158,17 @@ export default class RangeMarker {
       hitPoint = playerHit.intersection;
       // approximate normal facing the camera
       hitNormal = direction.clone().negate();
+      console.log('placeMarker - playerHit chosen', { distance: playerHit.distance });
     } else {
       const candidates = this._collectCandidates();
-      if (!candidates.length) return;
+      if (!candidates.length) {
+        console.log('placeMarker - no candidates -> returning');
+        return;
+      }
 
       const hits = this._raycaster.intersectObjects(candidates, true);
       if (!hits || !hits.length) {
+        console.log('placeMarker - hits empty -> returning');
         return;
       }
 
@@ -133,11 +182,18 @@ export default class RangeMarker {
         chosen = h;
         hitPoint = chosen.point.clone();
         hitNormal = (chosen.face && chosen.object) ? chosen.face.normal.clone().transformDirection(chosen.object.matrixWorld).normalize() : direction.clone().negate();
+        console.log('placeMarker - geometry hit chosen', {
+          distance: chosen.distance,
+          point: hitPoint.clone()
+        });
         break;
       }
     }
 
-    if (!chosen) return;
+    if (!chosen) {
+      console.log('placeMarker - nothing chosen -> returning');
+      return;
+    }
 
     // Remove any existing marker before creating a new one
     this._clearMarkerImmediate();
@@ -231,34 +287,38 @@ export default class RangeMarker {
     this.scene.add(marker);
     this._marker = marker;
 
+    console.log('placeMarker - marker added to scene', {
+      markerPositionLocal: marker.position.clone(),
+      markerPositionWorld: (function () { const v = new THREE.Vector3(); marker.getWorldPosition(v); return v; })(),
+      parent: marker.parent ? (marker.parent.name || marker.parent.type) : '(none)'
+    });
+
     // Debug checks - useful to diagnose missing Z/local->world issues
     try {
-      // hit point and offset (world)
-      console.debug('RangeMarker debug - hitPoint (world):', hitPoint.clone());
-      console.debug('RangeMarker debug - offsetWorld:', offsetWorld.clone());
-      // marker.local position (position property)
-      console.debug('RangeMarker debug - marker.position (local):', marker.position.clone());
-      // marker world position
+      console.log('RangeMarker debug - hitPoint (world):', hitPoint.clone());
+      console.log('RangeMarker debug - offsetWorld:', offsetWorld.clone());
+      console.log('RangeMarker debug - marker.position (local):', marker.position.clone());
       const wp = new THREE.Vector3();
       marker.getWorldPosition(wp);
-      console.debug('RangeMarker debug - marker.getWorldPosition():', wp);
-      // parent info
-      console.debug('RangeMarker debug - marker.parent:', marker.parent ? (marker.parent.name || marker.parent.type) : '(none)');
-      // sanity checks
+      console.log('RangeMarker debug - marker.getWorldPosition():', wp);
+      console.log('RangeMarker debug - marker.parent:', marker.parent ? (marker.parent.name || marker.parent.type) : '(none)');
       if (!isFinite(wp.x) || !isFinite(wp.y) || !isFinite(wp.z)) {
         console.warn('RangeMarker debug - marker world position contains non-finite values', wp);
       }
     } catch (e) {
-      // don't break runtime if debug logging fails
-      console.warn('RangeMarker debug - logging failed', e);
+      console.log('RangeMarker debug - logging failed', e);
     }
 
     // set a timeout to auto-remove marker only if duration > 0
     if (this.markerDuration > 0) {
       this._markerTimeoutId = setTimeout(() => {
+        console.log('marker timeout firing - clearing marker');
         this._clearMarkerImmediate();
         this._markerTimeoutId = null;
       }, this.markerDuration);
+      console.log('placeMarker - marker timeout set', this._markerTimeoutId, 'duration(ms):', this.markerDuration);
+    } else {
+      console.log('placeMarker - markerDuration set to 0 => marker will persist until cleared manually');
     }
   }
 
@@ -266,18 +326,25 @@ export default class RangeMarker {
   update() {}
 
   _clearMarkerImmediate() {
+    console.log('_clearMarkerImmediate called');
     // Cancel any pending timeout (important to avoid stale timeouts clearing later markers)
     if (this._markerTimeoutId) {
+      console.log('_clearMarkerImmediate - clearing timeout', this._markerTimeoutId);
       clearTimeout(this._markerTimeoutId);
       this._markerTimeoutId = null;
     }
 
-    if (!this._marker) return;
+    if (!this._marker) {
+      console.log('_clearMarkerImmediate - no marker to clear');
+      return;
+    }
 
     // Clear per-frame hook to avoid lingering functions
     try {
       this._marker.onBeforeRender = null;
-    } catch (e) {}
+    } catch (e) {
+      console.log('_clearMarkerImmediate - failed clearing onBeforeRender', e);
+    }
 
     this.scene.remove(this._marker);
     if (this._marker.geometry) this._marker.geometry.dispose();
@@ -285,11 +352,13 @@ export default class RangeMarker {
       if (this._marker.material.map) this._marker.material.map.dispose();
       this._marker.material.dispose();
     }
+    console.log('_clearMarkerImmediate - marker removed/disposed');
     this._marker = null;
   }
 
   dispose() {
     if (this.autoListenKey) window.removeEventListener('keydown', this._onKeyDown);
     this._clearMarkerImmediate();
+    console.log('RangeMarker disposed');
   }
 }
