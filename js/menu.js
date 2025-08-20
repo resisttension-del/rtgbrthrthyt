@@ -4977,9 +4977,10 @@ if (serverShutdown) {
   setAuthMessage("Server is temporarily offline for maintenance.", true);
   disableUIControls();
 
-  // schedule reload *before* the SweetAlert (2 seconds)
+  // schedule reload (clear any previous timer, but DO NOT cancel it later)
   if (reloadTimer) clearTimeout(reloadTimer);
   reloadTimer = setTimeout(() => {
+    reloadTimer = null; // clear reference after firing
     try {
       window.location.reload();
     } catch (e) {
@@ -4987,6 +4988,7 @@ if (serverShutdown) {
     }
   }, 2000);
 
+  // show the SweetAlert — we do NOT touch the timer here
   try {
     await Swal.fire({
       title: 'Server Offline',
@@ -4996,13 +4998,6 @@ if (serverShutdown) {
     });
   } catch (e) {
     console.warn("attachShutdownListener: Swal modal failed:", e);
-  } finally {
-    // If the modal was acted on before the timer fired, cancel the scheduled reload.
-    // If the reload already happened, this code won't run because the page was reloaded.
-    if (reloadTimer) {
-      clearTimeout(reloadTimer);
-      reloadTimer = null;
-    }
   }
 }
                     return;
