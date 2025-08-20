@@ -1274,12 +1274,13 @@ fireBullet(spreadAngle) {
     while (mesh && mesh.userData && mesh.userData.playerId == null) mesh = mesh.parent;
 
     if (mesh && mesh.userData && mesh.userData.playerId != null) {
-      const isHead = hit.isHead;
+      const isHead = !!hit.isHead;
       const baseDamage = isHead ? this.stats.headshotDamage : this.stats.bodyDamage;
 
       const distanceMeters = worldUnitsToMeters(origin.distanceTo(hit.intersection), this.unitsPerMeter);
 
-      let damageToApply = calculateDamageWithDropOff(baseDamage, distanceMeters, this.stats.damageDropOff);
+      // <-- FIX: pass isHead so calculateDamageWithDropOff uses head/body absolute arrays when present
+      let damageToApply = calculateDamageWithDropOff(baseDamage, distanceMeters, this.stats.damageDropOff, isHead);
 
       if (traj.isPenetrationShot) {
         damageToApply *= 0.5;
