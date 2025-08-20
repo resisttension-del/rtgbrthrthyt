@@ -199,7 +199,7 @@ export class MarkerManager {
   _updateMarkerLabel(marker) {
     // compute distance in world units, convert to meters using unitsPerMeter:
     const distWorld = this.camera.position.distanceTo(marker.root.position);
-    const meters = distWorld / this.unitsPerMeter;
+    const meters = (distWorld / this.unitsPerMeter)*100;
     const metersStr = meters >= 10 ? Math.round(meters) + " m" : meters.toFixed(2) + " m";
 
     // Optionally show coordinates in meters
