@@ -49,18 +49,6 @@ createTracer,
 uiDbRefs
 } from "./ui.js";
 
-import RangeMarker from './marker.js';
-
-// somewhere after camera & renderer exist:
-const rm = new RangeMarker({
-  camera,
-  renderer,
-  getSpreadDirection,       // your function
-  checkBulletPenetration,   // your function
-  stats: { tracerLength: 2000 }, // optional
-  unitsPerMeter: 1,         // or 100 for Unreal
-});
-
 import { usersRef } from './firebase-config.js';
 
 import { initInput, inputState, postFrameCleanup, handleWeaponSwitch } from "./input.js";
@@ -612,6 +600,17 @@ export async function pulsePlayerHit(victimId) {
 }
 
 
+import RangeMarker from './marker.js';
+
+// somewhere after camera & renderer exist:
+const rm = new RangeMarker({
+  camera,
+  renderer,
+  getSpreadDirection,       // your function
+  checkBulletPenetration,   // your function
+  stats: { tracerLength: 2000 }, // optional
+  unitsPerMeter: 1,         // or 100 for Unreal
+});
 
 
 
@@ -2116,7 +2115,6 @@ function round2(n) {
 }
 
 
-
 export function animate(timestamp) {
     // Schedule the next frame *first*. This ensures the loop continues
     // even if an error occurs later in this frame.
@@ -2911,8 +2909,6 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
-
-
 
 
 
