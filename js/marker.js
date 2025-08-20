@@ -11,6 +11,12 @@ export default class RangeMarker {
     this.autoListenKey = (opts.autoListenKey === undefined) ? true : Boolean(opts.autoListenKey);
     this.defaultDistance = (opts.defaultDistance && Number(opts.defaultDistance) > 0) ? Number(opts.defaultDistance) : 1000;
 
+    // NEW: how long marker should stay (ms). set to 0 to never auto-remove.
+    this.markerDuration = (opts.markerDuration !== undefined && Number(opts.markerDuration) >= 0) ? Number(opts.markerDuration) : 10000;
+
+    // NEW: store timeout id so old timeouts can be cancelled
+    this._markerTimeoutId = null;
+
     this._THREE = opts.THREE || (typeof THREE !== 'undefined' ? THREE : null);
     if (!this._THREE) {
       console.warn('RangeMarker: THREE not found; marker will be disabled.');
@@ -77,153 +83,167 @@ export default class RangeMarker {
     return closest;
   }
 
-placeMarker() {
-    if (!this._THREE || !this._raycaster || !this.scene) {
-      return;
-    }
+  placeMarker() {
+    if (!this._THREE || !this._raycaster || !this.scene) {
+      return;
+    }
 
-    this.camera.updateMatrixWorld();
+    // Cancel any outstanding timeout from a previous marker so it won't clear the new one.
+    if (this._markerTimeoutId) {
+      clearTimeout(this._markerTimeoutId);
+      this._markerTimeoutId = null;
+    }
 
-    const origin = new this._THREE.Vector3().setFromMatrixPosition(this.camera.matrixWorld);
-    const direction = new this._THREE.Vector3();
-    this.camera.getWorldDirection(direction);
+    this.camera.updateMatrixWorld();
 
-    this._raycaster.set(origin, direction);
-    this._raycaster.far = Number.isFinite(this.defaultDistance) ? this.defaultDistance : this._raycaster.far;
+    const origin = new this._THREE.Vector3().setFromMatrixPosition(this.camera.matrixWorld);
+    const direction = new this._THREE.Vector3();
+    this.camera.getWorldDirection(direction);
 
-    const playerHit = this._checkPlayerHit(origin, direction);
+    this._raycaster.set(origin, direction);
+    this._raycaster.far = Number.isFinite(this.defaultDistance) ? this.defaultDistance : this._raycaster.far;
 
-    let chosen = null;
-    let hitPoint = null;
-    let hitNormal = null;
+    const playerHit = this._checkPlayerHit(origin, direction);
 
-    if (playerHit) {
-      chosen = playerHit;
-      hitPoint = playerHit.intersection;
-      // approximate normal facing the camera
-      hitNormal = direction.clone().negate();
-    } else {
-      const candidates = this._collectCandidates();
-      if (!candidates.length) return;
+    let chosen = null;
+    let hitPoint = null;
+    let hitNormal = null;
 
-      const hits = this._raycaster.intersectObjects(candidates, true);
-      if (!hits || !hits.length) {
-        return;
-      }
+    if (playerHit) {
+      chosen = playerHit;
+      hitPoint = playerHit.intersection;
+      // approximate normal facing the camera
+      hitNormal = direction.clone().negate();
+    } else {
+      const candidates = this._collectCandidates();
+      if (!candidates.length) return;
 
-      for (let i = 0; i < hits.length; i++) {
-        const h = hits[i];
-        if (!h) continue;
-        if (!isFinite(h.distance) || !h.point) continue;
-        const p = h.point;
-        if (!isFinite(p.x) || !isFinite(p.y) || !isFinite(p.z)) continue;
-        if (h.object && h.object.userData && h.object.userData.ignoreRangeMarker) continue;
-        chosen = h;
-        hitPoint = chosen.point.clone();
-        hitNormal = (chosen.face && chosen.object) ? chosen.face.normal.clone().transformDirection(chosen.object.matrixWorld).normalize() : direction.clone().negate();
-        break;
-      }
-    }
+      const hits = this._raycaster.intersectObjects(candidates, true);
+      if (!hits || !hits.length) {
+        return;
+      }
 
-    if (!chosen) return;
+      for (let i = 0; i < hits.length; i++) {
+        const h = hits[i];
+        if (!h) continue;
+        if (!isFinite(h.distance) || !h.point) continue;
+        const p = h.point;
+        if (!isFinite(p.x) || !isFinite(p.y) || !isFinite(p.z)) continue;
+        if (h.object && h.object.userData && h.object.userData.ignoreRangeMarker) continue;
+        chosen = h;
+        hitPoint = chosen.point.clone();
+        hitNormal = (chosen.face && chosen.object) ? chosen.face.normal.clone().transformDirection(chosen.object.matrixWorld).normalize() : direction.clone().negate();
+        break;
+      }
+    }
 
-    // Remove any existing marker before creating a new one
-    this._clearMarkerImmediate();
+    if (!chosen) return;
 
-    // Prepare text (distance)
-    const distUnits = origin.distanceTo(hitPoint);
-    const meters = distUnits / this.unitsPerMeter;
-    const text = `${meters.toFixed(2)} m`;
+    // Remove any existing marker before creating a new one
+    this._clearMarkerImmediate();
 
-    // Create canvas texture for readable text
-    const canvas = document.createElement('canvas');
-    canvas.width = 512;
-    canvas.height = 64;
-    const ctx = canvas.getContext('2d');
-    ctx.fillStyle = 'rgba(0,0,0,0.72)';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.font = '32px monospace';
-    ctx.fillStyle = '#fff';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(text, canvas.width / 2, canvas.height / 2);
+    // Prepare text (distance)
+    const distUnits = origin.distanceTo(hitPoint);
+    const meters = distUnits / this.unitsPerMeter;
+    const text = `${meters.toFixed(2)} m`;
 
-    const texture = new this._THREE.CanvasTexture(canvas);
-    texture.needsUpdate = true;
-    texture.minFilter = this._THREE.LinearFilter;
-    texture.generateMipmaps = false;
+    // Create canvas texture for readable text
+    const canvas = document.createElement('canvas');
+    canvas.width = 512;
+    canvas.height = 64;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = 'rgba(0,0,0,0.72)';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.font = '32px monospace';
+    ctx.fillStyle = '#fff';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(text, canvas.width / 2, canvas.height / 2);
 
-    // Plane for marker (aspect ratio matches canvas)
-    const aspect = canvas.width / canvas.height;
-    const baseHeight = 2.0; // adjust visual size (0.2 * 10 = 2.0)
-    const markerGeometry = new this._THREE.PlaneGeometry(baseHeight * aspect, baseHeight);
+    const texture = new this._THREE.CanvasTexture(canvas);
+    texture.needsUpdate = true;
+    texture.minFilter = this._THREE.LinearFilter;
+    texture.generateMipmaps = false;
 
-    const markerMaterial = new this._THREE.MeshBasicMaterial({
-      map: texture,
-      transparent: true,
-      opacity: 0.95,
-      side: this._THREE.DoubleSide,
-      // the critical bits that force draw-on-top:
-      depthTest: false,
-      depthWrite: false,
-    });
+    // Plane for marker (aspect ratio matches canvas)
+    const aspect = canvas.width / canvas.height;
+    const baseHeight = 2.0; // adjust visual size (0.2 * 10 = 2.0)
+    const markerGeometry = new this._THREE.PlaneGeometry(baseHeight * aspect, baseHeight);
 
-    const marker = new this._THREE.Mesh(markerGeometry, markerMaterial);
+    const markerMaterial = new this._THREE.MeshBasicMaterial({
+      map: texture,
+      transparent: true,
+      opacity: 0.95,
+      side: this._THREE.DoubleSide,
+      // the critical bits that force draw-on-top:
+      depthTest: false,
+      depthWrite: false,
+    });
 
-    // Position: slightly above the surface to avoid z-fighting
-    const offset = hitNormal.clone().multiplyScalar(0.01); // small offset
-    marker.position.copy(hitPoint).add(offset);
+    const marker = new this._THREE.Mesh(markerGeometry, markerMaterial);
 
-    // Keep the surface normal in userData (if you need it later)
-    marker.userData.surfaceNormal = hitNormal.clone();
+    // Position: slightly above the surface to avoid z-fighting
+    const offset = hitNormal.clone().multiplyScalar(0.01); // small offset
+    marker.position.copy(hitPoint).add(offset);
 
-    // Ensure it's rendered last / on top
-    marker.renderOrder = 0x7fffffff; // very large number
+    // Keep the surface normal in userData (if you need it later)
+    marker.userData.surfaceNormal = hitNormal.clone();
 
-    // Keep references for closures
-    const self = this;
-    const THREE = this._THREE;
+    // Ensure it's rendered last / on top
+    marker.renderOrder = 0x7fffffff; // very large number
 
-    // Make the marker always face the camera/player and ensure it's drawn on top.
-    // We use onBeforeRender which runs every frame for this mesh.
-    marker.onBeforeRender = function (renderer, scene, camera) {
-      // compute unit vector from marker to camera
-      const toCam = new THREE.Vector3().subVectors(camera.position, this.position).normalize();
+    // Keep references for closures
+    const THREE = this._THREE;
 
-      // Compute quaternion that rotates plane's +Z (0,0,1) to point toward camera
-      const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), toCam);
-      this.quaternion.copy(q);
+    // Make the marker always face the camera/player and ensure it's drawn on top.
+    // We use onBeforeRender which runs every frame for this mesh.
+    marker.onBeforeRender = function (renderer, scene, camera) {
+      // compute unit vector from marker to camera
+      const toCam = new THREE.Vector3().subVectors(camera.position, this.position).normalize();
 
-      // Optionally, you might want the text always upright in Y (no roll).
-      // To keep the marker upright (preserve Y axis up), zero out roll:
-      const euler = new THREE.Euler().setFromQuaternion(this.quaternion, 'YXZ');
-      euler.z = 0; // remove roll
-      this.quaternion.setFromEuler(euler);
+      // Compute quaternion that rotates plane's +Z (0,0,1) to point toward camera
+      const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), toCam);
+      this.quaternion.copy(q);
 
-      // Ensure marker renders on top by clearing depth before it draws.
-      // This is a small, localized trick; it keeps the rest of the scene's depth intact
-      // because we clear depth just before rendering this mesh.
-      renderer.clearDepth();
-    };
+      // Optionally, you might want the text always upright in Y (no roll).
+      // To keep the marker upright (preserve Y axis up), zero out roll:
+      const euler = new THREE.Euler().setFromQuaternion(this.quaternion, 'YXZ');
+      euler.z = 0; // remove roll
+      this.quaternion.setFromEuler(euler);
 
-    // Scale with distance a bit so text stays readable (tweak multiplier as desired)
-    const scaleFactor = Math.max(0.6, meters * 0.03);
-    marker.scale.setScalar(scaleFactor);
+      // Ensure marker renders on top by clearing depth before it draws.
+      // This is a small, localized trick; it keeps the rest of the scene's depth intact
+      // because we clear depth just before rendering this mesh.
+      renderer.clearDepth();
+    };
 
-    // Add to scene and track
-    this.scene.add(marker);
-    this._marker = marker;
+    // Scale with distance a bit so text stays readable (tweak multiplier as desired)
+    const scaleFactor = Math.max(0.6, meters * 0.03);
+    marker.scale.setScalar(scaleFactor);
 
-    // Auto remove after 5s (you can change)
-    setTimeout(() => {
-      this._clearMarkerImmediate();
-    }, 10000);
-  }
+    // Add to scene and track
+    this.scene.add(marker);
+    this._marker = marker;
+
+    // NEW: set a timeout to auto-remove marker only if duration > 0
+    if (this.markerDuration > 0) {
+      this._markerTimeoutId = setTimeout(() => {
+        this._clearMarkerImmediate();
+        this._markerTimeoutId = null;
+      }, this.markerDuration);
+    }
+  }
 
   // No longer needed since marker handles its own onBeforeRender billboarding
   update() {}
 
   _clearMarkerImmediate() {
+    // Cancel any pending timeout (important to avoid stale timeouts clearing later markers)
+    if (this._markerTimeoutId) {
+      clearTimeout(this._markerTimeoutId);
+      this._markerTimeoutId = null;
+    }
+
     if (!this._marker) return;
 
     // Clear per-frame hook to avoid lingering functions
