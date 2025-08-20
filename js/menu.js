@@ -4940,10 +4940,13 @@ async function attachShutdownListener() {
         const node = menuRoot.child('shutdown');
 
         shutdownListenerAttached = true;
-        let isFirst = true; // Re-introduce the flag
+        let reloadPerformed = false; // A new flag to track if a reload has been initiated
         const RELOAD_FLAG = 'voidffa_server_shutdown_reload_scheduled';
 
-        const doImmediateReload = async (isInitial) => {
+        const doImmediateReload = async () => {
+            if (reloadPerformed) return; // Prevent multiple reloads
+            reloadPerformed = true;
+
             try {
                 // Prevent reload-loop in this tab
                 if (sessionStorage.getItem(RELOAD_FLAG) === '1') {
@@ -4954,20 +4957,9 @@ async function attachShutdownListener() {
                 // Ignore sessionStorage failures and still attempt reload
             }
             try { sessionStorage.setItem(RELOAD_FLAG, '1'); } catch (e) {}
-
+            
             try {
                 console.warn("attachShutdownListener: performing immediate reload due to server shutdown.");
-
-                // Show SweetAlert only if it's not the initial reload
-                if (!isInitial) {
-                    await Swal.fire({
-                        title: 'Server Offline',
-                        html: `<div style="text-align:left; font-size:14px; max-width:420px;">The server has been shut down for maintenance. The page will reload now.</div>`,
-                        icon: 'info',
-                        confirmButtonText: 'OK'
-                    });
-                }
-
                 location.reload();
             } catch (e) {
                 console.warn("attachShutdownListener: location.reload failed, falling back to href assign:", e);
@@ -4980,32 +4972,29 @@ async function attachShutdownListener() {
                 const val = snap.exists() ? snap.val() : false;
                 const isShutdown = !!val;
 
-                // Handle the first-time detection of shutdown
-                if (isFirst) {
-                    isFirst = false;
-                    serverShutdown = isShutdown;
-
-                    if (serverShutdown) {
-                        console.warn("attachShutdownListener: initial server shutdown detected. Performing immediate reload.");
-                        setAuthMessage("Server is temporarily offline for maintenance.", true);
-                        disableUIControls();
-                        // Call reload function with 'true' to signal it's the initial load
-                        doImmediateReload(true);
-                    }
-                    return;
-                }
-
                 // Handle server transition from online to offline
                 if (isShutdown && !serverShutdown) {
                     serverShutdown = true;
                     console.warn("attachShutdownListener: server shutdown detected (transition). Disabling UI and reloading now.");
                     setAuthMessage("Server is temporarily offline for maintenance.", true);
                     disableUIControls();
-                    // Call reload function with 'false' to show the alert
-                    doImmediateReload(false);
+
+                    // Check if this is the first time the server has been down since the page loaded
+                    if (!sessionStorage.getItem(RELOAD_FLAG)) {
+                        doImmediateReload();
+                    } else {
+                        // This case handles a subsequent shutdown, maybe after the server came back up and went down again
+                        await Swal.fire({
+                            title: 'Server Offline',
+                            html: `<div style="text-align:left; font-size:14px; max-width:420px;">The server has been shut down for maintenance. The page will reload now.</div>`,
+                            icon: 'info',
+                            confirmButtonText: 'OK'
+                        });
+                        doImmediateReload();
+                    }
                     return;
                 }
-
+                
                 // Handle server transition from offline to online
                 if (!isShutdown && serverShutdown) {
                     console.log("attachShutdownListener: server returned online. Re-enabling UI and clearing reload marker.");
@@ -5016,6 +5005,17 @@ async function attachShutdownListener() {
                     return;
                 }
 
+                // Initial state check
+                if (isShutdown) {
+                    serverShutdown = isShutdown;
+                    console.warn("attachShutdownListener: initial state is shutdown.");
+                    setAuthMessage("Server is temporarily offline for maintenance.", true);
+                    disableUIControls();
+                    // If the page just loaded into a shutdown state, immediately reload without a modal
+                    if (!sessionStorage.getItem(RELOAD_FLAG)) {
+                       doImmediateReload();
+                    }
+                }
             } catch (e) {
                 console.warn("attachShutdownListener: error handling snapshot:", e);
             }
