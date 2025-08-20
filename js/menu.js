@@ -4972,34 +4972,15 @@ async function attachShutdownListener() {
                 if (isFirst) {
                     isFirst = false;
                     serverShutdown = isShutdown;
-if (serverShutdown) {
-  console.warn("attachShutdownListener: initial server shutdown detected. Disabling UI and reloading now.");
-  setAuthMessage("Server is temporarily offline for maintenance.", true);
-  disableUIControls();
+                        if (serverShutdown) {
+                            console.warn("attachShutdownListener: initial server shutdown detected. Disabling UI and scheduling reload.");
+                            setAuthMessage("Server is temporarily offline for maintenance.", true);
+                            disableUIControls();
+                            scheduleReloadOnce(5000);
+                        }
+                        return;
+                    }
 
-  // schedule reload (clear any previous timer, but DO NOT cancel it later)
-  if (reloadTimer) clearTimeout(reloadTimer);
-  reloadTimer = setTimeout(() => {
-    reloadTimer = null; // clear reference after firing
-    try {
-      window.location.reload();
-    } catch (e) {
-      try { window.location.href = window.location.href; } catch (err) { console.error("reload fallback failed", err); }
-    }
-  }, 2000);
-
-  // show the SweetAlert — we do NOT touch the timer here
-  try {
-    await Swal.fire({
-      title: 'Server Offline',
-      html: `<div style="text-align:left; font-size:14px; max-width:420px;">The server is currently shut down for maintenance. You cannot start games or sign in right now. The page will reload automatically when the server is back online.</div>`,
-      icon: 'info',
-      confirmButtonText: 'OK'
-    });
-  } catch (e) {
-    console.warn("attachShutdownListener: Swal modal failed:", e);
-  }
-}
                     return;
                 }
 
