@@ -2,24 +2,24 @@
  * Minimal standalone range marker (self-contained raycast logic).
  *
  * Usage:
- *   import RangeMarker from './marker.js';
- *   const rm = new RangeMarker({
- *     camera,           // THREE.Camera (required)
- *     renderer,         // THREE.WebGLRenderer (required)
- *     scene,            // THREE.Scene (required for raycasting)
- *     unitsPerMeter: 1, // game units per meter - default 1
- *     domParent: document.body,
- *     autoListenKey: true,   // listen for 't' automatically
- *     defaultDistance: 1000, // max ray distance (world units)
- *   });
+ * import RangeMarker from './RangeMarker.js';
+ * const rm = new RangeMarker({
+ * camera,               // THREE.Camera (required)
+ * renderer,             // THREE.WebGLRenderer (required)
+ * scene,                // THREE.Scene (required for raycasting)
+ * unitsPerMeter: 1,     // game units per meter - default 1
+ * domParent: document.body,
+ * autoListenKey: true,   // listen for 't' automatically
+ * defaultDistance: 1000, // max ray distance (world units)
+ * THREE,                // Pass THREE from your project's import
+ * });
  *
- *   // in your RAF loop:
- *   rm.update();
+ * // in your RAF loop:
+ * rm.update();
  *
- *   // cleanup:
- *   rm.dispose();
+ * // cleanup:
+ * rm.dispose();
  */
-
 export default class RangeMarker {
   constructor(opts = {}) {
     if (!opts.camera) throw new Error('RangeMarker: camera required');
@@ -40,7 +40,7 @@ export default class RangeMarker {
     }
 
     // internal marker state
-    this._marker = null; // { dom, worldPos: Vector3 plain or THREE.Vector3, timeoutId }
+    this._marker = null; // { dom, worldPos: Vector3, timeoutId }
 
     this._injectStyles();
 
@@ -119,10 +119,10 @@ export default class RangeMarker {
       // nothing we can do without THREE/scene/raycaster
       return;
     }
-
-    // ensure matrices are current
-    if (typeof this.scene.updateMatrixWorld === 'function') this.scene.updateMatrixWorld(true);
-    if (this.camera && typeof this.camera.updateMatrixWorld === 'function') this.camera.updateMatrixWorld();
+    
+    // CRITICAL FIX: Ensure the camera's matrix is up-to-date before raycasting
+    // This is especially important when using external controls (like OrbitControls).
+    this.camera.updateMatrixWorld();
 
     // compute camera world position
     let camPos;
@@ -239,12 +239,6 @@ export default class RangeMarker {
    */
   update() {
     if (!this._marker) return;
-
-    // Ensure the camera's matrix is up to date before using it
-    if (this.camera.matrixWorldNeedsUpdate) {
-        this.camera.updateMatrixWorld();
-    }
-    
     this._positionMarkerDOM();
   }
 
