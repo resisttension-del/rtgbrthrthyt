@@ -1,20 +1,21 @@
 /**
  * Minimal standalone range marker (self-contained raycast logic).
  *
+ * This version creates a 3D THREE.Mesh in the scene, similar to a bullet hole.
+ *
  * Usage:
  * import RangeMarker from './RangeMarker.js';
  * const rm = new RangeMarker({
  * camera,           // THREE.Camera (required)
  * renderer,         // THREE.WebGLRenderer (required)
- * scene,            // THREE.Scene (required for raycasting)
+ * scene,            // THREE.Scene (required for raycasting and adding marker)
  * unitsPerMeter: 1,  // game units per meter - default 1
- * domParent: document.body,
  * autoListenKey: true, // listen for 't' automatically
  * defaultDistance: 1000, // max ray distance (world units)
  * THREE,            // Pass THREE from your project's import
  * });
  *
- * // NOTE: No need to call rm.update() in your RAF loop anymore.
+ * // Note: No need to call rm.update() in your RAF loop anymore.
  *
  * // cleanup:
  * rm.dispose();
@@ -23,12 +24,12 @@ export default class RangeMarker {
   constructor(opts = {}) {
     if (!opts.camera) throw new Error('RangeMarker: camera required');
     if (!opts.renderer) throw new Error('RangeMarker: renderer required');
+    if (!opts.scene) throw new Error('RangeMarker: scene required for 3D marker');
 
     this.camera = opts.camera;
     this.renderer = opts.renderer;
-    this.scene = opts.scene || null;
+    this.scene = opts.scene;
     this.unitsPerMeter = (opts.unitsPerMeter && Number(opts.unitsPerMeter) > 0) ? Number(opts.unitsPerMeter) : 1;
-    this.domParent = opts.domParent || document.body;
     this.autoListenKey = (opts.autoListenKey === undefined) ? true : Boolean(opts.autoListenKey);
     this.defaultDistance = (opts.defaultDistance && Number(opts.defaultDistance) > 0) ? Number(opts.defaultDistance) : 1000;
 
@@ -37,9 +38,8 @@ export default class RangeMarker {
       console.warn('RangeMarker: THREE not found; marker will be disabled.');
     }
 
+    // The marker is now a THREE.Object3D
     this._marker = null;
-
-    this._injectStyles();
 
     this._onKeyDown = this._onKeyDown.bind(this);
     if (this.autoListenKey) window.addEventListener('keydown', this._onKeyDown);
@@ -51,31 +51,6 @@ export default class RangeMarker {
     } else {
       this._raycaster = null;
     }
-  }
-
-  _injectStyles() {
-    if (document.getElementById('rm-styles')) return;
-    const s = document.createElement('style');
-    s.id = 'rm-styles';
-    s.textContent = `
-      .rm-marker {
-        position: absolute;
-        pointer-events: none;
-        transform: translate(-50%, -120%);
-        background: rgba(0,0,0,0.72);
-        color: #fff;
-        padding: 6px 8px;
-        border-radius: 6px;
-        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, "Roboto Mono", monospace;
-        font-size: 13px;
-        white-space: nowrap;
-        z-index: 2147483647;
-        box-shadow: 0 2px 6px rgba(0,0,0,0.45);
-      }
-      .rm-marker .val { font-weight: 700; }
-      .rm-marker .unit { margin-left:6px; opacity:0.9; }
-    `;
-    document.head.appendChild(s);
   }
 
   _onKeyDown(ev) {
@@ -98,7 +73,7 @@ export default class RangeMarker {
     });
     return candidates;
   }
-  
+
   _checkPlayerHit(origin, direction) {
     let closest = null;
     if (!window.remotePlayers) return null;
@@ -130,7 +105,6 @@ export default class RangeMarker {
       return;
     }
 
-    // The key change: The camera's matrix is only updated here, just before the raycast.
     this.camera.updateMatrixWorld();
 
     const origin = new this._THREE.Vector3().setFromMatrixPosition(this.camera.matrixWorld);
@@ -143,13 +117,14 @@ export default class RangeMarker {
     const playerHit = this._checkPlayerHit(origin, direction);
 
     let chosen = null;
-    let markerWorldPos = null;
-    let distUnits = null;
+    let hitPoint = null;
+    let hitNormal = null;
 
     if (playerHit) {
       chosen = playerHit;
-      markerWorldPos = playerHit.intersection;
-      distUnits = playerHit.distance;
+      hitPoint = playerHit.intersection;
+      // You may need a more accurate normal calculation for player models
+      hitNormal = direction.clone().negate();
     } else {
       const candidates = this._collectCandidates();
       if (!candidates.length) return;
@@ -167,96 +142,77 @@ export default class RangeMarker {
         if (!isFinite(p.x) || !isFinite(p.y) || !isFinite(p.z)) continue;
         if (h.object && h.object.userData && h.object.userData.ignoreRangeMarker) continue;
         chosen = h;
-        markerWorldPos = chosen.point.clone();
-        distUnits = origin.distanceTo(markerWorldPos);
+        hitPoint = chosen.point.clone();
+        hitNormal = (chosen.face && chosen.object) ? chosen.face.normal.clone().transformDirection(chosen.object.matrixWorld).normalize() : direction.clone().negate();
         break;
       }
     }
     
     if (!chosen) return;
-    if (distUnits == null || !isFinite(distUnits)) return;
 
-    if (this._marker) this._clearMarkerImmediate();
+    // Remove any existing marker before creating a new one
+    this._clearMarkerImmediate();
 
+    // Create the 3D text/mesh for the marker
+    const distUnits = origin.distanceTo(hitPoint);
     const meters = distUnits / this.unitsPerMeter;
+    const text = `${meters.toFixed(2)} m`;
 
-    const dom = document.createElement('div');
-    dom.className = 'rm-marker';
-    let textContent = `<span class="val">${meters.toFixed(2)}</span><span class="unit">m</span>`;
-    if (playerHit) {
-      textContent += `<span> (Player Hit)</span>`;
-    }
-    dom.innerHTML = textContent;
-    this.domParent.appendChild(dom);
+    const markerGeometry = new this._THREE.PlaneGeometry(1, 0.2); // Adjust size as needed
+    const markerMaterial = new this._THREE.MeshBasicMaterial({
+      color: 0xffffff,
+      side: this._THREE.DoubleSide,
+      transparent: true,
+      opacity: 0.8
+    });
+    const marker = new this._THREE.Mesh(markerGeometry, markerMaterial);
 
-    this._marker = {
-      dom,
-      worldPos: markerWorldPos,
-      timeoutId: null
-    };
+    // This part is the most critical: position and orient the marker
+    marker.position.copy(hitPoint);
+    marker.lookAt(new this._THREE.Vector3().addVectors(marker.position, hitNormal));
+    marker.position.addScaledVector(hitNormal, 0.001); // Offset to avoid z-fighting
 
-    this._marker.timeoutId = setTimeout(() => this._clearMarkerImmediate(), 5000);
+    // A simple way to add text. You'll need a way to render text as a texture.
+    // This is a placeholder; you'd need to replace this with your actual text rendering logic.
+    // For example, using THREE.TextGeometry, troika-three-text, or a canvas texture.
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    canvas.width = 512;
+    canvas.height = 64;
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.72)';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.font = '32px monospace';
+    ctx.fillStyle = '#fff';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(text, canvas.width / 2, canvas.height / 2);
 
-    // Position the marker once, just like a bullet hole is created once.
-    this._positionMarkerDOM();
+    const texture = new this._THREE.CanvasTexture(canvas);
+    marker.material.map = texture;
+    marker.material.needsUpdate = true;
+    
+    // Add the marker to the scene
+    this.scene.add(marker);
+    this._marker = marker;
+
+    // Use setTimeout for a delayed removal, similar to your bullet hole fade
+    setTimeout(() => {
+      this._clearMarkerImmediate();
+    }, 5000);
   }
+
+  // No longer needed since the marker is a static mesh
+  update() {}
 
   _clearMarkerImmediate() {
     if (!this._marker) return;
-    if (this._marker.timeoutId) { clearTimeout(this._marker.timeoutId); this._marker.timeoutId = null; }
-    if (this._marker.dom && this._marker.dom.parentNode) this._marker.dom.parentNode.removeChild(this._marker.dom);
+    this.scene.remove(this._marker);
+    if (this._marker.geometry) this._marker.geometry.dispose();
+    if (this._marker.material) {
+        if (this._marker.material.map) this._marker.material.map.dispose();
+        this._marker.material.dispose();
+    }
     this._marker = null;
-  }
-
-  // The update() method is now a no-op since the marker is static.
-  update() {
-    // We no longer update the marker's position every frame.
-    // Its position is "baked" at the time of placement, just like a bullet hole.
-  }
-
-  _positionMarkerDOM() {
-    if (!this._marker) return;
-    const cam = this.camera;
-    const renderer = this.renderer;
-    const dom = this._marker.dom;
-    const wp = this._marker.worldPos;
-    if (!cam || !renderer || !dom || !wp || !this._THREE) return;
-
-    // Get the camera's current state for this one-time projection.
-    // This is the same logic as your bullet raycast.
-    cam.updateMatrixWorld();
-
-    const worldPt = (wp.clone) ? wp.clone() : new this._THREE.Vector3(wp.x, wp.y, wp.z);
-    const v = worldPt.clone();
-    v.project(cam);
-
-    if (!isFinite(v.x) || !isFinite(v.y) || !isFinite(v.z)) {
-      dom.style.display = 'none';
-      return;
-    }
-
-    const canvas = renderer.domElement;
-    const cw = canvas.clientWidth || canvas.width || window.innerWidth;
-    const ch = canvas.clientHeight || canvas.height || window.innerHeight;
-
-    const sx = (v.x * 0.5 + 0.5) * cw;
-    const sy = (-v.y * 0.5 + 0.5) * ch;
-
-    dom.style.display = '';
-    dom.style.left = `${sx}px`;
-    dom.style.top = `${sy}px`;
-
-    // The distance text is also calculated only once during placement.
-    let camPosForDist;
-    try {
-      camPosForDist = new this._THREE.Vector3().setFromMatrixPosition(cam.matrixWorld);
-    } catch (e) {
-      camPosForDist = { x: 0, y: 0, z: 0, distanceTo() { return 0; } };
-    }
-    const distUnits = camPosForDist.distanceTo ? camPosForDist.distanceTo(worldPt) : Math.hypot(camPosForDist.x - worldPt.x, camPosForDist.y - worldPt.y, camPosForDist.z - worldPt.z);
-    const meters = distUnits / this.unitsPerMeter;
-    const val = dom.querySelector('.val');
-    if (val) val.textContent = meters.toFixed(2);
   }
 
   dispose() {
