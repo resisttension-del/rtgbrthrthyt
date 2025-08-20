@@ -4986,7 +4986,6 @@ async function attachShutdownListener() {
                     if (!sessionStorage.getItem(RELOAD_FLAG)) {
                         doImmediateReload();
                     } else {
-                         waitSong.play();
                         // This case handles a subsequent shutdown, maybe after the server came back up and went down again
                          Swal.fire({
                              title: 'Server Offline',
@@ -4994,9 +4993,9 @@ async function attachShutdownListener() {
                              icon: 'info',
                              confirmButtonText: 'OK'
                          }).then((result) => {
-                             // This code will run AFTER the user clicks a button to close the alert
+                              waitSong.play();
                              if (result.isConfirmed) {
-                                 location.reload(); // <--- This line reloads the page
+                                  // idk
                              }
                          });
                     }
