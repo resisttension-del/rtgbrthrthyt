@@ -143,8 +143,6 @@ let gameConfigRef  = null;    // ← add this
 let gameEndTime   = null;   // will be fetched from gameConfigRef
 let gameInterval  = null;   // ID returned by setInterval()
 
-let manager;
-
 
 export function initGlobalFogAndShadowParams() {
 
@@ -611,10 +609,6 @@ export async function startGame(username, mapName, initialDetailsEnabled, ffaEna
     const gameTimerElement = document.getElementById('game-timer');
 
 
-    manager = new MarkerManager(window.scene, window.camera, {
-      unitsPerMeter: 100, // example
-    //  checkBulletPenetration: (o,d,max) => game.checkBulletPenetration(o,d,max)
-    });
     
     // The rest of your startGame function remains the same
     initGlobalFogAndShadowParams();
@@ -2115,7 +2109,10 @@ export function animate(timestamp) {
     requestAnimationFrame(animate);
 
     
- //   manager.update();
+  const manager = new MarkerManager(scene, camera, {
+      unitsPerMeter: 100, // example
+      checkBulletPenetration: (o,d,max) => game.checkBulletPenetration(o,d,max)
+    });
     // --- Disconnection/Pause Logic ---
     // If localPlayerId is null, it means the local player has disconnected.
     // The game state should already be paused and UI updated by the handler
@@ -2905,6 +2902,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
