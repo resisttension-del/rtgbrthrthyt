@@ -4976,6 +4976,7 @@ async function attachShutdownListener() {
                         console.warn("attachShutdownListener: initial server shutdown detected. Disabling UI and reloading now.");
                         setAuthMessage("Server is temporarily offline for maintenance.", true);
                         disableUIControls();
+                          location.reload();
                         try {
                             await Swal.fire({
                                 title: 'Server Offline',
