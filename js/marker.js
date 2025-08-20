@@ -141,6 +141,7 @@ placeMarker() {
   // Now check if a hit occurred anywhere in the process
   if (!hit) {
     // No hit — do nothing (leave any existing marker in place) and do not add a new one.
+    console.log("it shouldnt add");
     return;
   }
 
