@@ -28,6 +28,7 @@ export class MarkerManager {
     this.checkBulletPenetration = options.checkBulletPenetration ?? null;
 
     this._ray = new THREE.Raycaster();
+    this._ray.camera = camera;
     this._markers = new Set();
 
     // bind handlers
