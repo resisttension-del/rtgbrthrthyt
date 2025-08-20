@@ -4932,102 +4932,102 @@ export async function initMenuUI() {
         }
     }
 
-    async function attachShutdownListener() {
-        try {
-            if (shutdownListenerAttached) return;
-            const menuRoot = deriveMenuRootRef();
-            if (!menuRoot) return;
-            const node = menuRoot.child('shutdown');
+async function attachShutdownListener() {
+    try {
+        if (shutdownListenerAttached) return;
+        const menuRoot = deriveMenuRootRef();
+        if (!menuRoot) return;
+        const node = menuRoot.child('shutdown');
 
-            shutdownListenerAttached = true;
+        shutdownListenerAttached = true;
 
-            let isFirst = true;
-            let reloadTimer = null;
-            const RELOAD_FLAG = 'voidffa_server_shutdown_reload_scheduled';
+        let isFirst = true;
+        const RELOAD_FLAG = 'voidffa_server_shutdown_reload_scheduled';
 
-            const scheduleReloadOnce = (delayMs = 5000) => {
-                try {
-                    if (sessionStorage.getItem(RELOAD_FLAG) === '1') return;
-                } catch (e) {} 
-                try { sessionStorage.setItem(RELOAD_FLAG, '1'); } catch (e) {}
-                try {
-                    reloadTimer = setTimeout(() => {
-                        try { location.reload(); } catch (e) { console.warn("attachShutdownListener: reload failed:", e); }
-                    }, delayMs);
-                } catch (e) {
-                    console.warn("attachShutdownListener: scheduling reload failed:", e);
-                    try { location.reload(); } catch (er) { console.warn("attachShutdownListener: immediate reload failed:", er); }
+        const doImmediateReload = () => {
+            try {
+                // prevent reload-loop in this tab
+                if (sessionStorage.getItem(RELOAD_FLAG) === '1') {
+                    console.warn("attachShutdownListener: reload already performed in this tab; skipping.");
+                    return;
                 }
-            };
+            } catch (e) {
+                // ignore sessionStorage failures and still attempt reload
+            }
+            try { sessionStorage.setItem(RELOAD_FLAG, '1'); } catch (e) {}
+            try {
+                console.warn("attachShutdownListener: performing immediate reload due to server shutdown.");
+                location.reload();
+            } catch (e) {
+                console.warn("attachShutdownListener: location.reload failed, falling back to href assign:", e);
+                try { location.href = location.href; } catch (er) { console.warn("attachShutdownListener: fallback reload failed:", er); }
+            }
+        };
 
-            const clearScheduledReload = () => {
-                try { if (reloadTimer) { clearTimeout(reloadTimer); reloadTimer = null; } } catch (e) {}
-                try { sessionStorage.removeItem(RELOAD_FLAG); } catch (e) {}
-            };
+        node.on('value', async (snap) => {
+            try {
+                const val = snap.exists() ? snap.val() : false;
+                const isShutdown = !!val;
 
-            node.on('value', async (snap) => {
-                try {
-                    const val = snap.exists() ? snap.val() : false;
-                    const isShutdown = !!val;
-                    if (isFirst) {
-                        isFirst = false;
-                        serverShutdown = isShutdown;
-                        if (serverShutdown) {
-                            console.warn("attachShutdownListener: initial server shutdown detected. Disabling UI and scheduling reload.");
-                            setAuthMessage("Server is temporarily offline for maintenance.", true);
-                            disableUIControls();
-                            try {
-                                await Swal.fire({
-                                    title: 'Server Offline',
-                                    html: `<div style="text-align:left; font-size:14px; max-width:420px;">The server is currently shut down for maintenance. You cannot start games or sign in right now. The page will reload automatically when the server is back online.</div>`,
-                                    icon: 'info',
-                                    confirmButtonText: 'OK'
-                                });
-                            } catch (e) { console.warn("attachShutdownListener: Swal modal failed:", e); }
-                            scheduleReloadOnce(5000);
-                        }
-                        return;
-                    }
-
-                    // transition handling
-                    if (isShutdown && !serverShutdown) {
-                        // server went down
-                        serverShutdown = true;
-                        console.warn("attachShutdownListener: server shutdown detected (transition). Disabling UI and scheduling reload.");
+                if (isFirst) {
+                    isFirst = false;
+                    serverShutdown = isShutdown;
+                    if (serverShutdown) {
+                        console.warn("attachShutdownListener: initial server shutdown detected. Disabling UI and reloading now.");
                         setAuthMessage("Server is temporarily offline for maintenance.", true);
                         disableUIControls();
                         try {
                             await Swal.fire({
                                 title: 'Server Offline',
-                                html: `<div style="text-align:left; font-size:14px; max-width:420px;">The server has been shut down for maintenance. The page will reload when it is back online.</div>`,
+                                html: `<div style="text-align:left; font-size:14px; max-width:420px;">The server is currently shut down for maintenance. You cannot start games or sign in right now. The page will reload automatically when the server is back online.</div>`,
                                 icon: 'info',
                                 confirmButtonText: 'OK'
                             });
-                        } catch (e) {}
-                        scheduleReloadOnce(5000);
-                        return;
+                        } catch (e) { console.warn("attachShutdownListener: Swal modal failed:", e); }
+                        doImmediateReload();
                     }
-
-                    if (!isShutdown && serverShutdown) {
-                        // server came back online
-                        console.log("attachShutdownListener: server returned online. Re-enabling UI and cancelling reload.");
-                        serverShutdown = false;
-                        enableUIControls();
-                        setAuthMessage("Server is back online.", false);
-                        clearScheduledReload();
-                        // optional: reload to pick up server changes now that it's online
-                        // try { location.reload(); } catch (e) {}
-                        return;
-                    }
-                    // else: no change
-                } catch (e) {
-                    console.warn("attachShutdownListener: error handling snapshot:", e);
+                    return;
                 }
-            });
-        } catch (e) {
-            console.warn("attachShutdownListener: failed to attach listener:", e);
-        }
+
+                // transition handling
+                if (isShutdown && !serverShutdown) {
+                    // server went down
+                    serverShutdown = true;
+                    console.warn("attachShutdownListener: server shutdown detected (transition). Disabling UI and reloading now.");
+                    setAuthMessage("Server is temporarily offline for maintenance.", true);
+                    disableUIControls();
+                    try {
+                        await Swal.fire({
+                            title: 'Server Offline',
+                            html: `<div style="text-align:left; font-size:14px; max-width:420px;">The server has been shut down for maintenance. The page will reload now.</div>`,
+                            icon: 'info',
+                            confirmButtonText: 'OK'
+                        });
+                    } catch (e) { /* ignore modal failures */ }
+                    doImmediateReload();
+                    return;
+                }
+
+                if (!isShutdown && serverShutdown) {
+                    // server came back online
+                    console.log("attachShutdownListener: server returned online. Re-enabling UI and clearing reload marker.");
+                    serverShutdown = false;
+                    enableUIControls();
+                    setAuthMessage("Server is back online.", false);
+                    try { sessionStorage.removeItem(RELOAD_FLAG); } catch (e) {}
+                    // optional: reload to pick up server changes now that it's online
+                    // try { location.reload(); } catch (e) {}
+                    return;
+                }
+                // else: no change
+            } catch (e) {
+                console.warn("attachShutdownListener: error handling snapshot:", e);
+            }
+        });
+    } catch (e) {
+        console.warn("attachShutdownListener: failed to attach listener:", e);
     }
+}
 
      
     // ---------------- device fingerprint helpers ----------------
