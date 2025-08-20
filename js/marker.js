@@ -1,24 +1,4 @@
-/**
- * Minimal standalone range marker.
- *
- * Usage:
- *   import RangeMarker from './marker.js';
- *   const rm = new RangeMarker({
- *     camera,           // THREE.Camera (required)
- *     renderer,         // THREE.WebGLRenderer (required)
- *     scene,            // THREE.Scene (optional) used for raycast intersections
- *     unitsPerMeter: 1, // game units per meter (100 for Unreal) - default 1
- *     domParent: document.body,
- *     autoListenKey: true,   // listen for 't' automatically
- *     defaultDistance: 1000, // fallback distance (game units) when no hit
- *   });
- *
- *   // in your RAF loop:
- *   rm.update();
- *
- *   // cleanup:
- *   rm.dispose();
- */
+
 
 export default class RangeMarker {
   constructor(opts = {}) {
