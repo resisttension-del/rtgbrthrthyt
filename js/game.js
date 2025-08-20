@@ -249,6 +249,7 @@ async function determineWinnerAndEndGame() {
     playersSnapshot.forEach(childSnap => {
         const p = childSnap.val();
         if (!p || typeof p.kills !== 'number') return;
+        // use the username as stored in DB (canonical form)
         statsByUser[p.username] = {
             kills: p.kills || 0,
             deaths: p.deaths || 0,
@@ -290,23 +291,42 @@ async function determineWinnerAndEndGame() {
         }
     }
 
-    // ⭐ NEW: Only increment stats for the local player.
+    // ⭐ Only increment stats for the local player — but resolve the canonical username
     const statUpdates = [];
     if (window.localPlayer && window.localPlayer.username) {
-        const localPlayerUsername = window.localPlayer.username;
-        const localPlayerStats = statsByUser[localPlayerUsername];
-        if (localPlayerStats) {
-            if (localPlayerStats.win === 1) {
-                statUpdates.push(incrementUserStat(localPlayerUsername, 'wins', 1));
+        const provided = String(window.localPlayer.username).trim();
+        if (provided !== "") {
+            const providedLower = provided.toLowerCase();
+
+            // Find the canonical username key that matches case-insensitively
+            const canonical = Object.keys(statsByUser).find(k => String(k).toLowerCase() === providedLower);
+
+            if (!canonical) {
+                // If we couldn't find a match among the players, do NOT create a user or increment anything.
+                console.warn(`[determineWinnerAndEndGame] Local player username '${provided}' not found among players (case-insensitive). Skipping stat increment to avoid creating new user.`);
+            } else {
+                const localPlayerStats = statsByUser[canonical];
+                if (localPlayerStats) {
+                    if (localPlayerStats.win === 1) {
+                        statUpdates.push(incrementUserStat(canonical, 'wins', 1));
+                    }
+                    if (localPlayerStats.loss === 1) {
+                        statUpdates.push(incrementUserStat(canonical, 'losses', 1));
+                    }
+                }
             }
-            if (localPlayerStats.loss === 1) {
-                statUpdates.push(incrementUserStat(localPlayerUsername, 'losses', 1));
-            }
+        } else {
+            console.warn('[determineWinnerAndEndGame] window.localPlayer.username is empty after trim.');
         }
     }
-    
-    await Promise.all(statUpdates);
-    
+
+    // await all stat updates (no-op if statUpdates is empty)
+    try {
+        await Promise.all(statUpdates);
+    } catch (e) {
+        console.error('Error while incrementing local player stats:', e);
+    }
+
     try {
         await gameConfigRef.remove();
         console.log("Game config fully removed.");
@@ -319,7 +339,7 @@ async function determineWinnerAndEndGame() {
         playersKillsListener = null;
         console.log("Detached players kill listener.");
     }
-    
+
     setTimeout(function() {
       disconnectPlayer(localPlayerId);
       location.reload();
@@ -2586,39 +2606,89 @@ entry.group.userData.velocityY = 0;
 // -------------------------------------------------------------
 // Applies damage and flashes red, then reverts to originalColor
 // -------------------------------------------------------------
-export function incrementUserStat(username, field, amount) {
+export async function incrementUserStat(username, field, amount) {
     if (!username || !field || typeof amount !== 'number' || isNaN(amount)) {
         console.warn(`[incrementUserStat] Invalid call: username='${username}', field='${field}', amount='${amount}'`);
         return Promise.resolve();
     }
-    
+
     if (!usersRef) {
         console.warn('[incrementUserStat] usersRef not initialized. Cannot increment stat.');
         return Promise.reject(new Error('usersRef not initialized'));
     }
-    
-    const userStatRef = usersRef.child(username).child('stats').child(field);
-    
-    return userStatRef.transaction(currentValue => {
-        // If the stat doesn't exist, initialize it to the provided amount.
-        if (currentValue === null) {
-            return amount;
+
+    const trimmed = String(username).trim();
+    if (trimmed === '') {
+        console.warn('[incrementUserStat] username is empty after trim.');
+        return Promise.resolve();
+    }
+
+    // Resolve the actual stored user key (case-insensitive resolution)
+    async function resolveUserKey(name) {
+        // 1) Exact key match
+        const exactSnap = await usersRef.child(name).once('value');
+        if (exactSnap.exists()) return name;
+
+        const lower = name.toLowerCase();
+
+        // 2) If your user nodes store a lowercase index (recommended: usernameLower),
+        //    query by that to find the canonical key quickly.
+        try {
+            const byLower = await usersRef.orderByChild('usernameLower').equalTo(lower).limitToFirst(1).once('value');
+            if (byLower.exists()) {
+                const keys = Object.keys(byLower.val());
+                if (keys.length) return keys[0];
+            }
+        } catch (e) {
+            // ignore query errors and fall back
         }
-        // Otherwise, increment the current value.
-        return (currentValue || 0) + amount;
-    })
-    .then(result => {
+
+        // 3) Fallback: scan children keys for a case-insensitive match.
+        //    WARNING: this reads the whole users node and can be expensive on large datasets.
+        const allSnap = await usersRef.once('value');
+        if (!allSnap.exists()) return null;
+        const all = allSnap.val();
+
+        for (const key of Object.keys(all)) {
+            // if the DB key is the username, compare case-insensitively
+            if (key.toLowerCase() === lower) return key;
+
+            const node = all[key];
+            // if user object contains a username property, compare that too
+            if (node && typeof node.username === 'string' && node.username.toLowerCase() === lower) return key;
+            if (node && node.usernameLower === lower) return key;
+        }
+
+        return null;
+    }
+
+    try {
+        const canonicalKey = await resolveUserKey(trimmed);
+
+        if (!canonicalKey) {
+            console.warn(`[incrementUserStat] No existing user found matching '${username}' (any capitalization). Aborting to avoid creating new user.`);
+            return Promise.resolve(); // no-op rather than creating a new user
+        }
+
+        const userStatRef = usersRef.child(canonicalKey).child('stats').child(field);
+
+        // perform transaction (this may create the stat field under an existing user,
+        // but won't create a new user)
+        const result = await userStatRef.transaction(currentValue => {
+            if (currentValue === null) return amount;
+            return (currentValue || 0) + amount;
+        });
+
         if (result.committed) {
-            console.log(`[incrementUserStat] Successfully incremented ${username}'s ${field} by ${amount}. New value: ${result.snapshot.val()}`);
+            console.log(`[incrementUserStat] Successfully incremented ${canonicalKey}'s ${field} by ${amount}. New value: ${result.snapshot.val()}`);
         } else {
-            console.warn(`[incrementUserStat] Transaction for ${username}'s ${field} was aborted.`);
+            console.warn(`[incrementUserStat] Transaction for ${canonicalKey}'s ${field} was aborted.`);
         }
         return result;
-    })
-    .catch(err => {
+    } catch (err) {
         console.error(`[incrementUserStat] Failed to update ${username}'s ${field}:`, err);
         return Promise.reject(err);
-    });
+    }
 }
 
 // game.js
@@ -2908,6 +2978,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
