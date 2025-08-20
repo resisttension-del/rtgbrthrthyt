@@ -615,11 +615,11 @@ export async function startGame(username, mapName, initialDetailsEnabled, ffaEna
 
     const gameTimerElement = document.getElementById('game-timer');
 
-     rm = new RangeMarker({
-      window.camera,
-      window.renderer,
-      window.scene,            // optional — pass a THREE.Scene to enable raycast hits
-      unitsPerMeter: 1, // or 100 for Unreal
+    const rm = new RangeMarker({
+      camera: window.camera,
+      renderer: window.renderer,
+      scene:  window.scene,      // optional
+      unitsPerMeter: 1,         // or 100 for Unreal
       defaultDistance: 2000,
     });
 
@@ -2910,6 +2910,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
