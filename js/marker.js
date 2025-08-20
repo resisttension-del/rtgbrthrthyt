@@ -239,13 +239,9 @@ export default class RangeMarker {
     const marker = new this._THREE.Mesh(markerGeometry, markerMaterial);
 
     // Compute a clearer offset (bigger than tiny 0.01 so it's visible in most scenes).
-    const offsetWorld = hitNormal.clone().normalize().multiplyScalar(0.05); // 0.05 units offset (tweak)
-
-    // world position with offset
-    const worldPosWithOffset = hitPoint.clone().add(offsetWorld);
-
-    // Set position in world coordinates (we add to the scene, so marker.position==world position)
-    marker.position.copy(worldPosWithOffset);
+const offsetWorld = direction.clone().negate().normalize().multiplyScalar(0.05); // toward camera
+const worldPosWithOffset = hitPoint.clone().add(offsetWorld);
+marker.position.copy(worldPosWithOffset);
 
     // Keep the surface normal in userData (if you need it later)
     marker.userData.surfaceNormal = hitNormal.clone();
