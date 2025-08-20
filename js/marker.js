@@ -137,7 +137,7 @@ export default class RangeMarker {
         }
       } catch (e) {
         // fall through to default placement
-        markerWorldPos = null;
+        return;
       }
     }
 
