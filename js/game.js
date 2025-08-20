@@ -185,6 +185,7 @@ function ensureRM() {
       scene:  window.scene,
       unitsPerMeter: 1,
       defaultDistance: 2000,
+        THREE,
     });
     // optional: attach to window so other modules see it
     window.rm = rm;
@@ -626,14 +627,6 @@ export async function startGame(username, mapName, initialDetailsEnabled, ffaEna
     gameConfigRef = dbRefs.gameConfigRef;
 
     const gameTimerElement = document.getElementById('game-timer');
-
-    const rm = new RangeMarker({
-      camera: window.camera,
-      renderer: window.renderer,
-      scene:  window.scene,      // optional
-      unitsPerMeter: 1,         // or 100 for Unreal
-      defaultDistance: 2000,
-    });
 
     
     // The rest of your startGame function remains the same
@@ -2923,6 +2916,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
