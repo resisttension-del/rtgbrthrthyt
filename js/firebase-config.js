@@ -213,42 +213,21 @@ export async function initGameFirebaseApp(slotName) {
  * @param {string} username The current player's username.
  * @param {string} version The client's current game version (e.g., "v1.00").
  */
-function canonicalKey(username) {
-  if (!username) return '';
-  // trim, collapse internal whitespace to single dash, lowercase
-  let key = username.trim().replace(/\s+/g, '-').toLowerCase();
-  // Firebase realtime DB keys cannot contain . $ # [ ] /
-  key = key.replace(/[.$#[\]/]/g, '_');
-  return key;
-}
-
 export async function assignPlayerVersion(username, version) {
-  if (!usersRef) {
-    console.error("Error: usersRef not initialized. Cannot assign player version.");
-    return;
-  }
-  if (!username) {
-    console.error("Error: username is required.");
-    return;
-  }
+    if (!usersRef) {
+        console.error("Error: usersRef not initialized. Cannot assign player version.");
+        return;
+    }
 
-  const key = canonicalKey(username);
-  if (!key) {
-    console.error("Error: username could not be converted to a valid key.");
-    return;
-  }
+    // Convert the username to lowercase to ensure consistency
+    const consistentUsername = username.toLowerCase();
 
-  try {
-    // write version under canonical key
-    await usersRef.child(key).child("version").set(version);
-
-    // Optionally also save the display name with original caps
-    await usersRef.child(key).child("displayName").set(username);
-
-    console.log(`Player ${username} (key: ${key}) assigned version: ${version}`);
-  } catch (error) {
-    console.error("Failed to assign player version:", error);
-  }
+    try {
+        await usersRef.child(consistentUsername).child("version").set(version);
+        console.log(`Player ${consistentUsername} assigned version: ${version}`);
+    } catch (error) {
+        console.error("Failed to assign player version:", error);
+    }
 }
 
 
