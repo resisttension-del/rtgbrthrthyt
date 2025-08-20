@@ -239,6 +239,12 @@ export default class RangeMarker {
    */
   update() {
     if (!this._marker) return;
+
+    // Ensure the camera's matrix is up to date before using it
+    if (this.camera.matrixWorldNeedsUpdate) {
+        this.camera.updateMatrixWorld();
+    }
+    
     this._positionMarkerDOM();
   }
 
