@@ -3,23 +3,20 @@
 // Requirements: THREE is available globally or imported.
 import * as THREE from "https://cdnjs.cloudflare.com/ajax/libs/three.js/0.152.0/three.module.js";
 
-// marker.js
-// Exportable MarkerManager for Three.js
-// Requirements: THREE is available globally or imported.
-
 export class MarkerManager {
   /**
    * scene - THREE.Scene
    * camera - THREE.Camera (player camera)
    * options:
    *  - unitsPerMeter: number (how many world-units == 1 meter). Default 1 (i.e. 1 unit = 1 meter).
-   *      NOTE: If your world uses centimeters, set unitsPerMeter = 100.
    *  - lifetimeMs: marker lifetime in ms (default 10000)
    *  - maxRange: raycast max range in world units (default 2000)
    *  - worldObjects: array of meshes to raycast against (optional)
    *  - playerObjects: array of meshes representing players (optional)
    *  - checkBulletPenetration: optional function(origin, direction, maxPen) -> result
-   *        (If provided it will be used in preference to raw raycast for better parity with your shooting code.)
+   *  - renderer: optional THREE.WebGLRenderer instance — when provided the manager will compute exact
+   *      world-scale for a desired pixel size so sprites are pixel-perfect.
+   *  - spritePixelHeight: desired sprite height in screen pixels (default 80)
    */
   constructor(scene, camera, options = {}) {
     this.scene = scene;
@@ -30,6 +27,10 @@ export class MarkerManager {
     this.worldObjects = options.worldObjects ?? null;
     this.playerObjects = options.playerObjects ?? null;
     this.checkBulletPenetration = options.checkBulletPenetration ?? null;
+
+    // optional renderer used to compute world scale from pixel size
+    this.renderer = options.renderer ?? null;
+    this.spritePixelHeight = options.spritePixelHeight ?? 80; // pixels
 
     this._ray = new THREE.Raycaster();
     this._ray.camera = camera;
@@ -53,22 +54,15 @@ export class MarkerManager {
     }
   }
 
-  /**
-   * Create a marker where the camera is pointing.
-   * If your project has a penetration-aware raycast function, pass it to the constructor as checkBulletPenetration
-   */
   createMarkerFromCamera() {
     if (!this.camera) return;
 
-    // origin & direction
     this.camera.updateMatrixWorld();
     const origin = new THREE.Vector3().setFromMatrixPosition(this.camera.matrixWorld);
     const direction = new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion).normalize();
 
-    // If user provided a bullet-penetration function (their existing code), use it:
     if (typeof this.checkBulletPenetration === "function") {
       try {
-        // ask for 0 penetrations so we just find the first hit (keep parity with their code)
         const traj = this.checkBulletPenetration(origin, direction, 0);
         if (traj.playerHitResult) {
           const p = traj.playerHitResult.intersection.clone();
@@ -79,13 +73,11 @@ export class MarkerManager {
           this.createMarkerAt(p);
           return;
         }
-        // fallthrough to broad raycast (in case checkBulletPenetration returned nothing)
       } catch (err) {
         console.warn("checkBulletPenetration threw:", err);
       }
     }
 
-    // Fallback: basic raycast against provided worldObjects/playerObjects or entire scene
     const ray = this._ray;
     ray.set(origin, direction);
 
@@ -93,7 +85,6 @@ export class MarkerManager {
     if (this.playerObjects && this.playerObjects.length) candidates = candidates.concat(this.playerObjects);
     if (this.worldObjects && this.worldObjects.length) candidates = candidates.concat(this.worldObjects);
 
-    // If no candidates were supplied, raycast against scene.children (not ideal for huge scenes).
     if (!candidates.length) {
       candidates = this.scene.children;
     }
@@ -104,7 +95,6 @@ export class MarkerManager {
       const point = hit.point.clone();
       this.createMarkerAt(point);
     } else {
-      // no hit, place at maxRange along direction for feedback
       const fallback = origin.clone().add(direction.clone().multiplyScalar(this.maxRange));
       this.createMarkerAt(fallback);
     }
@@ -117,25 +107,24 @@ export class MarkerManager {
     // root container so we can rotate/scale both icon+label easily
     const root = new THREE.Object3D();
     root.position.copy(position);
+    // ensure it renders on top
+    root.renderOrder = 999999;
 
-    // tiny arrow indicator (a cone pointing up in local space)
-    const coneGeo = new THREE.ConeGeometry(0.08, 0.25, 8);
-    coneGeo.translate(0, -0.125, 0); // put tip at origin so cone sits above the point
-    const coneMat = new THREE.MeshStandardMaterial({ emissive: 0x88ccff, emissiveIntensity: 0.6, metalness: 0.2, roughness: 0.6 });
-    const cone = new THREE.Mesh(coneGeo, coneMat);
-    cone.rotation.x = Math.PI; // point down towards the surface (adjust visually)
-    root.add(cone);
+    // small icon sprite (arrow)
+    const icon = this._makeIconSprite(this.spritePixelHeight * 0.6); // pixel height for icon
+    icon.position.set(0, 0.0, 0); // centered at the location
+    root.add(icon);
 
     // label sprite that shows distance in meters and optionally coordinates
-    const label = this._makeLabelSprite("…"); // placeholder
+    const label = this._makeLabelSprite("…", this.spritePixelHeight); // placeholder
     label.position.set(0, 0.35, 0);
     root.add(label);
 
-    // small billboard background (optional)
     // add to scene and to set for update
     this.scene.add(root);
     const marker = {
       root,
+      icon,
       label,
       createdAt: performance.now(),
       removeHandle: null
@@ -172,6 +161,10 @@ export class MarkerManager {
         }
         if (o.geometry) o.geometry.dispose && o.geometry.dispose();
         if (o.texture) o.texture.dispose && o.texture.dispose();
+        // if sprite map is a CanvasTexture, dispose it
+        if (o.material && o.material.map && o.material.map.dispose) {
+          o.material.map.dispose();
+        }
       });
     }
     this._markers.delete(marker);
@@ -180,28 +173,27 @@ export class MarkerManager {
   /**
    * Call once per frame from your animate() loop
    * - updates label text (distance -> meters)
-   * - makes sure icons/labels face the camera
+   * - makes sure sprites face the camera and remain constant screen size
    */
   update() {
     if (!this.camera) return;
     for (const marker of this._markers) {
       this._updateMarkerLabel(marker);
-      // Make sure the label always faces the camera
-      // If label is a Sprite it will auto-face; otherwise we explicitly lookAt
-      if (marker.label && !(marker.label.material && marker.label.material.isSpriteMaterial)) {
-        marker.label.lookAt(this.camera.position);
-      }
-      // small pulsing or scale-by-distance can be added here if you want
+
+      // sprites will face the camera automatically; ensure renderOrder and depthTest settings
+      marker.root.renderOrder = 999999;
+
+      // update scale so the sprite is exactly the desired pixel height on screen (if renderer provided)
+      if (marker.label) this._updateSpriteScale(marker.label);
+      if (marker.icon) this._updateSpriteScale(marker.icon);
     }
   }
 
   _updateMarkerLabel(marker) {
-    // compute distance in world units, convert to meters using unitsPerMeter:
     const distWorld = this.camera.position.distanceTo(marker.root.position);
     const meters = distWorld / this.unitsPerMeter;
     const metersStr = meters >= 10 ? Math.round(meters) + " m" : meters.toFixed(2) + " m";
 
-    // Optionally show coordinates in meters
     const coords = marker.root.position;
     const xM = (coords.x / this.unitsPerMeter).toFixed(2);
     const yM = (coords.y / this.unitsPerMeter).toFixed(2);
@@ -209,21 +201,12 @@ export class MarkerManager {
 
     const text = `${metersStr}\n(${xM}, ${yM}, ${zM})`;
 
-    // If label is a sprite with a canvas texture, replace the texture
     if (marker.label && marker.label.material && marker.label.material.map && marker.label.material.map.image && marker.label.material.map.image.getContext) {
       this._updateCanvasTexture(marker.label.material.map, text);
       marker.label.material.map.needsUpdate = true;
-    } else if (marker.label && marker.label.material && marker.label.material.map && marker.label.material.map.image == null) {
-      // fallback
-      // recreate label
-      const newLabel = this._makeLabelSprite(text);
-      newLabel.position.copy(marker.label.position);
-      marker.root.remove(marker.label);
-      marker.root.add(newLabel);
-      marker.label = newLabel;
-    } else if (marker.label && marker.label.material && marker.label.material.isSpriteMaterial) {
-      // sprite without canvas (unlikely) - recreate
-      const newLabel = this._makeLabelSprite(text);
+    } else {
+      // fallback: recreate label sprite with text
+      const newLabel = this._makeLabelSprite(text, this.spritePixelHeight);
       newLabel.position.copy(marker.label.position);
       marker.root.remove(marker.label);
       marker.root.add(newLabel);
@@ -231,16 +214,21 @@ export class MarkerManager {
     }
   }
 
-  _makeLabelSprite(text) {
+  /**
+   * Create a label sprite from canvas.
+   * text: string (can contain newlines)
+   * pixelHeight: desired screen height in pixels for the sprite (used later to compute world scale)
+   */
+  _makeLabelSprite(text, pixelHeight = 80) {
     const canvas = document.createElement("canvas");
-    canvas.width = 256;
-    canvas.height = 128;
+    canvas.width = 512;
+    canvas.height = 256;
     const ctx = canvas.getContext("2d");
 
     // draw background
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.fillStyle = "rgba(10,10,10,0.65)";
-    roundRect(ctx, 4, 4, canvas.width - 8, canvas.height - 8, 8);
+    roundRect(ctx, 8, 8, canvas.width - 16, canvas.height - 16, 12);
     ctx.fill();
 
     // draw text
@@ -249,21 +237,33 @@ export class MarkerManager {
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
 
-    // support multi-line
     const lines = (text || "").split("\n");
     const startY = canvas.height / 2 - (lines.length - 1) * 16;
     for (let i = 0; i < lines.length; i++) {
       ctx.fillText(lines[i], canvas.width / 2, startY + i * 32);
     }
 
-    // create texture
     const tex = new THREE.CanvasTexture(canvas);
     tex.anisotropy = 16;
-    const mat = new THREE.SpriteMaterial({ map: tex, depthTest: true, depthWrite: false, sizeAttenuation: true });
+
+    const mat = new THREE.SpriteMaterial({
+      map: tex,
+      depthTest: false,    // render on top
+      depthWrite: false,
+      sizeAttenuation: false, // do not scale with perspective
+      transparent: true
+    });
+
     const sprite = new THREE.Sprite(mat);
-    sprite.scale.set(0.8, 0.4, 1); // tweak as needed
-    // store reference to canvas for updates
+
+    // initially set a reasonable aspect-preserving scale (will be corrected each frame if renderer provided)
+    const aspect = canvas.width / canvas.height;
+    sprite.scale.set((pixelHeight * aspect) / 100, pixelHeight / 100, 1); // heuristic fallback
+    // store useful metadata for update
+    sprite.userData.pixelHeight = pixelHeight;
+    // store canvas so we can update it later
     mat.map.image = canvas;
+
     return sprite;
 
     function roundRect(ctx, x, y, w, h, r) {
@@ -277,15 +277,60 @@ export class MarkerManager {
     }
   }
 
+  /**
+   * Small arrow icon as sprite (canvas-drawn).
+   * pixelHeight: desired pixel height for screen size.
+   */
+  _makeIconSprite(pixelHeight = 48) {
+    const canvas = document.createElement("canvas");
+    canvas.width = 128;
+    canvas.height = 128;
+    const ctx = canvas.getContext("2d");
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    // draw a downward triangle arrow centered
+    ctx.beginPath();
+    ctx.moveTo(canvas.width / 2, 12);
+    ctx.lineTo(canvas.width - 18, canvas.height - 18);
+    ctx.lineTo(18, canvas.height - 18);
+    ctx.closePath();
+    ctx.fillStyle = "rgba(136,204,255,0.95)";
+    ctx.fill();
+
+    // small inner stroke
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = "rgba(20,20,30,0.7)";
+    ctx.stroke();
+
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.anisotropy = 16;
+
+    const mat = new THREE.SpriteMaterial({
+      map: tex,
+      depthTest: false,
+      depthWrite: false,
+      sizeAttenuation: false,
+      transparent: true
+    });
+
+    const sprite = new THREE.Sprite(mat);
+    // heuristic fallback scale:
+    const aspect = canvas.width / canvas.height;
+    sprite.scale.set((pixelHeight * aspect) / 100, pixelHeight / 100, 1);
+    sprite.userData.pixelHeight = pixelHeight;
+    mat.map.image = canvas;
+
+    return sprite;
+  }
+
   _updateCanvasTexture(texture, text) {
-    // texture.image is the canvas we created earlier
     const canvas = texture.image;
     const ctx = canvas.getContext("2d");
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    // draw background
     ctx.fillStyle = "rgba(10,10,10,0.65)";
-    roundRect(ctx, 4, 4, canvas.width - 8, canvas.height - 8, 8);
+    roundRect(ctx, 8, 8, canvas.width - 16, canvas.height - 16, 12);
     ctx.fill();
 
     ctx.font = "28px sans-serif";
@@ -307,6 +352,66 @@ export class MarkerManager {
       ctx.arcTo(x, y + h, x, y, r);
       ctx.arcTo(x, y, x + w, y, r);
       ctx.closePath();
+    }
+  }
+
+  /**
+   * Update sprite.scale such that the sprite is sprite.userData.pixelHeight pixels tall on screen.
+   * Requires this.renderer to be set for pixel-perfect sizing. Otherwise uses a fallback scale.
+   */
+  _updateSpriteScale(sprite) {
+    if (!sprite || !sprite.material) return;
+    const pixelHeight = sprite.userData.pixelHeight ?? this.spritePixelHeight;
+
+    if (this.renderer && this.renderer.domElement) {
+      const dom = this.renderer.domElement;
+      const cam = this.camera;
+
+      // compute world-space height that corresponds to `pixelHeight` at the sprite's distance
+      const spriteWorldPos = new THREE.Vector3();
+      sprite.getWorldPosition(spriteWorldPos);
+      const distance = this.camera.position.distanceTo(spriteWorldPos);
+
+      if (cam.isPerspectiveCamera) {
+        const vFOV = THREE.MathUtils.degToRad(cam.fov); // vertical fov in radians
+        const worldHeightAtDist = 2 * distance * Math.tan(vFOV / 2);
+        const pixelToWorld = worldHeightAtDist / dom.clientHeight;
+        const desiredWorldHeight = pixelHeight * pixelToWorld;
+
+        // keep original aspect ratio of the canvas texture
+        let aspect = 1;
+        if (sprite.material.map && sprite.material.map.image) {
+          const img = sprite.material.map.image;
+          aspect = (img.width / img.height) || 1;
+        }
+
+        sprite.scale.set(desiredWorldHeight * aspect, desiredWorldHeight, 1);
+      } else if (cam.isOrthographicCamera) {
+        // for orthographic, camera height is (top - bottom)
+        const camHeight = cam.top - cam.bottom;
+        const pixelToWorld = camHeight / dom.clientHeight;
+        const desiredWorldHeight = pixelHeight * pixelToWorld;
+        let aspect = 1;
+        if (sprite.material.map && sprite.material.map.image) {
+          const img = sprite.material.map.image;
+          aspect = (img.width / img.height) || 1;
+        }
+        sprite.scale.set(desiredWorldHeight * aspect, desiredWorldHeight, 1);
+      } else {
+        // unknown camera type: fallback to heuristic
+        sprite.scale.set((pixelHeight / 100), (pixelHeight / 100), 1);
+      }
+    } else {
+      // no renderer available: use the heuristic fallback and ensure it's not distance-attenuated
+      sprite.scale.set((pixelHeight / 100), (pixelHeight / 100), 1);
+      // material should already have sizeAttenuation=false and depthTest=false in creation funcs
+    }
+
+    // ensure material is rendered on top
+    sprite.renderOrder = 999999;
+    if (sprite.material) {
+      sprite.material.depthTest = false;
+      sprite.material.depthWrite = false;
     }
   }
 }
