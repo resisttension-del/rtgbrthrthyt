@@ -4988,14 +4988,21 @@ async function attachShutdownListener() {
                     } else {
                         // This case handles a subsequent shutdown, maybe after the server came back up and went down again
                          Swal.fire({
-                             title: 'Server Offline',
-                             html: `<div style="text-align:left; font-size:14px; max-width:420px;">The server has been shut down for maintenance. The page will reload now.</div>`,
-                             icon: 'info',
-                             confirmButtonText: 'OK'
+                           title: 'Server Offline',
+                           html: `<div style="text-align:left; font-size:14px; max-width:420px;">
+                                    The server has been shut down for maintenance. The page will reload now.
+                                  </div>`,
+                           icon: 'info',
+                           confirmButtonText: 'OK',
+                           allowOutsideClick: false,
+                           allowEscapeKey: false
                          }).then((result) => {
-                             if (result.isConfirmed) {
-                                 waitSong.play();
-                             }
+                           if (result.isConfirmed) {
+                             // This is already inside the click gesture
+                             waitSong.play().catch(err => {
+                               console.warn("Audio play blocked:", err);
+                             });
+                           }
                          });
                     }
                     return;
