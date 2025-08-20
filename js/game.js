@@ -750,7 +750,10 @@ window.localPlayer = {
         window.camera.position.copy(spawn).add(new THREE.Vector3(0, 1.6, 0));
     createLeaderboardOverlay();
 
-
+const manager = new MarkerManager(window.scene, window.camera, {
+  unitsPerMeter: 100, // example
+  checkBulletPenetration: (o,d,max) => game.checkBulletPenetration(o,d,max)
+});
     
 }
 
@@ -2899,6 +2902,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
