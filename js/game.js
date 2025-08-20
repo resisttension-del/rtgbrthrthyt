@@ -10,7 +10,6 @@ import { ShaderPass } from "https://cdn.jsdelivr.net/npm/three@0.152.0/examples/
 import { CopyShader } from "https://cdn.jsdelivr.net/npm/three@0.152.0/examples/jsm/shaders/CopyShader.js";
 import Stats from 'stats.js';
 import { dbRefs, disposeGame, fullCleanup, activeGameId, setupDamageListener } from "./network.js";
-import RangeMarker from './marker.js';
 import * as BufferGeometryUtils from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import {
     computeBoundsTree,
@@ -751,16 +750,6 @@ window.localPlayer = {
         window.camera.position.copy(spawn).add(new THREE.Vector3(0, 1.6, 0));
     createLeaderboardOverlay();
 
-
-const rm = new RangeMarker({
-  camera: window.camera,
-  renderer: window.renderer,
-  scene: window.scene,
-  THREE,
-  unitsPerMeter: 1,      // depends on your unit convention
-  markerDuration: 10000, // ms, 0 = persistent
-  autoListenKey: true    // listens for 't' key to place marker
-});
 
     
 }
@@ -2910,6 +2899,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
