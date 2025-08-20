@@ -1,6 +1,7 @@
 // marker.js
 // Exportable MarkerManager for Three.js
 // Requirements: THREE is available globally or imported.
+import * as THREE from "https://cdnjs.cloudflare.com/ajax/libs/three.js/0.152.0/three.module.js";
 
 export class MarkerManager {
   /**
