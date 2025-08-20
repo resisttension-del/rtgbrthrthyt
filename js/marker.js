@@ -146,9 +146,7 @@ export default class RangeMarker {
       if (this._THREE && this._THREE.Vector3 && dir.clone && camPos.clone) {
         markerWorldPos = camPos.clone().add(dir.clone().multiplyScalar(this.defaultDistance));
       } else {
-        markerWorldPos = {
-            return;
-        };
+          return;
       }
     }
 
