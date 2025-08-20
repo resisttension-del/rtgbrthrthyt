@@ -94,89 +94,94 @@ export default class RangeMarker {
    * - Raycasts forward from camera (if scene + THREE available) and uses first hit.
    * - Otherwise places at camera forward * defaultDistance.
    */
-  placeMarker() {
-    // compute camera world position
-    this.camera.updateMatrixWorld();
+/**
+   * Place/replace the marker:
+   * - Raycasts forward from camera (if scene + THREE available) and uses first hit.
+   * - Otherwise places at camera forward * defaultDistance.
+   */
+  placeMarker() {
+    // compute camera world position
+    this.camera.updateMatrixWorld();
 
-    let camPos;
-    try {
-      camPos = new this._THREE.Vector3().setFromMatrixPosition(this.camera.matrixWorld);
-    } catch (e) {
-      // fallback without THREE (unlikely): try reading matrixWorld elements or default zero
-      camPos = { x: 0, y: 0, z: 0, clone() { return { x: this.x, y: this.y, z: this.z }; } };
-      try {
-        const e = this.camera.matrixWorld.elements;
-        camPos.x = e[12]; camPos.y = e[13]; camPos.z = e[14];
-      } catch (err) { /* leave zero */ }
-    }
+    let camPos;
+    try {
+      camPos = new this._THREE.Vector3().setFromMatrixPosition(this.camera.matrixWorld);
+    } catch (e) {
+      // fallback without THREE (unlikely): try reading matrixWorld elements or default zero
+      camPos = { x: 0, y: 0, z: 0, clone() { return { x: this.x, y: this.y, z: this.z }; } };
+      try {
+        const e = this.camera.matrixWorld.elements;
+        camPos.x = e[12]; camPos.y = e[13]; camPos.z = e[14];
+      } catch (err) { /* leave zero */ }
+    }
 
-    // compute forward direction
-    let dir;
-    if (this._THREE && this._THREE.Vector3 && typeof this.camera.getWorldDirection === 'function') {
-      dir = new this._THREE.Vector3();
-      this.camera.getWorldDirection(dir); // normalized vector pointing -Z camera space -> world
-    } else {
-      // fallback: assume forward is -Z in camera space (not great)
-      dir = { x: 0, y: 0, z: -1, clone() { return { x: this.x, y: this.y, z: this.z }; } };
-      try {
-        // attempt to read camera quaternion if present
-        if (this.camera.quaternion && this._THREE && this._THREE.Vector3) {
-          dir = new this._THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion);
-        }
-      } catch (e) {}
-    }
+    // compute forward direction
+    let dir;
+    if (this._THREE && this._THREE.Vector3 && typeof this.camera.getWorldDirection === 'function') {
+      dir = new this._THREE.Vector3();
+      this.camera.getWorldDirection(dir); // normalized vector pointing -Z camera space -> world
+    } else {
+      // fallback: assume forward is -Z in camera space (not great)
+      dir = { x: 0, y: 0, z: -1, clone() { return { x: this.x, y: this.y, z: this.z }; } };
+      try {
+        // attempt to read camera quaternion if present
+        if (this.camera.quaternion && this._THREE && this._THREE.Vector3) {
+          dir = new this._THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion);
+        }
+      } catch (e) {}
+    }
 
-    // Try raycast if we have scene and THREE
-    let markerWorldPos = null;
-    if (this._raycaster && this.scene) {
-      try {
-        this._raycaster.set(camPos, dir);
-        const hits = this._raycaster.intersectObjects(this.scene.children, true);
-        if (hits && hits.length) {
-          markerWorldPos = hits[0].point.clone ? hits[0].point.clone() : { x: hits[0].point.x, y: hits[0].point.y, z: hits[0].point.z };
-        }
-      } catch (e) {
-        // fall through to default placement
-        return;
-      }
-    }
-
-    // no hit -> place at defaultDistance in front of camera
+    // Try raycast if we have scene and THREE
+    let markerWorldPos = null;
+    if (this._raycaster && this.scene) {
+      try {
+        this._raycaster.set(camPos, dir);
+        const hits = this._raycaster.intersectObjects(this.scene.children, true);
+        if (hits && hits.length) {
+          markerWorldPos = hits[0].point.clone ? hits[0].point.clone() : { x: hits[0].point.x, y: hits[0].point.y, z: hits[0].point.z };
+        }
+      } catch (e) {
+        // fall through to default placement
+        markerWorldPos = null;
+      }
+    }
+    
+    // ----------------------
+    // ADDED LOGIC: Check for a hit before proceeding
     if (!markerWorldPos) {
-      if (this._THREE && this._THREE.Vector3 && dir.clone && camPos.clone) {
-        markerWorldPos = camPos.clone().add(dir.clone().multiplyScalar(this.defaultDistance));
-      } else {
-          return;
-      }
+        // If there's no hit, clear any existing marker and do not place a new one.
+        this._clearMarkerImmediate();
+        return;
     }
+    // ----------------------
 
-    // Replace existing marker
-    if (this._marker) this._clearMarkerImmediate();
+    // Replace existing marker
+    if (this._marker) this._clearMarkerImmediate();
 
-    // compute distance (units -> meters)
-    const distUnits = (typeof camPos.distanceTo === 'function')
-      ? camPos.distanceTo(markerWorldPos)
-      : Math.hypot(camPos.x - markerWorldPos.x, camPos.y - markerWorldPos.y, camPos.z - markerWorldPos.z);
-    const meters = distUnits / this.unitsPerMeter;
+    // compute distance (units -> meters)
+    const distUnits = (typeof camPos.distanceTo === 'function')
+      ? camPos.distanceTo(markerWorldPos)
+      : Math.hypot(camPos.x - markerWorldPos.x, camPos.y - markerWorldPos.y, camPos.z - markerWorldPos.z);
+    const meters = distUnits / this.unitsPerMeter;
 
-    // create DOM element
-    const dom = document.createElement('div');
-    dom.className = 'rm-marker';
-    dom.innerHTML = `<span class="val">${meters.toFixed(2)}</span><span class="unit">m</span>`;
-    this.domParent.appendChild(dom);
+    // create DOM element
+    const dom = document.createElement('div');
+    dom.className = 'rm-marker';
+    dom.innerHTML = `<span class="val">${meters.toFixed(2)}</span><span class="unit">m</span>`;
+    this.domParent.appendChild(dom);
 
-    this._marker = {
-      dom,
-      worldPos: (markerWorldPos.clone ? markerWorldPos.clone() : { x: markerWorldPos.x, y: markerWorldPos.y, z: markerWorldPos.z }),
-      timeoutId: null
-    };
+    this._marker = {
+      dom,
+      worldPos: (markerWorldPos.clone ? markerWorldPos.clone() : { x: markerWorldPos.x, y: markerWorldPos.y, z: markerWorldPos.z }),
+      timeoutId: null
+    };
 
-    // auto remove after 5 seconds
-    this._marker.timeoutId = setTimeout(() => this._clearMarkerImmediate(), 5000);
+    // auto remove after 5 seconds
+    this._marker.timeoutId = setTimeout(() => this._clearMarkerImmediate(), 5000);
 
-    // position right away so it appears immediately
-    this._positionMarkerDOM();
-  }
+    // position right away so it appears immediately
+    this._positionMarkerDOM();
+  }
 
   _clearMarkerImmediate() {
     if (!this._marker) return;
