@@ -84,7 +84,7 @@ export default class RangeMarker {
     const active = document.activeElement;
     if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable)) return;
     if (ev.repeat) return;
-    if (ev.key === 'z' || ev.key === 'Z') {
+    if (ev.key === 't' || ev.key === 'T') {
       this.placeMarker();
     }
   }
