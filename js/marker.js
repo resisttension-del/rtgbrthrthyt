@@ -99,6 +99,11 @@ export default class RangeMarker {
    * - Raycasts forward from camera (if scene + THREE available) and uses first hit.
    * - Otherwise places at camera forward * defaultDistance.
    */
+/**
+   * Place/replace the marker:
+   * - Raycasts forward from camera (if scene + THREE available) and uses first hit.
+   * - Otherwise places at camera forward * defaultDistance.
+   */
   placeMarker() {
     // compute camera world position
     this.camera.updateMatrixWorld();
@@ -133,27 +138,27 @@ export default class RangeMarker {
 
     // Try raycast if we have scene and THREE
     let markerWorldPos = null;
+    let hit = false;
     if (this._raycaster && this.scene) {
       try {
         this._raycaster.set(camPos, dir);
         const hits = this._raycaster.intersectObjects(this.scene.children, true);
         if (hits && hits.length) {
           markerWorldPos = hits[0].point.clone ? hits[0].point.clone() : { x: hits[0].point.x, y: hits[0].point.y, z: hits[0].point.z };
+          hit = true;
         }
       } catch (e) {
-        // fall through to default placement
-        markerWorldPos = null;
+        // no hit in case of error
+        hit = false;
       }
     }
     
-    // ----------------------
-    // ADDED LOGIC: Check for a hit before proceeding
-    if (!markerWorldPos) {
-        // If there's no hit, clear any existing marker and do not place a new one.
-        this._clearMarkerImmediate();
-        return;
+    // Now check if a hit occurred anywhere in the process
+    if (!hit) {
+      // No hit, so clear any existing marker and do not proceed
+      this._clearMarkerImmediate();
+      return;
     }
-    // ----------------------
 
     // Replace existing marker
     if (this._marker) this._clearMarkerImmediate();
