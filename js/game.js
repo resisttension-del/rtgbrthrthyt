@@ -143,10 +143,7 @@ let gameConfigRef  = null;    // ← add this
 let gameEndTime   = null;   // will be fetched from gameConfigRef
 let gameInterval  = null;   // ID returned by setInterval()
 
-const manager = new MarkerManager(window.scene, window.camera, {
-  unitsPerMeter: 100, // example
-  checkBulletPenetration: (o,d,max) => game.checkBulletPenetration(o,d,max)
-});
+let manager;
 
 
 export function initGlobalFogAndShadowParams() {
@@ -2111,6 +2108,13 @@ export function animate(timestamp) {
     // Schedule the next frame *first*. This ensures the loop continues
     // even if an error occurs later in this frame.
     requestAnimationFrame(animate);
+
+    manager = new MarkerManager(window.scene, window.camera, {
+      unitsPerMeter: 100, // example
+      checkBulletPenetration: (o,d,max) => game.checkBulletPenetration(o,d,max)
+    });
+
+    
     manager.update();
     // --- Disconnection/Pause Logic ---
     // If localPlayerId is null, it means the local player has disconnected.
@@ -2901,6 +2905,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
