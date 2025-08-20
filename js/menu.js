@@ -5405,6 +5405,7 @@ async function initHostWatcherForAllSlots() {
       const configRef = dbSlot.ref(`${gamePath}/gameConfig`);
       const ownerRef = configRef.child('owner');
       const durationRef = configRef.child('gameDuration');
+      const heartbeatRef = configRef.child('lastHeartbeatTs'); // NEW: dedicated heartbeat field
       const endedRef = configRef.child('ended');
       const trackerKey = `${slotName}/${gameId}`;
       if (hostTrackers[trackerKey]) return; // already tracking
@@ -5416,10 +5417,14 @@ async function initHostWatcherForAllSlots() {
         currentRemainingSeconds: null,
         ownerHandler: null,
         durationHandler: null,
+        heartbeatHandler: null,
         endedHandler: null,
         ownerId: null,                // last seen owner id
-        lastDurationTs: null,         // timestamp (ms) of last duration update
-        ownerStaleInterval: null      // interval checking for stale duration updates
+        lastDurationLocalTs: null,    // local Date.now() when duration update seen
+        lastHeartbeatTs: null,        // server timestamp value (if available)
+        lastHeartbeatLocalTs: null,   // local Date.now() when heartbeat seen
+        ownerStaleInterval: null,     // interval checking for stale duration updates
+        _durationTimeout: null
       };
       hostTrackers[trackerKey] = tracker;
 
@@ -5428,11 +5433,10 @@ async function initHostWatcherForAllSlots() {
         configRef.once('value', snapCfg => {
           if (!snapCfg.exists()) return;
 
-          // --- NEW: if there's no gameDuration property, mark the slot ended immediately ---
+          // If there's no gameDuration property, mark the slot ended immediately (preserve previous behavior)
           const hasDuration = snapCfg.child('gameDuration').exists();
           if (!hasDuration) {
             setTimeout(() => {
-              // re-check if duration exists before ending
               configRef.child('gameDuration').once('value').then(snapDur => {
                 if (!snapDur.exists()) {
                   console.log(`[hostWatcher] no gameDuration found for ${trackerKey} after delay, ending slot`);
@@ -5444,7 +5448,6 @@ async function initHostWatcherForAllSlots() {
             }, 2000);
             return; // exit early; durationHandler will pick it up if it appears
           }
-          // --- END NEW ---
 
           // skip initial claim if already ended
           const alreadyEnded = snapCfg.child('ended').val();
@@ -5474,6 +5477,7 @@ async function initHostWatcherForAllSlots() {
                 console.log(`[hostWatcher] initial transaction committed; registered onDisconnect for ${trackerKey}`);
               } else {
                 // someone else won; do nothing
+                console.log(`[hostWatcher] initial owner tx did not commit for ${trackerKey}; currentOwner=`, snapshot && snapshot.val());
               }
             });
           }).catch(e => {
@@ -5499,7 +5503,16 @@ async function initHostWatcherForAllSlots() {
               return;
             }
             tracker.currentRemainingSeconds--;
-            try { await durationRef.set(tracker.currentRemainingSeconds); } catch (e) {}
+
+            // write duration and heartbeat timestamp together (server timestamp)
+            try {
+              await dbSlot.ref(`game/${gameId}/gameConfig`).update({
+                gameDuration: tracker.currentRemainingSeconds,
+                lastHeartbeatTs: firebase.database.ServerValue.TIMESTAMP
+              });
+            } catch (e) {
+              console.warn(`[hostWatcher] failed to write heartbeat+duration for ${trackerKey}:`, e);
+            }
           }, 1000);
           console.log(`[hostWatcher] became owner for ${trackerKey}`);
         }
@@ -5543,6 +5556,8 @@ async function initHostWatcherForAllSlots() {
                 if (committed) {
                   try { ownerRef.onDisconnect().remove(); } catch (e) { /* ignore */ }
                   console.log(`[hostWatcher] re-election transaction committed for ${trackerKey}`);
+                } else {
+                  console.log(`[hostWatcher] re-election tx not committed for ${trackerKey}; currentOwner=`, snapshot && snapshot.val());
                 }
               });
             } catch (e) {
@@ -5552,36 +5567,46 @@ async function initHostWatcherForAllSlots() {
         }
       };
 
-      // DURATION handler
-tracker.durationHandler = snapDur => {
-  // cancel any previously scheduled handling
-  if (tracker._durationTimeout) {
-    clearTimeout(tracker._durationTimeout);
-  }
+      // DURATION handler (short debounce, immediate local timestamp update)
+      tracker.durationHandler = snapDur => {
+        // Mark local timestamp immediately so stale checks have low-latency info
+        tracker.lastDurationLocalTs = Date.now();
 
-  // schedule handling after 2 seconds
-  tracker._durationTimeout = setTimeout(() => {
-    const val = snapDur.val();
+        // small debounce for assigning numeric remaining seconds (200ms)
+        if (tracker._durationTimeout) {
+          clearTimeout(tracker._durationTimeout);
+        }
+        tracker._durationTimeout = setTimeout(() => {
+          const val = snapDur.val();
 
-    // If duration removed / missing -> end the slot
-    if (val == null || val === '') {
-      try {
-        console.log(`[hostWatcher] gameDuration missing for ${trackerKey}, setting ended=true`);
-        endedRef.set(true).catch(e => {
-          console.warn(`[hostWatcher] failed to set ended when duration missing ${trackerKey}:`, e);
-        });
-      } catch (e) {
-        console.warn(`[hostWatcher] failed to set ended when duration missing ${trackerKey}:`, e);
-      }
-      return;
-    }
+          // If duration removed / missing -> end the slot
+          if (val == null || val === '') {
+            try {
+              console.log(`[hostWatcher] gameDuration missing for ${trackerKey}, setting ended=true`);
+              endedRef.set(true).catch(e => {
+                console.warn(`[hostWatcher] failed to set ended when duration missing ${trackerKey}:`, e);
+              });
+            } catch (e) {
+              console.warn(`[hostWatcher] failed to set ended when duration missing ${trackerKey}:`, e);
+            }
+            return;
+          }
 
-    if (typeof val === 'number') {
-      tracker.currentRemainingSeconds = val;
-      tracker.lastDurationTs = Date.now();
-    }
-  }, 2000);
-};
+          if (typeof val === 'number') {
+            tracker.currentRemainingSeconds = val;
+          }
+        }, 200);
+      };
+
+      // HEARTBEAT handler (preferred staleness signal)
+      tracker.heartbeatHandler = snapBeat => {
+        const serverTs = snapBeat.val();
+        tracker.lastHeartbeatTs = typeof serverTs === 'number' ? serverTs : null;
+        tracker.lastHeartbeatLocalTs = Date.now();
+        // option: if we don't have a numeric duration yet, keep lastDurationLocalTs in sync
+        // (this helps the stale-check to prefer heartbeat but fallback to duration)
+        tracker.lastDurationLocalTs = tracker.lastDurationLocalTs || tracker.lastHeartbeatLocalTs;
+      };
 
       // ENDED handler
       tracker.endedHandler = snapEnded => {
@@ -5623,25 +5648,38 @@ tracker.durationHandler = snapDur => {
         }
       };
 
-      // Start a stale-check interval to swap owner if duration isn't updated for 3s
+      // Start a stale-check interval to swap owner if heartbeat/duration isn't updated
       try {
+        const STALE_MS = 6000; // increased threshold to tolerate debounce/jitter
         tracker.ownerStaleInterval = setInterval(() => {
           try {
+            // Prefer heartbeat local timestamp as the staleness signal
+            const lastSeenLocal = tracker.lastHeartbeatLocalTs || tracker.lastDurationLocalTs;
+            const currentOwnerId = tracker.ownerId;
+
             // Only attempt takeover if:
             //  - we are NOT the current owner
-            //  - we have seen a lastDurationTs
-            //  - the last update was > 3000ms ago
+            //  - we have at least one last-seen timestamp
+            //  - the last seen update was > STALE_MS ago
             //  - there is a current owner (ownerId != null)
-            if (tracker.ownerId && tracker.ownerId !== slotUid && tracker.lastDurationTs) {
-              const ageMs = Date.now() - tracker.lastDurationTs;
-              if (ageMs > 3000) {
-                // attempt to claim IF the DB owner still matches the ownerId we saw
-                console.log(`[hostWatcher] detected stale duration (${ageMs}ms) for ${trackerKey}, attempting takeover from ${tracker.ownerId}`);
-                ownerRef.transaction(curr => (curr === tracker.ownerId ? slotUid : undefined), false)
-                  .then(() => {
-                    try { ownerRef.onDisconnect().remove(); } catch (e) { /* ignore */ }
-                  })
-                  .catch(e => console.warn(`[hostWatcher] stale takeover tx failed ${trackerKey}:`, e));
+            if (currentOwnerId && currentOwnerId !== slotUid && lastSeenLocal) {
+              const ageMs = Date.now() - lastSeenLocal;
+              if (ageMs > STALE_MS) {
+                console.log(`[hostWatcher] detected stale duration/heartbeat (${ageMs}ms) for ${trackerKey}, attempting takeover from ${currentOwnerId}`);
+                // Try to claim only if DB owner still equals the owner we observed
+                ownerRef.transaction(curr => (curr === currentOwnerId ? slotUid : undefined),
+                  (err, committed, snapshot) => {
+                    if (err) {
+                      console.warn(`[hostWatcher] stale takeover tx failed ${trackerKey}:`, err);
+                      return;
+                    }
+                    if (committed) {
+                      try { ownerRef.onDisconnect().remove(); } catch (e) { /* ignore */ }
+                      console.log(`[hostWatcher] stale takeover transaction committed for ${trackerKey}`);
+                    } else {
+                      console.log(`[hostWatcher] stale takeover did NOT commit for ${trackerKey}; currentOwner=`, snapshot && snapshot.val());
+                    }
+                  });
               }
             }
           } catch (e) {
@@ -5656,6 +5694,7 @@ tracker.durationHandler = snapDur => {
       try {
         ownerRef.on('value', tracker.ownerHandler);
         durationRef.on('value', tracker.durationHandler);
+        heartbeatRef.on('value', tracker.heartbeatHandler);
         endedRef.on('value', tracker.endedHandler);
       } catch (e) {
         console.warn(`[hostWatcher] failed to attach listeners for ${trackerKey}:`, e);
@@ -5702,6 +5741,7 @@ tracker.durationHandler = snapDur => {
         const configRef = db.ref(`game/${gameId}/gameConfig`);
         if (t.ownerHandler) configRef.child('owner').off('value', t.ownerHandler);
         if (t.durationHandler) configRef.child('gameDuration').off('value', t.durationHandler);
+        if (t.heartbeatHandler) configRef.child('lastHeartbeatTs').off('value', t.heartbeatHandler);
         if (t.endedHandler) configRef.child('ended').off('value', t.endedHandler);
       }
     } catch (e) {
@@ -5712,6 +5752,7 @@ tracker.durationHandler = snapDur => {
     }
   }
 }
+
     // ---------------------------------------------------
 
     // ---------- initializeMenuDisplay ----------
