@@ -4982,6 +4982,16 @@ async function attachShutdownListener() {
                     setAuthMessage("Server is temporarily offline for maintenance.", true);
                     disableUIControls();
 
+    waitSong.play().catch(err => {
+        console.warn("Playback blocked, waiting for first user interaction:", err);
+        // Unlock on the next user click/tap
+        document.addEventListener("click", () => {
+            waitSong.play().catch(err2 => {
+                console.warn("Still blocked:", err2);
+            });
+        }, { once: true });
+    });
+                     
                     // Check if this is the first time the server has been down since the page loaded
                     if (!sessionStorage.getItem(RELOAD_FLAG)) {
                         doImmediateReload();
