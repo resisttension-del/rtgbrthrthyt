@@ -6479,6 +6479,11 @@ lagCheckInterval = setInterval(async () => {
                 setAuthMessage("This device is banned.", true);
                 return;
             }
+        if (serverShutdown) {
+            console.warn("authenticateUser: blocked because server shutdown flag is set.");
+             setAuthMessage("This device is banned.", true);
+             return;
+        }
             try {
                 const freshlyBanned = await checkDeviceBanFromDB();
                 if (freshlyBanned) {
@@ -6593,12 +6598,19 @@ lagCheckInterval = setInterval(async () => {
             setAuthMessage("");
             const rawUsername = usernameInput.value.trim();
             const password = passwordInput.value;
-
+          
             // Device ban quick-check (sync) and DB re-check
             if (deviceBanned) {
                 setAuthMessage("This device is banned.", true);
                 return;
             }
+
+        if (serverShutdown) {
+            console.warn("authenticateUser: blocked because server shutdown flag is set.");
+             setAuthMessage("This device is banned.", true);
+             return;
+        }
+             
             try {
                 const freshlyBanned = await checkDeviceBanFromDB();
                 if (freshlyBanned) {
