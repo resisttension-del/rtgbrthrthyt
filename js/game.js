@@ -2120,7 +2120,7 @@ export function animate(timestamp) {
     // Schedule the next frame *first*. This ensures the loop continues
     // even if an error occurs later in this frame.
     requestAnimationFrame(animate);
-  if (rm) rm.update();
+    rm.update();
     // --- Disconnection/Pause Logic ---
     // If localPlayerId is null, it means the local player has disconnected.
     // The game state should already be paused and UI updated by the handler
@@ -2910,6 +2910,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
