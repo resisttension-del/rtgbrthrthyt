@@ -4990,7 +4990,7 @@ async function attachShutdownListener() {
                             icon: 'info',
                             confirmButtonText: 'OK'
                         });
-                        doImmediateReload();
+                        location.reload();
                     }
                     return;
                 }
