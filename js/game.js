@@ -613,7 +613,7 @@ export async function startGame(username, mapName, initialDetailsEnabled, ffaEna
 
     manager = new MarkerManager(window.scene, window.camera, {
       unitsPerMeter: 100, // example
-      checkBulletPenetration: (o,d,max) => game.checkBulletPenetration(o,d,max)
+    //  checkBulletPenetration: (o,d,max) => game.checkBulletPenetration(o,d,max)
     });
     
     // The rest of your startGame function remains the same
@@ -2115,7 +2115,7 @@ export function animate(timestamp) {
     requestAnimationFrame(animate);
 
     
-    manager.update();
+ //   manager.update();
     // --- Disconnection/Pause Logic ---
     // If localPlayerId is null, it means the local player has disconnected.
     // The game state should already be paused and UI updated by the handler
@@ -2905,6 +2905,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
