@@ -1,21 +1,23 @@
 /**
  * Minimal standalone range marker (self-contained raycast logic).
  *
- * This version creates a 3D THREE.Mesh in the scene, similar to a bullet hole.
+ * This version creates a 3D THREE.Mesh that acts as a screen-space overlay,
+ * always positioned in front of the camera and facing the player.
  *
  * Usage:
  * import RangeMarker from './RangeMarker.js';
  * const rm = new RangeMarker({
  * camera,           // THREE.Camera (required)
  * renderer,         // THREE.WebGLRenderer (required)
- * scene,            // THREE.Scene (required for raycasting and adding marker)
+ * scene,            // THREE.Scene (required for raycasting)
  * unitsPerMeter: 1,  // game units per meter - default 1
  * autoListenKey: true, // listen for 't' automatically
  * defaultDistance: 1000, // max ray distance (world units)
  * THREE,            // Pass THREE from your project's import
  * });
  *
- * // Note: No need to call rm.update() in your RAF loop anymore.
+ * // in your RAF loop:
+ * rm.update();
  *
  * // cleanup:
  * rm.dispose();
@@ -24,7 +26,7 @@ export default class RangeMarker {
   constructor(opts = {}) {
     if (!opts.camera) throw new Error('RangeMarker: camera required');
     if (!opts.renderer) throw new Error('RangeMarker: renderer required');
-    if (!opts.scene) throw new Error('RangeMarker: scene required for 3D marker');
+    if (!opts.scene) throw new Error('RangeMarker: scene required for raycasting');
 
     this.camera = opts.camera;
     this.renderer = opts.renderer;
@@ -38,8 +40,8 @@ export default class RangeMarker {
       console.warn('RangeMarker: THREE not found; marker will be disabled.');
     }
 
-    // The marker is now a THREE.Object3D
-    this._marker = null;
+    this._marker = null; // THREE.Mesh
+    this._markerStartTime = 0; // for fade animation
 
     this._onKeyDown = this._onKeyDown.bind(this);
     if (this.autoListenKey) window.addEventListener('keydown', this._onKeyDown);
@@ -118,13 +120,10 @@ export default class RangeMarker {
 
     let chosen = null;
     let hitPoint = null;
-    let hitNormal = null;
 
     if (playerHit) {
       chosen = playerHit;
       hitPoint = playerHit.intersection;
-      // You may need a more accurate normal calculation for player models
-      hitNormal = direction.clone().negate();
     } else {
       const candidates = this._collectCandidates();
       if (!candidates.length) return;
@@ -143,70 +142,88 @@ export default class RangeMarker {
         if (h.object && h.object.userData && h.object.userData.ignoreRangeMarker) continue;
         chosen = h;
         hitPoint = chosen.point.clone();
-        hitNormal = (chosen.face && chosen.object) ? chosen.face.normal.clone().transformDirection(chosen.object.matrixWorld).normalize() : direction.clone().negate();
         break;
       }
     }
     
     if (!chosen) return;
 
-    // Remove any existing marker before creating a new one
     this._clearMarkerImmediate();
 
-    // Create the 3D text/mesh for the marker
     const distUnits = origin.distanceTo(hitPoint);
     const meters = distUnits / this.unitsPerMeter;
-    const text = `${meters.toFixed(2)} m`;
+    let text = `${meters.toFixed(2)} m`;
+    if (playerHit) {
+      text += ' (PLAYER)';
+    }
 
-    const markerGeometry = new this._THREE.PlaneGeometry(1, 0.2); // Adjust size as needed
-    const markerMaterial = new this._THREE.MeshBasicMaterial({
-      color: 0xffffff,
-      side: this._THREE.DoubleSide,
-      transparent: true,
-      opacity: 0.8
-    });
-    const marker = new this._THREE.Mesh(markerGeometry, markerMaterial);
-
-    // This part is the most critical: position and orient the marker
-    marker.position.copy(hitPoint);
-    marker.lookAt(new this._THREE.Vector3().addVectors(marker.position, hitNormal));
-    marker.position.addScaledVector(hitNormal, 0.001); // Offset to avoid z-fighting
-
-    // A simple way to add text. You'll need a way to render text as a texture.
-    // This is a placeholder; you'd need to replace this with your actual text rendering logic.
-    // For example, using THREE.TextGeometry, troika-three-text, or a canvas texture.
+    // Create the 3D text/mesh for the marker
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d');
     canvas.width = 512;
-    canvas.height = 64;
+    canvas.height = 128; // Increased height for longer text
     ctx.fillStyle = 'rgba(0, 0, 0, 0.72)';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.font = '32px monospace';
+    ctx.font = '64px monospace';
     ctx.fillStyle = '#fff';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText(text, canvas.width / 2, canvas.height / 2);
 
     const texture = new this._THREE.CanvasTexture(canvas);
-    marker.material.map = texture;
-    marker.material.needsUpdate = true;
-    
-    // Add the marker to the scene
-    this.scene.add(marker);
-    this._marker = marker;
+    texture.minFilter = this._THREE.LinearFilter;
+    texture.magFilter = this._THREE.LinearFilter;
 
-    // Use setTimeout for a delayed removal, similar to your bullet hole fade
-    setTimeout(() => {
-      this._clearMarkerImmediate();
-    }, 5000);
+    const markerGeometry = new this._THREE.PlaneGeometry(1, 0.25);
+    const markerMaterial = new this._THREE.MeshBasicMaterial({
+      map: texture,
+      side: this._THREE.DoubleSide,
+      transparent: true,
+      opacity: 0.8
+    });
+    const marker = new this._THREE.Mesh(markerGeometry, markerMaterial);
+
+    // CRITICAL: Set renderOrder and parent it to the camera
+    marker.renderOrder = 999;
+    marker.onBeforeRender = (renderer) => renderer.clearDepth();
+    this.camera.add(marker);
+    
+    // Position it in front of the camera in the camera's local space
+    marker.position.set(0, 0, -5); // Position 5 units in front of the camera
+
+    this._marker = marker;
+    this._markerStartTime = performance.now();
   }
 
-  // No longer needed since the marker is a static mesh
-  update() {}
+  // The update method now handles the fading. You MUST call this every frame.
+  update() {
+    if (!this._marker) return;
+
+    const fadeDuration = 5000; // 5 seconds
+    const elapsed = performance.now() - this._markerStartTime;
+
+    if (elapsed >= fadeDuration) {
+      this._clearMarkerImmediate();
+      return;
+    }
+
+    // Calculate fade based on elapsed time
+    const opacity = this._THREE.MathUtils.lerp(0.8, 0, elapsed / fadeDuration);
+    if (this._marker.material.opacity !== opacity) {
+      this._marker.material.opacity = opacity;
+    }
+  }
 
   _clearMarkerImmediate() {
     if (!this._marker) return;
-    this.scene.remove(this._marker);
+
+    // Remove the marker from the camera's children
+    if (this._marker.parent === this.camera) {
+      this.camera.remove(this._marker);
+    } else if (this._marker.parent) {
+      this._marker.parent.remove(this._marker);
+    }
+
     if (this._marker.geometry) this._marker.geometry.dispose();
     if (this._marker.material) {
         if (this._marker.material.map) this._marker.material.map.dispose();
