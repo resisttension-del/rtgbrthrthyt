@@ -59,7 +59,7 @@ export default class RangeMarker {
       console.log('_onKeyDown - ignored repeat');
       return;
     }
-    if (ev.key === 't' || ev.key === 'T') {
+    if (ev.key === 'y' || ev.key === 'Y') {
       console.log('_onKeyDown - triggering placeMarker()');
       this.placeMarker();
     }
