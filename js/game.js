@@ -1,7 +1,6 @@
 // js/game.js
 
 import * as THREE from "https://cdnjs.cloudflare.com/ajax/libs/three.js/0.152.0/three.module.js";
-import { MarkerManager } from "./marker.js";
 import { EffectComposer } from "https://cdn.jsdelivr.net/npm/three@0.152.0/examples/jsm/postprocessing/EffectComposer.js";
 import { RenderPass }     from "https://cdn.jsdelivr.net/npm/three@0.152.0/examples/jsm/postprocessing/RenderPass.js";
 import { UnrealBloomPass } from "https://cdn.jsdelivr.net/npm/three@0.152.0/examples/jsm/postprocessing/UnrealBloomPass.js";
@@ -670,11 +669,6 @@ export async function startGame(username, mapName, initialDetailsEnabled, ffaEna
     initializeAudioManager(window.camera, scene);
     startSoundListener();
 
-
-        manager = new MarkerManager(scene, window.camera, {
-      unitsPerMeter: 100, // example
-    //  checkBulletPenetration: (o,d,max) => game.checkBulletPenetration(o,d,max)
-    });
 
 const initialBodyColor = Math.floor(Math.random() * 0xffffff);
 
@@ -2137,8 +2131,7 @@ export function animate(timestamp) {
     // even if an error occurs later in this frame.
     requestAnimationFrame(animate);
 
-    
-    manager.update();
+ 
     // --- Disconnection/Pause Logic ---
     // If localPlayerId is null, it means the local player has disconnected.
     // The game state should already be paused and UI updated by the handler
