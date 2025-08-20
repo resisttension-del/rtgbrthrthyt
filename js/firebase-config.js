@@ -1,7 +1,7 @@
 
 // firebase-config.js
 
-// ff
+// fff
 // Configuration for your Firebase projects
 // Make sure these match your actual Firebase project configurations
 export const menuConfig = {
