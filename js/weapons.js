@@ -195,8 +195,8 @@ export class WeaponController {
       tracerLength: 100,
       speedModifier: 1 - 0.1,
       damageDropOff: {
-        20: 0.8, // 20% damage reduction at 20 meters
-        50: 0.5, // 50% damage reduction at 50 meters
+        20: 0.9, // 20% damage reduction at 20 meters
+        50: 0.8, // 50% damage reduction at 50 meters
       },
     },
     "ak-47": {
@@ -213,7 +213,7 @@ export class WeaponController {
       tracerLength: 100,
       speedModifier: 0.8 - 0.1,
       damageDropOff: {
-        20: 0.9, // 10% damage reduction
+        20: 0.85, // 10% damage reduction
         50: 0.7, // 30% damage reduction
       },
     },
@@ -231,8 +231,8 @@ export class WeaponController {
       tracerLength: 50,
       speedModifier: 0.9 - 0.1,
       damageDropOff: {
-        20: 0.7, // 30% damage reduction
-        50: 0.4, // 60% damage reduction
+        20: 0.8, // 30% damage reduction
+        50: 0.6, // 60% damage reduction
       },
     },
     marshal: {
@@ -250,8 +250,8 @@ export class WeaponController {
       tracerLength: 100,
       speedModifier: 0.7 - 0.1,
       damageDropOff: {
-        20: 1, // Sniper rifle, no drop-off
-        50: 1,
+        20: 0.9, // Sniper rifle, no drop-off
+        50: 0.8,
       },
     },
     m79: {
@@ -269,7 +269,7 @@ export class WeaponController {
       tracerLength: 20,
       damageDropOff: {
         20: 0.85, // 15% damage reduction
-        50: 0.6, // 40% damage reduction
+        50: 0.7, // 40% damage reduction
       },
     },
     legion: {
