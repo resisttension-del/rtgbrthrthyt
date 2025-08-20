@@ -152,6 +152,10 @@ placeMarker() {
   const distUnits = (typeof camPos.distanceTo === 'function')
     ? camPos.distanceTo(markerWorldPos)
     : Math.hypot(camPos.x - markerWorldPos.x, camPos.y - markerWorldPos.y, camPos.z - markerWorldPos.z);
+
+  // if the distance can't be determined (null / NaN / Infinity), do not add a marker
+  if (distUnits == null || !isFinite(distUnits)) return;
+
   const meters = distUnits / this.unitsPerMeter;
 
   // create DOM element
