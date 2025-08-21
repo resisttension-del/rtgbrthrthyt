@@ -14,7 +14,7 @@ import {
     computeBoundsTree,
     disposeBoundsTree,
     acceleratedRaycast,
-    MeshBVH, // <--- Added MeshBVH import f
+    MeshBVH, // <--- Added MeshBVH import
     MeshBVHHelper,
     StaticGeometryGenerator
 } from 'https://cdn.jsdelivr.net/npm/three-mesh-bvh@0.9.1/+esm';
@@ -51,7 +51,7 @@ import { usersRef } from './firebase-config.js';
 
 import { initInput, inputState, postFrameCleanup, handleWeaponSwitch } from "./input.js";
 import { PhysicsController } from "./physics.js";
-import { WeaponController, _prototypeModels, getWeaponModel, activeTracers, renderLoopCleanup }  from "./weapons.js";
+import { WeaponController, _prototypeModels, getWeaponModel, activeTracers }  from "./weapons.js";
 let detailsEnabled;
 let renderPass;
 const bodyColor = Math.floor(Math.random() * 0xffffff);
@@ -2382,7 +2382,6 @@ export function animate(timestamp) {
         console.error("Error in animate:", err);
     } finally {
         postFrameCleanup(); // Ensure cleanup runs even if an error occurs
-        renderLoopCleanup();
     }
 }
 
@@ -2972,87 +2971,6 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
