@@ -2,7 +2,7 @@ import * as THREE from "https://cdnjs.cloudflare.com/ajax/libs/three.js/0.152.0/
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
 import { sendSoundEvent } from "./network.js";
 
-// --- Constants ---
+// --- Constants ---f
 const PLAYER_MASS = 70;
 const GRAVITY = 27.5;
 const JUMP_VELOCITY = 12.3;
