@@ -101,10 +101,14 @@ export class PhysicsController {
         this._lastY = null;
         this._yStuckTimer = 0;
 
-        // NEW: stuck lock + debug helpers
-        this._stuckLockTime = 0; // short timer after programmatic snaps that blocks gravity
-        this._debugNoCollider = false; // set true to bypass shapecast for testing
-        this._debugLog = false; // set true to enable DBG logs inside physics step
+        // DEBUG / stuck-lock helpers (exposed for runtime toggling)
+        this._stuckLockTime = 0; // short timer after snaps that blocks gravity
+        this._debugNoCollider = false; // set true to bypass shapecast for tests
+        this._debugLog = true; // enable debug logging by default while debugging
+
+        // Expose this instance on window to toggle debug flags at runtime:
+        try { window._pc = this; } catch (e) { /* ignore if not allowed */ }
+        console.warn("[PhysicsController] created — debug ON. Toggle via window._pc._debugLog / window._pc._debugNoCollider");
     }
 
     setCollider(colliderMesh) {
@@ -306,6 +310,9 @@ export class PhysicsController {
     }
 
     _updatePlayerPhysics(delta) {
+        // UNCONDITIONAL debug entry so we always see this function run
+        console.warn("[_updatePlayerPhysics] top — posY:", this.player.position.y.toFixed(3),
+                     "velY:", this.playerVelocity.y.toFixed(3), "isGrounded:", this.isGrounded, "delta:", delta.toFixed(4));
         const dbg = this._debugLog;
 
         // Early step-up attempt
@@ -555,15 +562,15 @@ export class PhysicsController {
             }
         }
 
+        // Final guaranteed log of step result (unconditional)
+        console.warn("[_updatePlayerPhysics] final — posY:", this.player.position.y.toFixed(3),
+                     "velY:", this.playerVelocity.y.toFixed(3),
+                     "isGrounded:", this.isGrounded,
+                     "hasCollision:", !!hasCollision);
+
         // Sync camera to player position and update last air yaw
         this.camera.position.copy(this.player.position);
         this._lastAirYaw = this.camera.rotation.y;
-
-        if (dbg) {
-            console.log('DBG final: posY=', this.player.position.y.toFixed(3),
-                'velY=', this.playerVelocity.y.toFixed(3),
-                'isGrounded=', this.isGrounded);
-        }
     }
 
     teleportIfOob() {
@@ -650,6 +657,10 @@ export class PhysicsController {
     }
 
     update(deltaTime, input) {
+        // UNCONDITIONAL quick check (very noisy — remove when done)
+        console.warn("[PhysicsController] update called — posY:", this.player.position.y.toFixed(3),
+                     "velY:", this.playerVelocity.y.toFixed(3), "isGrounded:", this.isGrounded);
+
         deltaTime = Math.min(0.1, deltaTime);
         this.accumulator += deltaTime;
         this.prevPlayerIsOnGround = this.isGrounded;
