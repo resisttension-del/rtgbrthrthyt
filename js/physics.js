@@ -102,11 +102,19 @@ export class PhysicsController {
         this._yStuckTimer = 0;
     }
 
-    setCollider(colliderMesh) {
-        this.collider = colliderMesh;
-        this.colliderMatrixWorldInverse.copy(this.collider.matrixWorld).invert();
-        console.log("MeshBVH collider set in PhysicsController.");
+setCollider(colliderMesh) {
+    this.collider = colliderMesh;
+    if (!this.collider) {
+        console.warn("setCollider called with falsy colliderMesh");
+        return;
     }
+    // ensure boundsTree exists
+    if (this.collider.geometry && !this.collider.geometry.boundsTree && typeof this.collider.geometry.computeBoundsTree === 'function') {
+        this.collider.geometry.computeBoundsTree();
+    }
+    this.colliderMatrixWorldInverse.copy(this.collider.matrixWorld).invert();
+    console.log("MeshBVH collider set in PhysicsController.");
+}
 
     setSpeedModifier(value) {
         this.speedModifier = value;
@@ -286,6 +294,21 @@ export class PhysicsController {
     }
 
     _updatePlayerPhysics(delta) {
+
+
+if (!this.collider || !this.collider.geometry || !this.collider.geometry.boundsTree) {
+    // still simulate gravity so player falls naturally
+    // (wasGrounded handling above already adjusted playerVelocity.y)
+    this.player.position.addScaledVector(this.playerVelocity, delta);
+    this.player.updateMatrixWorld();
+    this.camera.position.copy(this.player.position);
+    this._lastAirYaw = this.camera.rotation.y;
+    // skip collision handling until collider is available
+    return;
+}
+
+
+      
         this._stepUpIfPossible();
         const wasGrounded = this.isGrounded;
         this.isGrounded = false;
