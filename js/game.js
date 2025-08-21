@@ -10,6 +10,7 @@ import { CopyShader } from "https://cdn.jsdelivr.net/npm/three@0.152.0/examples/
 import Stats from 'stats.js';
 import { dbRefs, disposeGame, fullCleanup, activeGameId, setupDamageListener } from "./network.js";
 import * as BufferGeometryUtils from 'three/examples/jsm/utils/BufferGeometryUtils.js';
+import * as RAPIER from "https://cdn.skypack.dev/@dimforge/rapier3d-compat";
 import {
     computeBoundsTree,
     disposeBoundsTree,
@@ -622,7 +623,7 @@ export async function pulsePlayerHit(victimId) {
 export async function startGame(username, mapName, initialDetailsEnabled, ffaEnabled, gameId) {
     const networkOk = await initNetwork(username, mapName, gameId, ffaEnabled);
     if (!networkOk) return;
-
+    await RAPIER.init();
     // These references are now correctly set within the createGameButtonHit function
     playersRef = dbRefs.playersRef;
     gameConfigRef = dbRefs.gameConfigRef;
@@ -643,7 +644,7 @@ export async function startGame(username, mapName, initialDetailsEnabled, ffaEna
 
     if (!localPlayerId) return;
 
-    window.physicsController = new PhysicsController(window.camera, scene);
+    window.physicsController = new PhysicsController(window.camera, scene, rapierColliderDesc);
     physicsController = window.physicsController;
     weaponController = new WeaponController(
         window.camera,
@@ -2971,6 +2972,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
