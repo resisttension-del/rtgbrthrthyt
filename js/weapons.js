@@ -1835,8 +1835,6 @@ let debugLogElement;
 
 
 
-
-
 export const activeTracers = []; // <--- EXPORT THIS!
 
 export class AnimatedTracer extends THREE.Mesh {
@@ -1928,25 +1926,3 @@ export class AnimatedTracer extends THREE.Mesh {
         this.material.dispose();
     }
 }
-
-
-
-
-
-function cleanupInactiveTracers() {
-    for (let i = activeTracers.length - 1; i >= 0; i--) {
-        const tracer = activeTracers[i];
-        if (tracer.remove) {
-            tracer.dispose();
-            activeTracers.splice(i, 1);
-        }
-    }
-}
-
-// Call this at the end of your game loop or each frame
-export function renderLoopCleanup() {
-    cleanupInactiveTracers();
-}
-
-
-
