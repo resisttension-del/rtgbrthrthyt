@@ -19,7 +19,7 @@ function createRapierColliderFromGLTF(gltfGroup) {
             geometries.push(child.geometry);
         }
     });
-    let mergedGeometry = BufferGeometryUtils.mergeBufferGeometries(geometries, false);
+    let mergedGeometry = BufferGeometryUtils.mergeGeometries(geometries, false);
     let vertices = mergedGeometry.attributes.position.array;
     let indices = mergedGeometry.index.array;
     return RAPIER.ColliderDesc.trimesh(vertices, indices);
