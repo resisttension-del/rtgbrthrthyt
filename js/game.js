@@ -980,7 +980,7 @@ toggleSceneDetails(detailsEnabled);
 // AWAIT the creation of the map and spawn points
    const { spawnPoints, colliderMesh } = await createSigmaCity(scene);
     window.spawnPoints = spawnPoints;
-    window.physicsController = new PhysicsController(window.camera, scene, rapierColliderDesc);
+    window.physicsController = new PhysicsController(window.camera, scene);
     const initialSpawnPoint = findFurthestSpawn();
     window.physicsController.setPlayerPosition(initialSpawnPoint);
     window.physicsController.setCollider(colliderMesh);
@@ -2971,6 +2971,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
