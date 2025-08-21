@@ -685,6 +685,16 @@ export async function startGame(username, mapName, initialDetailsEnabled, ffaEna
         isDead: false
     };
 
+    // --- Set spawn point immediately after local player creation ---
+    const spawn = findFurthestSpawn();
+    window.localPlayer.x = spawn.x;
+    window.localPlayer.y = spawn.y;
+    window.localPlayer.z = spawn.z;
+    physicsController.setPlayerPosition(spawn);
+
+    // Also move the camera to the spawn (with eye height)
+    window.camera.position.copy(spawn).add(new THREE.Vector3(0, 1.6, 0));
+
     await dbRefs.playersRef.child(localPlayerId).set({
         ...window.localPlayer
     });
@@ -2956,6 +2966,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
