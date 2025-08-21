@@ -644,7 +644,7 @@ export async function startGame(username, mapName, initialDetailsEnabled, ffaEna
 
     if (!localPlayerId) return;
 
-    window.physicsController = new PhysicsController(window.camera, scene, rapierColliderDesc);
+    window.physicsController = new PhysicsController(window.camera, scene);
     physicsController = window.physicsController;
     weaponController = new WeaponController(
         window.camera,
@@ -867,7 +867,7 @@ toggleSceneDetails(detailsEnabled);
 
 // --- Map and Physics Initialization ---
 // AWAIT the creation of the map and spawn points
-spawnPoints = await createCrocodilosConstruction(scene, physicsController);
+spawnPoints = await createCrocodilosConstruction(scene, physicsController, window.camera);
 window.spawnPoints = spawnPoints; // Now window.spawnPoints will be the actual array
 
 const initialSpawnPoint = findFurthestSpawn(); // Call your function to get a spawn point
@@ -980,7 +980,7 @@ toggleSceneDetails(detailsEnabled);
 
 // --- Map and Physics Initialization ---
 // AWAIT the creation of the map and spawn points
-spawnPoints = await createSigmaCity(scene, physicsController);
+spawnPoints = await createSigmaCity(scene, physicsController, window.camera);
 window.spawnPoints = spawnPoints; // Now window.spawnPoints will be the actual array
 
 const initialSpawnPoint = findFurthestSpawn(); // Call your function to get a spawn point
@@ -1095,7 +1095,7 @@ toggleSceneDetails(detailsEnabled);
 
 // --- Map and Physics Initialization ---
 // AWAIT the creation of the map and spawn points
-spawnPoints = await createDiddyDunes(scene, physicsController);
+spawnPoints = await createDiddyDunes(scene, physicsController, window.camera);
 window.spawnPoints = spawnPoints; // Now window.spawnPoints will be the actual array
 
 const initialSpawnPoint = findFurthestSpawn(); // Call your function to get a spawn point
@@ -2972,6 +2972,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
