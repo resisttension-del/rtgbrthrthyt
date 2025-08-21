@@ -11,62 +11,6 @@ function generateSequentialIndices(vertexCount) {
     return idx;
 }
 
-// Lantern class unchanged
-export class Lantern {
-    constructor(parent, position, scale = 1, lightOptions = {}) {
-        this.container = new THREE.Object3D();
-        this.container.position.copy(position);
-        parent.add(this.container);
-
-        const url = 'https://raw.githubusercontent.com/thearthd/3d-models/refs/heads/main/uploads_files_2887463_Lantern.obj';
-        const loader = new OBJLoader();
-
-        loader.load(
-            url,
-            lanternGroup => {
-                lanternGroup.scale.set(scale, scale, scale);
-                lanternGroup.updateMatrixWorld(true);
-                const box = new THREE.Box3().setFromObject(lanternGroup);
-                lanternGroup.position.y = -box.min.y;
-
-                lanternGroup.traverse(child => {
-                    if (!child.isMesh) return;
-                    child.material = new THREE.MeshStandardMaterial({
-                        color: 0xffffff,
-                        roughness: 0.8,
-                        metalness: 0.7,
-                        side: THREE.DoubleSide
-                    });
-                    child.castShadow = child.receiveShadow = true;
-                });
-
-                this.container.add(lanternGroup);
-
-                const {
-                    color = 0xffffff,
-                    intensity = 1,
-                    distance = 10,
-                    angle = Math.PI / 8,
-                    penumbra = 0.5,
-                    decay = 2
-                } = lightOptions;
-
-                const spot = new THREE.SpotLight(color, intensity, distance, angle, penumbra, decay);
-                spot.position.set(0, (box.max.y - box.min.y) * 0.75, 0);
-                spot.target.position.set(0, -20, 0);
-                spot.castShadow = true;
-                spot.shadow.mapSize.set(512, 512);
-                spot.shadow.camera.near = 0.5;
-                spot.shadow.camera.far = distance;
-                this.container.add(spot, spot.target);
-            },
-            null,
-            err => console.error('Error loading lantern model:', err)
-        );
-    }
-}
-
-// Helper to merge meshes and create Rapier collider from a GLTF group
 function createRapierColliderFromGLTF(gltfGroup) {
     let geometries = [];
     gltfGroup.traverse(child => {
@@ -85,12 +29,7 @@ function createRapierColliderFromGLTF(gltfGroup) {
     return RAPIER.ColliderDesc.trimesh(vertices, indices);
 }
 
-// CrocodilosConstruction
 export async function createCrocodilosConstruction(scene, PhysicsController, camera) {
-    window.envMeshes = [];
-    window.mapReady = false;
-    const loaderUI = new Loader();
-    loaderUI.show('Loading CrocodilosConstruction Map...', [1.0]);
     const SCALE = 5;
     const rawSpawnPoints = [
         new THREE.Vector3(-14, 7, -36), new THREE.Vector3(-2, 2, 37),
@@ -100,9 +39,8 @@ export async function createCrocodilosConstruction(scene, PhysicsController, cam
     ];
     const spawnPoints = rawSpawnPoints.map(p => p.clone().multiplyScalar(SCALE / 5));
     const GLB_MODEL_URL = 'https://raw.githubusercontent.com/thearthd/3d-models/main/croccodilosconstruction.glb';
-
     let gltfGroup = null;
-    const mapLoadPromise = new Promise((resolve, reject) => {
+    return new Promise((resolve, reject) => {
         new GLTFLoader().load(
             GLB_MODEL_URL,
             gltf => {
@@ -115,27 +53,15 @@ export async function createCrocodilosConstruction(scene, PhysicsController, cam
                 let rapierColliderDesc = createRapierColliderFromGLTF(gltfGroup);
                 let physicsController = new PhysicsController(camera, scene, rapierColliderDesc);
                 window.physicsController = physicsController;
-                loaderUI.onComplete(() => {
-                    window.mapReady = true;
-                    console.log('Crocodilos map and Rapier collider ready!');
-                });
                 resolve({ spawnPoints, physicsController });
             },
             undefined,
             err => { console.error('Error loading Crocodilos GLB:', err); reject(err); }
         );
     });
-
-    await mapLoadPromise;
-    return { spawnPoints, physicsController: window.physicsController };
 }
 
-// SigmaCity
 export async function createSigmaCity(scene, PhysicsController, camera) {
-    window.envMeshes = [];
-    window.mapReady = false;
-    const loaderUI = new Loader();
-    loaderUI.show('Loading SigmaCity Map...', [1.0]);
     const SCALE = 2;
     const rawSpawnPoints = [
         new THREE.Vector3(-1, 3, -4), new THREE.Vector3(-55, -1, -6),
@@ -145,9 +71,8 @@ export async function createSigmaCity(scene, PhysicsController, camera) {
     ];
     const spawnPoints = rawSpawnPoints.map(p => p.clone().multiplyScalar(SCALE / 2));
     const GLB_MODEL_URL = 'https://raw.githubusercontent.com/thearthd/3d-models/main/sigmacityupdated.glb';
-
     let gltfGroup = null;
-    const mapLoadPromise = new Promise((resolve, reject) => {
+    return new Promise((resolve, reject) => {
         new GLTFLoader().load(
             GLB_MODEL_URL,
             gltf => {
@@ -160,27 +85,15 @@ export async function createSigmaCity(scene, PhysicsController, camera) {
                 let rapierColliderDesc = createRapierColliderFromGLTF(gltfGroup);
                 let physicsController = new PhysicsController(camera, scene, rapierColliderDesc);
                 window.physicsController = physicsController;
-                loaderUI.onComplete(() => {
-                    window.mapReady = true;
-                    console.log('SigmaCity map and Rapier collider ready!');
-                });
                 resolve({ spawnPoints, physicsController });
             },
             undefined,
             err => { console.error('Error loading SigmaCity GLB:', err); reject(err); }
         );
     });
-
-    await mapLoadPromise;
-    return { spawnPoints, physicsController: window.physicsController };
 }
 
-// DiddyDunes
 export async function createDiddyDunes(scene, PhysicsController, camera) {
-    window.envMeshes = [];
-    window.mapReady = false;
-    const loaderUI = new Loader();
-    loaderUI.show('Loading diddyDunes Map...', [1.0]);
     const SCALE = 2;
     const rawSpawnPoints = [
         new THREE.Vector3(34, 3, 0), new THREE.Vector3(62, 1, -37),
@@ -190,9 +103,8 @@ export async function createDiddyDunes(scene, PhysicsController, camera) {
     ];
     const spawnPoints = rawSpawnPoints.map(p => p.clone().multiplyScalar(SCALE / 2));
     const GLB_MODEL_URL = 'https://raw.githubusercontent.com/thearthd/3d-models/main/didddydunes.glb';
-
     let gltfGroup = null;
-    const mapLoadPromise = new Promise((resolve, reject) => {
+    return new Promise((resolve, reject) => {
         new GLTFLoader().load(
             GLB_MODEL_URL,
             gltf => {
@@ -205,17 +117,10 @@ export async function createDiddyDunes(scene, PhysicsController, camera) {
                 let rapierColliderDesc = createRapierColliderFromGLTF(gltfGroup);
                 let physicsController = new PhysicsController(camera, scene, rapierColliderDesc);
                 window.physicsController = physicsController;
-                loaderUI.onComplete(() => {
-                    window.mapReady = true;
-                    console.log('DiddyDunes map and Rapier collider ready!');
-                });
                 resolve({ spawnPoints, physicsController });
             },
             undefined,
             err => { console.error('Error loading diddyDunes GLB:', err); reject(err); }
         );
     });
-
-    await mapLoadPromise;
-    return { spawnPoints, physicsController: window.physicsController };
 }
