@@ -10,7 +10,6 @@ import { CopyShader } from "https://cdn.jsdelivr.net/npm/three@0.152.0/examples/
 import Stats from 'stats.js';
 import { dbRefs, disposeGame, fullCleanup, activeGameId, setupDamageListener } from "./network.js";
 import * as BufferGeometryUtils from 'three/examples/jsm/utils/BufferGeometryUtils.js';
-import * as RAPIER from "https://cdn.skypack.dev/@dimforge/rapier3d-compat";
 import {
     computeBoundsTree,
     disposeBoundsTree,
@@ -623,15 +622,17 @@ export async function pulsePlayerHit(victimId) {
 export async function startGame(username, mapName, initialDetailsEnabled, ffaEnabled, gameId) {
     const networkOk = await initNetwork(username, mapName, gameId, ffaEnabled);
     if (!networkOk) return;
-    await RAPIER.init({
-  gravity: { x: 0, y: -27.5, z: 0 },
-  skip_wasm_check: false,
-});
+
+    // These references are now correctly set within the createGameButtonHit function
     playersRef = dbRefs.playersRef;
     gameConfigRef = dbRefs.gameConfigRef;
 
     const gameTimerElement = document.getElementById('game-timer');
 
+
+
+    
+    // The rest of your startGame function remains the same
     initGlobalFogAndShadowParams();
     window.isGamePaused = false;
     document.getElementById('menu-overlay').style.display = 'none';
@@ -642,15 +643,7 @@ export async function startGame(username, mapName, initialDetailsEnabled, ffaEna
 
     if (!localPlayerId) return;
 
-    // --- Map and Physics Initialization ---
-    if (mapName === 'CrocodilosConstruction') {
-        await initSceneCrocodilosConstruction();
-    } else if (mapName === 'SigmaCity') {
-        await initSceneSigmaCity();
-    } else if (mapName === 'DiddyDunes') {
-        await initSceneDiddyDunes();
-    }
-
+    window.physicsController = new PhysicsController(window.camera, scene);
     physicsController = window.physicsController;
     weaponController = new WeaponController(
         window.camera,
@@ -662,41 +655,40 @@ export async function startGame(username, mapName, initialDetailsEnabled, ffaEna
     );
     window.weaponController = weaponController;
 
+    if (mapName === 'CrocodilosConstruction') {
+        await initSceneCrocodilosConstruction();
+    } else if (mapName === 'SigmaCity') {
+        await initSceneSigmaCity();
+    } else if (mapName === 'DiddyDunes') {
+        await initSceneDiddyDunes();
+    }
+
     initInput();
     initChatUI();
     initBulletHoles();
     initializeAudioManager(window.camera, scene);
     startSoundListener();
 
-    const initialBodyColor = Math.floor(Math.random() * 0xffffff);
 
-    window.localPlayer = {
-        id: localPlayerId,
-        username,
-        x: 0,
-        y: 1000,
-        z: 0,
-        rotY: 0,
-        health: initialPlayerHealth,
-        shield: initialPlayerShield,
-        weapon: initialPlayerWeapon,
-        kills: 0,
-        deaths: 0,
-        ks: 0,
-        bodyColor: initialBodyColor,
-        originalBodyColor: initialBodyColor,
-        isDead: false
-    };
+const initialBodyColor = Math.floor(Math.random() * 0xffffff);
 
-    // --- Set spawn point immediately after local player creation ---
-    const spawn = findFurthestSpawn();
-    window.localPlayer.x = spawn.x;
-    window.localPlayer.y = spawn.y;
-    window.localPlayer.z = spawn.z;
-    physicsController.setPlayerPosition(spawn);
-
-    // Also move the camera to the spawn (with eye height)
-    window.camera.position.copy(spawn).add(new THREE.Vector3(0, 1.6, 0));
+window.localPlayer = {
+    id: localPlayerId,
+    username,
+    x: 0,
+    y: 1000,
+    z: 0,
+    rotY: 0,
+    health: initialPlayerHealth,
+    shield: initialPlayerShield,
+    weapon: initialPlayerWeapon,
+    kills: 0,
+    deaths: 0,
+    ks: 0,
+    bodyColor: initialBodyColor,
+    originalBodyColor: initialBodyColor, // <-- add this
+    isDead: false
+};
 
     await dbRefs.playersRef.child(localPlayerId).set({
         ...window.localPlayer
@@ -714,62 +706,72 @@ export async function startGame(username, mapName, initialDetailsEnabled, ffaEna
     setupPlayersListener(playersRef);
     updateScoreboard(playersRef);
 
+
+
     if (ffaEnabled) {
-        gameTimerElement.style.display = 'block';
-        let currentRemainingSeconds = null;
-        let gameEnded = false;
-        let uiInterval = null;
-
-        const durationRef = gameConfigRef.child('gameDuration');
-        durationRef.on('value', snap => {
-            const val = snap.val();
-            if (typeof val === 'number') {
-                currentRemainingSeconds = val;
-            }
-        });
-
-        const endedRef = gameConfigRef.child('ended');
-        endedRef.on('value', snap => {
-            if (snap.val() === true && !gameEnded) {
-                gameEnded = true;
-                if (uiInterval) clearInterval(uiInterval);
-                durationRef.off();
-                endedRef.off();
-                gameTimerElement.textContent = 'TIME UP!';
-                determineWinnerAndEndGame();
-            }
-        });
-
-        uiInterval = setInterval(() => {
-            if (currentRemainingSeconds == null) {
-                gameTimerElement.textContent = 'Time: Syncing…';
-            } else {
-                const mins = Math.floor(currentRemainingSeconds / 60);
-                const secs = currentRemainingSeconds % 60;
-                gameTimerElement.textContent = `Time: ${mins}:${secs < 10 ? '0' : ''}${secs}`;
-            }
-        }, 250);
-
-        if (playersKillsListener) {
-            playersRef.off('value', playersKillsListener);
+      gameTimerElement.style.display = 'block';
+    
+      let currentRemainingSeconds = null;
+      let gameEnded = false;
+      let uiInterval = null;
+    
+      // --- NO owner election here. menu app will elect & update gameDuration ---
+      const durationRef = gameConfigRef.child('gameDuration');
+      durationRef.on('value', snap => {
+        const val = snap.val();
+        if (typeof val === 'number') {
+          currentRemainingSeconds = val;
         }
-        playersKillsListener = playersRef.on('value', snap => {
-            let reached = false;
-            snap.forEach(childSnap => {
-                if (childSnap.val().kills >= 40) reached = true;
-            });
-            if (reached && !gameEnded) {
-                endedRef.set(true);
-            }
+      });
+    
+      const endedRef = gameConfigRef.child('ended');
+      endedRef.on('value', snap => {
+        if (snap.val() === true && !gameEnded) {
+          gameEnded = true;
+          if (uiInterval) clearInterval(uiInterval);
+          durationRef.off();
+          endedRef.off();
+          gameTimerElement.textContent = 'TIME UP!';
+          determineWinnerAndEndGame();
+        }
+      });
+    
+      uiInterval = setInterval(() => {
+        if (currentRemainingSeconds == null) {
+          gameTimerElement.textContent = 'Time: Syncing…';
+        } else {
+          const mins = Math.floor(currentRemainingSeconds / 60);
+          const secs = currentRemainingSeconds % 60;
+          gameTimerElement.textContent = `Time: ${mins}:${secs < 10 ? '0' : ''}${secs}`;
+        }
+      }, 250);
+    
+      // keep your kills-based early end logic
+      if (playersKillsListener) {
+        playersRef.off('value', playersKillsListener);
+      }
+      playersKillsListener = playersRef.on('value', snap => {
+        let reached = false;
+        snap.forEach(childSnap => {
+          if (childSnap.val().kills >= 40) reached = true;
         });
-
+        if (reached && !gameEnded) {
+          endedRef.set(true);
+        }
+      });
+    
     } else {
         gameTimerElement.style.display = 'none';
         if (gameInterval) clearInterval(gameInterval);
         gameConfigRef.remove();
     }
 
+
+    
+        const spawn = findFurthestSpawn();
+        window.camera.position.copy(spawn).add(new THREE.Vector3(0, 1.6, 0));
     createLeaderboardOverlay();
+    
 }
 
 export function hideGameUI() {
@@ -864,12 +866,11 @@ toggleSceneDetails(detailsEnabled);
 
 // --- Map and Physics Initialization ---
 // AWAIT the creation of the map and spawn points
-    const { spawnPoints, rapierColliderDesc } = await createCrocodilosConstruction(scene);
-    window.spawnPoints = spawnPoints;
-    window.physicsController = new PhysicsController(window.camera, scene, rapierColliderDesc);
-    const initialSpawnPoint = findFurthestSpawn();
-    window.physicsController.setPlayerPosition(initialSpawnPoint);
-    window.physicsController.setCollider(colliderMesh);
+spawnPoints = await createCrocodilosConstruction(scene, physicsController);
+window.spawnPoints = spawnPoints; // Now window.spawnPoints will be the actual array
+
+const initialSpawnPoint = findFurthestSpawn(); // Call your function to get a spawn point
+physicsController.setPlayerPosition(initialSpawnPoint);
 
 // --- Audio Initialization ---
 if (typeof windSound !== 'undefined') {
@@ -978,12 +979,11 @@ toggleSceneDetails(detailsEnabled);
 
 // --- Map and Physics Initialization ---
 // AWAIT the creation of the map and spawn points
-   const { spawnPoints, colliderMesh } = await createSigmaCity(scene);
-    window.spawnPoints = spawnPoints;
-    window.physicsController = new PhysicsController(window.camera, scene);
-    const initialSpawnPoint = findFurthestSpawn();
-    window.physicsController.setPlayerPosition(initialSpawnPoint);
-    window.physicsController.setCollider(colliderMesh);
+spawnPoints = await createSigmaCity(scene, physicsController);
+window.spawnPoints = spawnPoints; // Now window.spawnPoints will be the actual array
+
+const initialSpawnPoint = findFurthestSpawn(); // Call your function to get a spawn point
+physicsController.setPlayerPosition(initialSpawnPoint);
 
 // --- Audio Initialization ---
 if (typeof forestNoise !== 'undefined') {
@@ -1094,12 +1094,12 @@ toggleSceneDetails(detailsEnabled);
 
 // --- Map and Physics Initialization ---
 // AWAIT the creation of the map and spawn points
-    const { spawnPoints, rapierColliderDesc } = await createDiddyDunes(scene);
-    window.spawnPoints = spawnPoints;
-    window.physicsController = new PhysicsController(window.camera, scene, rapierColliderDesc);
-    const initialSpawnPoint = findFurthestSpawn();
-    window.physicsController.setPlayerPosition(initialSpawnPoint);
-window.physicsController.setCollider(colliderMesh);
+spawnPoints = await createDiddyDunes(scene, physicsController);
+window.spawnPoints = spawnPoints; // Now window.spawnPoints will be the actual array
+
+const initialSpawnPoint = findFurthestSpawn(); // Call your function to get a spawn point
+physicsController.setPlayerPosition(initialSpawnPoint);
+
 
     
 // --- Audio Initialization ---
@@ -2971,18 +2971,6 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
