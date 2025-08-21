@@ -656,74 +656,105 @@ export class PhysicsController {
         }
     }
 
-    update(deltaTime, input) {
-        // UNCONDITIONAL quick check (very noisy — remove when done)
-        console.warn("[PhysicsController] update called — posY:", this.player.position.y.toFixed(3),
-                     "velY:", this.playerVelocity.y.toFixed(3), "isGrounded:", this.isGrounded);
+update(deltaTime, input) {
+    // Very visible per-frame debug
+    console.warn('[PhysicsController.update] incoming deltaTime:', deltaTime,
+                 'acc(before):', this.accumulator.toFixed(4),
+                 'posY:', this.player.position.y.toFixed(3),
+                 'velY:', this.playerVelocity.y.toFixed(3),
+                 'isGrounded:', this.isGrounded);
 
-        deltaTime = Math.min(0.1, deltaTime);
-        this.accumulator += deltaTime;
-        this.prevPlayerIsOnGround = this.isGrounded;
-        let stepsTaken = 0;
-        while (this.accumulator >= FIXED_TIME_STEP && stepsTaken < MAX_PHYSICS_STEPS) {
-            this._applyControls(FIXED_TIME_STEP, input);
+    // keep original clamp
+    deltaTime = Math.min(0.1, deltaTime);
+    this.accumulator += deltaTime;
+
+    // Save previous grounded state (unchanged)
+    this.prevPlayerIsOnGround = this.isGrounded;
+
+    // Fixed-step loop diagnostics
+    let stepsTaken = 0;
+    while (this.accumulator >= FIXED_TIME_STEP && stepsTaken < MAX_PHYSICS_STEPS) {
+        // Log each physics substep (very useful)
+        if (this._debugLog) console.log(`[PhysicsController] stepping physics (step #${stepsTaken+1}) acc=${this.accumulator.toFixed(4)}`);
+        this._applyControls(FIXED_TIME_STEP, input);
+        try {
             this._updatePlayerPhysics(FIXED_TIME_STEP);
-            this.accumulator -= FIXED_TIME_STEP;
-            stepsTaken++;
+        } catch (e) {
+            console.error('[PhysicsController] _updatePlayerPhysics threw:', e);
+            // Avoid infinite crash loop — break and continue to cleanup
+            break;
         }
-        const currentSpeedXZ = Math.hypot(this.playerVelocity.x, this.playerVelocity.z);
-        this._handleFootsteps(currentSpeedXZ, deltaTime, input);
-        this._handleLandingSound();
-        this._rotatePlayerModel();
-        this.teleportIfOob();
-
-        // Stuck-in-air snap (ensure it sets grounded and a short lock)
-        if (this._lastY === null) this._lastY = this.player.position.y;
-        if (!this.isGrounded) {
-            const currentY = this.player.position.y;
-            const dy = Math.abs(currentY - this._lastY);
-            if (dy > 0.01) {
-                this._lastY = currentY;
-                this._yStuckTimer = 0;
-            } else {
-                this._yStuckTimer += deltaTime;
-                if (this._yStuckTimer >= 1.0) {
-                    // snap down: zero vel, raycast and place on ground, set grounded + stuck lock
-                    this.playerVelocity.set(0, 0, 0);
-                    const downOrigin = this.player.position.clone();
-                    const downDir = new THREE.Vector3(0, -1, 0);
-                    const maxDrop = (PLAYER_TOTAL_HEIGHT * this.player.scale.y) + 1;
-                    const ray = new THREE.Raycaster(downOrigin, downDir, 0, maxDrop);
-                    const hits = (this.collider && !this._debugNoCollider) ? ray.intersectObject(this.collider, true) : [];
-                    if (hits.length > 0) {
-                        const hitY = hits[0].point.y;
-                        const scale = this.player.scale.y;
-                        const bottomOffset = (PLAYER_CAPSULE_SEGMENT_LENGTH + PLAYER_CAPSULE_RADIUS) * scale;
-                        this.player.position.y = hitY + bottomOffset;
-                        this.player.updateMatrixWorld();
-                        this.isGrounded = true;
-                        this._stuckLockTime = Math.max(this._stuckLockTime || 0, 0.18);
-                        if (this.fallStartTimer) { clearTimeout(this.fallStartTimer); this.fallStartTimer = null; }
-                    }
-                    this._lastY = this.player.position.y;
-                    this._yStuckTimer = 0;
-                }
-            }
-        } else {
-            this._lastY = this.player.position.y;
-            this._yStuckTimer = 0;
-        }
-
-        return {
-            x: round2(this.player.position.x),
-            y: round2(this.player.position.y),
-            z: round2(this.player.position.z),
-            rotY: this.camera.rotation.y,
-            isGrounded: this.isGrounded,
-            velocity: this.playerVelocity.clone(),
-            velocityY: this.playerVelocity.y
-        };
+        this.accumulator -= FIXED_TIME_STEP;
+        stepsTaken++;
     }
+
+    // If the fixed-step loop executed 0 steps, force one step (DEBUG ONLY)
+    if (stepsTaken === 0) {
+        console.warn('[PhysicsController] debug-forced physics step because stepsTaken === 0 (remove this when done)');
+        // Call once so we can see _updatePlayerPhysics logs and whether gravity applies.
+        this._applyControls(FIXED_TIME_STEP, input);
+        try {
+            this._updatePlayerPhysics(FIXED_TIME_STEP);
+        } catch (e) {
+            console.error('[PhysicsController] forced _updatePlayerPhysics threw:', e);
+        }
+    }
+
+    // Continue with the rest of the per-frame logic (unchanged)
+    const currentSpeedXZ = Math.hypot(this.playerVelocity.x, this.playerVelocity.z);
+    // keep footsteps/landing/rotation/teleport behavior intact
+    this._handleFootsteps(currentSpeedXZ, deltaTime, input || {});
+    this._handleLandingSound();
+    this._rotatePlayerModel();
+    this.teleportIfOob();
+
+    // Stuck-in-air snap (unchanged)
+    if (this._lastY === null) this._lastY = this.player.position.y;
+    if (!this.isGrounded) {
+        const currentY = this.player.position.y;
+        const dy = Math.abs(currentY - this._lastY);
+        if (dy > 0.01) {
+            this._lastY = currentY;
+            this._yStuckTimer = 0;
+        } else {
+            this._yStuckTimer += deltaTime;
+            if (this._yStuckTimer >= 1.0) {
+                this.playerVelocity.set(0, 0, 0);
+                const downOrigin = this.player.position.clone();
+                const downDir = new THREE.Vector3(0, -1, 0);
+                const maxDrop = (PLAYER_TOTAL_HEIGHT * this.player.scale.y) + 1;
+                const ray = new THREE.Raycaster(downOrigin, downDir, 0, maxDrop);
+                const hits = (this.collider && !this._debugNoCollider) ? ray.intersectObject(this.collider, true) : [];
+                if (hits.length > 0) {
+                    const hitY = hits[0].point.y;
+                    const scale = this.player.scale.y;
+                    const bottomOffset = (PLAYER_CAPSULE_SEGMENT_LENGTH + PLAYER_CAPSULE_RADIUS) * scale;
+                    this.player.position.y = hitY + bottomOffset;
+                    this.player.updateMatrixWorld();
+                    this.isGrounded = true;
+                    this._stuckLockTime = Math.max(this._stuckLockTime || 0, 0.18);
+                    if (this.fallStartTimer) { clearTimeout(this.fallStartTimer); this.fallStartTimer = null; }
+                }
+                this._lastY = this.player.position.y;
+                this._yStuckTimer = 0;
+            }
+        }
+    } else {
+        this._lastY = this.player.position.y;
+        this._yStuckTimer = 0;
+    }
+
+    // Return state as before
+    return {
+        x: round2(this.player.position.x),
+        y: round2(this.player.position.y),
+        z: round2(this.player.position.z),
+        rotY: this.camera.rotation.y,
+        isGrounded: this.isGrounded,
+        velocity: this.playerVelocity.clone(),
+        velocityY: this.playerVelocity.y
+    };
+}
 
     _pos() {
         const p = this.player.position;
