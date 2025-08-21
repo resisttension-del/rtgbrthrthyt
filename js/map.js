@@ -1,28 +1,38 @@
 import * as THREE from "https://cdnjs.cloudflare.com/ajax/libs/three.js/0.152.0/three.module.js";
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import * as BufferGeometryUtils from 'three/examples/jsm/utils/BufferGeometryUtils.js';
-import * as RAPIER from "https://cdn.skypack.dev/@dimforge/rapier3d-compat";
+import { MeshBVH, acceleratedRaycast, computeBoundsTree } from 'three-mesh-bvh';
 
-function generateSequentialIndices(vertexCount) {
-    const idx = [];
-    for (let i = 0; i < vertexCount; i++) idx.push(i);
-    return idx;
-}
+THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
+THREE.Mesh.prototype.raycast = acceleratedRaycast;
 
-function createRapierColliderFromGLTF(gltfGroup) {
+// Helper for merging and building collider mesh for PhysicsController
+function buildColliderMeshFromGLTF(gltfGroup) {
     let geometries = [];
     gltfGroup.traverse(child => {
         if (child.isMesh) {
+            // Ensure indexed geometry for merging
             if (child.geometry && !child.geometry.index) {
-                child.geometry.setIndex(generateSequentialIndices(child.geometry.attributes.position.count));
+                const idx = [];
+                for (let i = 0; i < child.geometry.attributes.position.count; i++) idx.push(i);
+                child.geometry.setIndex(idx);
             }
             geometries.push(child.geometry);
         }
     });
+
     let mergedGeometry = BufferGeometryUtils.mergeGeometries(geometries, false);
-    let vertices = mergedGeometry.attributes.position.array;
-    let indices = mergedGeometry.index.array;
-    return RAPIER.ColliderDesc.trimesh(vertices, indices);
+    mergedGeometry.computeBoundsTree();
+    console.log('Merged geometry vertex count:', mergedGeometry.attributes.position.count);
+    console.log('Merged geometry index count:', mergedGeometry.index ? mergedGeometry.index.count : 'NO INDEX');
+    let colliderMesh = new THREE.Mesh(
+        mergedGeometry,
+        new THREE.MeshBasicMaterial({ color: 0xff00ff, wireframe: true, visible: false })
+    );
+    colliderMesh.visible = false; // Make true for debugging!
+    colliderMesh.matrixWorldAutoUpdate = true;
+    colliderMesh.updateMatrixWorld(true);
+    return colliderMesh;
 }
 
 export async function createCrocodilosConstruction(scene) {
@@ -37,7 +47,7 @@ export async function createCrocodilosConstruction(scene) {
     const GLB_MODEL_URL = 'https://raw.githubusercontent.com/thearthd/3d-models/main/croccodilosconstruction.glb';
 
     let gltfGroup = null;
-    let rapierColliderDesc = null;
+    let colliderMesh = null;
 
     await new Promise((resolve, reject) => {
         new GLTFLoader().load(
@@ -51,7 +61,11 @@ export async function createCrocodilosConstruction(scene) {
                 gltfGroup.traverse(child => {
                     if (child.isMesh) window.envMeshes.push(child);
                 });
-                rapierColliderDesc = createRapierColliderFromGLTF(gltfGroup);
+                colliderMesh = buildColliderMeshFromGLTF(gltfGroup);
+                colliderMesh.scale.copy(gltfGroup.scale);
+                colliderMesh.position.copy(gltfGroup.position);
+                colliderMesh.updateMatrixWorld(true);
+                scene.add(colliderMesh); // For debugging, make visible if needed
                 resolve();
             },
             undefined,
@@ -60,7 +74,7 @@ export async function createCrocodilosConstruction(scene) {
     });
 
     window.mapReady = true;
-    return { spawnPoints, rapierColliderDesc };
+    return { spawnPoints, colliderMesh };
 }
 
 export async function createSigmaCity(scene) {
@@ -75,7 +89,7 @@ export async function createSigmaCity(scene) {
     const GLB_MODEL_URL = 'https://raw.githubusercontent.com/thearthd/3d-models/main/sigmacityupdated.glb';
 
     let gltfGroup = null;
-    let rapierColliderDesc = null;
+    let colliderMesh = null;
 
     await new Promise((resolve, reject) => {
         new GLTFLoader().load(
@@ -89,7 +103,11 @@ export async function createSigmaCity(scene) {
                 gltfGroup.traverse(child => {
                     if (child.isMesh) window.envMeshes.push(child);
                 });
-                rapierColliderDesc = createRapierColliderFromGLTF(gltfGroup);
+                colliderMesh = buildColliderMeshFromGLTF(gltfGroup);
+                colliderMesh.scale.copy(gltfGroup.scale);
+                colliderMesh.position.copy(gltfGroup.position);
+                colliderMesh.updateMatrixWorld(true);
+                scene.add(colliderMesh);
                 resolve();
             },
             undefined,
@@ -98,7 +116,7 @@ export async function createSigmaCity(scene) {
     });
 
     window.mapReady = true;
-    return { spawnPoints, rapierColliderDesc };
+    return { spawnPoints, colliderMesh };
 }
 
 export async function createDiddyDunes(scene) {
@@ -113,7 +131,7 @@ export async function createDiddyDunes(scene) {
     const GLB_MODEL_URL = 'https://raw.githubusercontent.com/thearthd/3d-models/main/didddydunes.glb';
 
     let gltfGroup = null;
-    let rapierColliderDesc = null;
+    let colliderMesh = null;
 
     await new Promise((resolve, reject) => {
         new GLTFLoader().load(
@@ -127,7 +145,11 @@ export async function createDiddyDunes(scene) {
                 gltfGroup.traverse(child => {
                     if (child.isMesh) window.envMeshes.push(child);
                 });
-                rapierColliderDesc = createRapierColliderFromGLTF(gltfGroup);
+                colliderMesh = buildColliderMeshFromGLTF(gltfGroup);
+                colliderMesh.scale.copy(gltfGroup.scale);
+                colliderMesh.position.copy(gltfGroup.position);
+                colliderMesh.updateMatrixWorld(true);
+                scene.add(colliderMesh);
                 resolve();
             },
             undefined,
@@ -136,5 +158,5 @@ export async function createDiddyDunes(scene) {
     });
 
     window.mapReady = true;
-    return { spawnPoints, rapierColliderDesc };
+    return { spawnPoints, colliderMesh };
 }
