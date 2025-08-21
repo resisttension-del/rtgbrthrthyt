@@ -296,27 +296,14 @@ setCollider(colliderMesh) {
     _updatePlayerPhysics(delta) {
 
 
-if (!this.collider || !this.collider.geometry || !this.collider.geometry.boundsTree) {
-    // still simulate gravity so player falls naturally
-    // (wasGrounded handling above already adjusted playerVelocity.y)
-    this.player.position.addScaledVector(this.playerVelocity, delta);
-    this.player.updateMatrixWorld();
-    this.camera.position.copy(this.player.position);
-    this._lastAirYaw = this.camera.rotation.y;
-    // skip collision handling until collider is available
-    return;
-}
+  
 
 
       
         this._stepUpIfPossible();
         const wasGrounded = this.isGrounded;
         this.isGrounded = false;
-        if (wasGrounded) {
-            this.playerVelocity.y = -GRAVITY * delta * 0.1;
-        } else {
-            this.playerVelocity.y -= GRAVITY * delta;
-        }
+      this.playerVelocity.y -= GRAVITY * delta;
         const horiz = Math.hypot(this.playerVelocity.x, this.playerVelocity.z);
         const maxHoriz = MAX_SPEED * this.speedModifier;
         if (horiz > maxHoriz) {
