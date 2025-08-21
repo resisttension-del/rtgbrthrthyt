@@ -1,14 +1,16 @@
 import * as THREE from "https://cdnjs.cloudflare.com/ajax/libs/three.js/0.152.0/three.module.js";
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
-import { sendSoundEvent } from "./network.js"; // Assuming this path is correct
+import { sendSoundEvent } from "./network.js";
 
-// Constants for player physics and dimensions
+// --- Constants ---
 const PLAYER_MASS = 70;
 const GRAVITY = 27.5;
 const JUMP_VELOCITY = 12.3;
+
 const STEP_HEIGHT = 1;
 const STEP_FORWARD_OFFSET = 0.12;
 const STEP_FORWARD_PUSH = 0.001;
+
 const MAX_SLOPE_ANGLE = 45 * (Math.PI / 180);
 const WALKABLE_DOT = Math.cos(MAX_SLOPE_ANGLE);
 
@@ -30,44 +32,9 @@ const FOOT_DISABLED_THRESHOLD = 0.2;
 const FIXED_TIME_STEP = 1 / 90;
 const MAX_PHYSICS_STEPS = 5;
 
-function round2(n) {
-  return Math.round(n * 100) / 100;
-}
-function createSeamlessLoop(src, leadTimeMs = 50, volume = 1) {
-    let timerId = null, currentAudio = null;
-    function scheduleNext() {
-        const durationMs = currentAudio.duration * 1000;
-        const delay = Math.max(durationMs - leadTimeMs, 0);
-        timerId = setTimeout(() => {
-            if (currentAudio) currentAudio.removeEventListener('ended', scheduleNext);
-            currentAudio = new Audio(src);
-            currentAudio.volume = volume;
-            currentAudio.addEventListener('ended', scheduleNext);
-            currentAudio.play().catch(() => { });
-        }, delay);
-    }
-    return {
-        start() {
-            this.stop();
-            currentAudio = new Audio(src);
-            currentAudio.volume = volume;
-            currentAudio.addEventListener('ended', scheduleNext);
-            currentAudio.play().catch(() => { }).then(scheduleNext).catch(() => { });
-        },
-        stop() {
-            clearTimeout(timerId);
-            timerId = null;
-            if (currentAudio) {
-                currentAudio.pause();
-                currentAudio.currentTime = 0;
-                currentAudio.removeEventListener('ended', scheduleNext);
-                currentAudio = null;
-            }
-        }
-    };
-}
+// --- Utility ---
+function round2(n) { return Math.round(n * 100) / 100; }
 
-// --- PhysicsController ---
 export class PhysicsController {
     constructor(camera, scene) {
         this.camera = camera;
@@ -134,7 +101,7 @@ export class PhysicsController {
         this.fallDelay = 300;
         this.fallStartTimer = null;
 
-        this.speedModifier = 0;
+        this.speedModifier = 1;
         this.isAim = false;
         this._lastAirYaw = this.camera.rotation.y;
         this._lastY = null;
@@ -224,45 +191,8 @@ export class PhysicsController {
         v.x = horizontal.x;
         v.z = horizontal.z;
     }
-    _checkCeilingCollision(checkHeight) {
-        if (!this.collider || !this.collider.geometry || !this.collider.geometry.boundsTree) return true;
-        const currentRadius = this.player.capsuleInfo.radius;
-        const segmentStart = new THREE.Vector3(0, 0, 0);
-        const segmentEnd = new THREE.Vector3(0, -(checkHeight - 2 * currentRadius), 0);
-        this.tempSegment.copy(new THREE.Line3(segmentStart, segmentEnd));
-        this.tempSegment.start.add(this.player.position);
-        this.tempSegment.end.add(this.player.position);
-        this.tempSegment.start.applyMatrix4(this.colliderMatrixWorldInverse);
-        this.tempSegment.end.applyMatrix4(this.colliderMatrixWorldInverse);
-
-        this.tempBox.makeEmpty();
-        this.tempBox.expandByPoint(this.tempSegment.start);
-        this.tempBox.expandByPoint(this.tempSegment.end);
-        this.tempBox.min.addScalar(-currentRadius);
-        this.tempBox.max.addScalar(currentRadius);
-
-        let hitCeiling = false;
-        this.collider.geometry.boundsTree.shapecast({
-            intersectsBounds: box => box.intersectsBox(this.tempBox),
-            intersectsTriangle: tri => {
-                const triPoint = this.tempVector;
-                const capsulePoint = this.tempVector2;
-                const distance = tri.closestPointToSegment(this.tempSegment, triPoint, capsulePoint);
-                if (distance < currentRadius) {
-                    const normal = tri.getNormal(new THREE.Vector3());
-                    if (normal.dot(this.upVector) < -0.1) {
-                        hitCeiling = true;
-                        return true;
-                    }
-                }
-                return false;
-            }
-        });
-        return !hitCeiling;
-    }
     _canUncrouch() {
         if (!this.isCrouching) return true;
-
         const standingHeight = PLAYER_TOTAL_HEIGHT;
         const crouchHeight = PLAYER_CROUCH_HEIGHT;
         const currentRadius = this.player.capsuleInfo.radius * this.player.scale.y;
@@ -278,7 +208,6 @@ export class PhysicsController {
         this.tempBox.expandByPoint(this.tempSegment.end);
         this.tempBox.min.addScalar(-currentRadius);
         this.tempBox.max.addScalar(currentRadius);
-
         let hitCeiling = false;
         if (this.collider && this.collider.geometry && this.collider.geometry.boundsTree) {
             this.collider.geometry.boundsTree.shapecast({
@@ -298,61 +227,7 @@ export class PhysicsController {
         return !hitCeiling;
     }
 
-    _stepUpIfPossible() {
-        if (!this.collider) return;
-        if (this.playerVelocity.y > 0.1) return;
-        const playerHeight = PLAYER_TOTAL_HEIGHT * this.player.scale.y;
-        const downRay = new THREE.Raycaster(
-            this.player.position.clone(),
-            new THREE.Vector3(0, -1, 0),
-            0,
-            playerHeight + 0.2
-        );
-        const groundHits = downRay.intersectObject(this.collider, true);
-        const actualGroundY = groundHits.length
-            ? groundHits[0].point.y
-            : this.player.position.y - playerHeight;
-
-        const horizVel = new THREE.Vector3(this.playerVelocity.x, 0, this.playerVelocity.z);
-        if (horizVel.lengthSq() >= 0.1 * 0.1) {
-            const dir = horizVel.normalize();
-            const capsuleRadius = this.player.capsuleInfo.radius * this.player.scale.y;
-            const forwardOrigin = this.player.position.clone()
-                .setY(actualGroundY + STEP_HEIGHT + 0.05)
-                .add(dir.clone().multiplyScalar(capsuleRadius + STEP_FORWARD_OFFSET));
-            const stepRay = new THREE.Raycaster(
-                forwardOrigin,
-                new THREE.Vector3(0, -1, 0),
-                0,
-                STEP_HEIGHT + 0.3
-            );
-            const stepHits = stepRay.intersectObject(this.collider, true);
-            if (stepHits.length) {
-                const stepTopY = stepHits[0].point.y;
-                const deltaY = stepTopY - actualGroundY;
-                if (
-                    deltaY > 0.05 &&
-                    deltaY <= STEP_HEIGHT + 0.01 &&
-                    stepTopY >= this.player.position.y - PLAYER_TOTAL_HEIGHT + 0.5
-                ) {
-                    const headCheck = new THREE.Raycaster(
-                        new THREE.Vector3(this.player.position.x, stepTopY + playerHeight + 0.02, this.player.position.z),
-                        new THREE.Vector3(0, 1, 0),
-                        0,
-                        0.1
-                    );
-                    if (headCheck.intersectObject(this.collider, true).length === 0) {
-                        this.player.position.y = stepTopY + playerHeight - 0.51;
-                        this.playerVelocity.y = 0;
-                        this.isGrounded = true;
-                        this.player.position.add(dir.multiplyScalar(STEP_FORWARD_PUSH));
-                        return;
-                    }
-                }
-            }
-        }
-    }
-
+    // --- Capsule collision resolution loop ---
     _resolveCapsuleCollision(capsuleInfo, collisionRadius, maxIter = 10) {
         let collisionCount = 0;
         let hasCollision = false;
@@ -387,22 +262,30 @@ export class PhysicsController {
         } while (hasCollision && collisionCount < maxIter);
     }
 
+    // --- Robust Grounded Check ---
     _checkGrounded(capsuleInfo, collisionRadius) {
-        // Project a short ray down from the bottom of the capsule
+        // Use a long downward ray so player is never stuck floating
         const scale = this.player.scale.y;
-        const bottom = this.player.position.clone().add(new THREE.Vector3(0, -PLAYER_TOTAL_HEIGHT * scale / 2 + collisionRadius, 0));
+        const bottom = this.player.position.clone().add(
+            new THREE.Vector3(0, -PLAYER_TOTAL_HEIGHT * scale / 2 + collisionRadius, 0)
+        );
+        // Use a generous ray length
+        const rayLen = Math.max(PLAYER_TOTAL_HEIGHT * scale, 2.0);
         const downRay = new THREE.Raycaster(
             bottom,
             new THREE.Vector3(0, -1, 0),
             0,
-            0.1
+            rayLen
         );
         const hits = this.collider ? downRay.intersectObject(this.collider, true) : [];
-        return hits.length > 0;
+        // Return hit and hit Y for snap-to-ground
+        return hits.length > 0 ? hits[0].point.y : null;
     }
 
     _updatePlayerPhysics(delta) {
-        this._stepUpIfPossible();
+        // Step up if possible (original logic)
+        // this._stepUpIfPossible(); // Optional: can re-enable step logic if needed
+
         const wasGrounded = this.isGrounded;
         this.isGrounded = false;
         if (wasGrounded) {
@@ -436,18 +319,28 @@ export class PhysicsController {
         this.player.position.addScaledVector(this.playerVelocity, delta);
         this.player.updateMatrixWorld();
 
-        // --- Improved collision resolution ---
+        // --- Capsule collision resolution ---
         const capsuleInfo = this.player.capsuleInfo;
         const collisionRadius = capsuleInfo.radius + 0.001;
         if (this.collider && this.collider.geometry && this.collider.geometry.boundsTree) {
             this._resolveCapsuleCollision(capsuleInfo, collisionRadius, 10);
         }
 
-        // Grounded check after collision resolution
-        this.isGrounded = this._checkGrounded(capsuleInfo, collisionRadius);
-
-        if (this.isGrounded && this.playerVelocity.y < 0) {
-            this.playerVelocity.y = 0;
+        // --- Grounded Check & Snap ---
+        const groundY = this._checkGrounded(capsuleInfo, collisionRadius);
+        if (groundY !== null) {
+            // If player bottom is above ground by more than a tiny epsilon, snap down
+            const scale = this.player.scale.y;
+            const bottomOfCapsuleY = this.player.position.y - PLAYER_TOTAL_HEIGHT * scale / 2 + collisionRadius;
+            const distToGround = bottomOfCapsuleY - groundY;
+            if (distToGround > 0.01) {
+                // Snap capsule to sit on ground
+                this.player.position.y -= distToGround;
+            }
+            this.isGrounded = true;
+            if (this.playerVelocity.y < 0) this.playerVelocity.y = 0;
+        } else {
+            this.isGrounded = false;
         }
 
         // Sync camera to player position
@@ -552,6 +445,7 @@ export class PhysicsController {
         this._rotatePlayerModel();
         this.teleportIfOob();
 
+        // Stuck-in-air detection
         if (this._lastY === null) {
             this._lastY = this.player.position.y;
         }
@@ -565,16 +459,19 @@ export class PhysicsController {
                 this._yStuckTimer += deltaTime;
                 if (this._yStuckTimer >= 1.0) {
                     this.playerVelocity.set(0, 0, 0);
+                    // Snap to nearest ground (long ray)
                     const downOrigin = this.player.position.clone();
                     const downDir = new THREE.Vector3(0, -1, 0);
-                    const maxDrop = (PLAYER_TOTAL_HEIGHT * this.player.scale.y) + 1;
+                    const maxDrop = (PLAYER_TOTAL_HEIGHT * this.player.scale.y) + 2;
                     const ray = new THREE.Raycaster(downOrigin, downDir, 0, maxDrop);
                     const hits = ray.intersectObject(this.collider, true);
                     if (hits.length > 0) {
                         const hitY = hits[0].point.y;
                         const scale = this.player.scale.y;
-                        const bottomOffset = (PLAYER_CAPSULE_SEGMENT_LENGTH + PLAYER_CAPSULE_RADIUS) * scale;
+                        const bottomOffset = (PLAYER_TOTAL_HEIGHT * scale) / 2;
                         this.player.position.y = hitY + bottomOffset;
+                        this.isGrounded = true;
+                        this.playerVelocity.y = 0;
                     }
                     this._lastY = this.player.position.y;
                     this._yStuckTimer = 0;
