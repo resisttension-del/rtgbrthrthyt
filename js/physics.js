@@ -163,6 +163,8 @@ export class PhysicsController {
         // —— NEW: stuck-in-air detection fields —— 
         this._lastY = null;
         this._yStuckTimer = 0;
+
+      this._stuckLockTime = 0;
     }
 
     /**
