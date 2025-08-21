@@ -2382,6 +2382,7 @@ export function animate(timestamp) {
         console.error("Error in animate:", err);
     } finally {
         postFrameCleanup(); // Ensure cleanup runs even if an error occurs
+        renderLoopCleanup();
     }
 }
 
@@ -2971,6 +2972,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
