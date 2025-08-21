@@ -496,7 +496,6 @@ _updatePlayerPhysics(delta) {
         if (this._lastY === null) {
             this._lastY = this.player.position.y;
         }
-
         if (Math.abs(this.player.position.y - this._lastY) < 0.001) {
             this._yStuckTimer += delta;
             if (this._yStuckTimer > 0.5) {
@@ -513,18 +512,18 @@ _updatePlayerPhysics(delta) {
         this._yStuckTimer = 0;
     }
 
-    // Store previous grounded state and reset for this frame
     const wasGrounded = this.isGrounded;
     this.isGrounded = false;
+    let pushFromCollision = new THREE.Vector3();
 
-    // Apply gravity or small downward snap
+    // Apply gravity
     if (wasGrounded) {
         this.playerVelocity.y = -GRAVITY * delta * 0.1;
     } else {
         this.playerVelocity.y -= GRAVITY * delta;
     }
 
-    // Cap horizontal speed as a safety
+    // Cap horizontal speed
     const horiz = Math.hypot(this.playerVelocity.x, this.playerVelocity.z);
     const maxHoriz = MAX_SPEED * this.speedModifier;
     if (horiz > maxHoriz) {
@@ -545,80 +544,108 @@ _updatePlayerPhysics(delta) {
         this.player.capsuleInfo.segment.end.y = -this.originalCapsuleSegmentLength * newScaleY;
     }
 
-    // Move the player's mesh by current velocity
-    this.player.position.addScaledVector(this.playerVelocity, delta);
+    // Predict player position
+    const playerPredictedPosition = this.player.position.clone().addScaledVector(this.playerVelocity, delta);
     this.player.updateMatrixWorld();
 
-    // --- Collision + step-up resolution ---
+    // --- Collision Resolution with Stepping and Slopes ---
     const capsuleInfo = this.player.capsuleInfo;
     const collisionRadius = capsuleInfo.radius + 0.001;
 
-    // Build AABB around the capsule in collider-local space
-    this.tempBox.makeEmpty();
-    this.tempSegment.copy(capsuleInfo.segment)
+    // Use a temporary capsule for the predicted position to check for collisions
+    const predictedSegment = new THREE.Line3();
+    predictedSegment.copy(capsuleInfo.segment)
         .applyMatrix4(this.player.matrixWorld)
         .applyMatrix4(this.colliderMatrixWorldInverse);
-    this.tempBox.expandByPoint(this.tempSegment.start);
-    this.tempBox.expandByPoint(this.tempSegment.end);
+    predictedSegment.start.add(playerPredictedPosition.clone().sub(this.player.position).applyMatrix4(this.colliderMatrixWorldInverse));
+    predictedSegment.end.add(playerPredictedPosition.clone().sub(this.player.position).applyMatrix4(this.colliderMatrixWorldInverse));
+
+    this.tempBox.makeEmpty();
+    this.tempBox.expandByPoint(predictedSegment.start);
+    this.tempBox.expandByPoint(predictedSegment.end);
     this.tempBox.min.addScalar(-collisionRadius);
     this.tempBox.max.addScalar(collisionRadius);
 
-    let totalDeltaVec = new THREE.Vector3();
+    let hasCollision = false;
+    let collisionNormal = new THREE.Vector3();
+    let collisionPoint = new THREE.Vector3();
 
-    // Shapecast to push out of geometry
     if (this.collider && this.collider.geometry && this.collider.geometry.boundsTree) {
         this.collider.geometry.boundsTree.shapecast({
             intersectsBounds: box => box.intersectsBox(this.tempBox),
             intersectsTriangle: tri => {
                 const triPoint = this.tempVector;
                 const capPoint = this.tempVector2;
-                const dist = tri.closestPointToSegment(this.tempSegment, triPoint, capPoint);
+                const dist = tri.closestPointToSegment(predictedSegment, triPoint, capPoint);
 
                 if (dist < collisionRadius) {
-                    const depth = collisionRadius - dist;
+                    hasCollision = true;
                     const pushDir = capPoint.sub(triPoint).normalize();
-                    totalDeltaVec.addScaledVector(pushDir, depth);
-
-                    const normalY = pushDir.dot(this.upVector);
-                    if (normalY > WALKABLE_DOT) {
-                        this.isGrounded = true;
-                    }
+                    const depth = collisionRadius - dist;
+                    pushFromCollision.addScaledVector(pushDir, depth);
+                    collisionNormal.copy(pushDir);
+                    collisionPoint.copy(capPoint.applyMatrix4(this.collider.matrixWorld));
                 }
             }
         });
+    }
+
+    if (hasCollision) {
+        const normalY = collisionNormal.dot(this.upVector);
+
+        // Check for step-up
+        if (normalY < 0.1 && pushFromCollision.y > 0 && this.isGrounded) {
+            const horizontalPush = new THREE.Vector3(pushFromCollision.x, 0, pushFromCollision.z);
+            const verticalPush = new THREE.Vector3(0, pushFromCollision.y, 0);
+
+            // Check if the step height is within a reasonable range
+            if (verticalPush.y <= STEP_HEIGHT) {
+                this.player.position.add(horizontalPush);
+                this.player.position.add(verticalPush);
+                this.playerVelocity.y = 0;
+                this.isGrounded = true;
+                this.player.position.addScaledVector(this.playerVelocity, STEP_FORWARD_PUSH);
+                return;
+            }
+        }
+        
+        // Handle slope movement vs. wall collision
+        if (normalY > WALKABLE_DOT && this.playerVelocity.y <= 0) {
+            // Player is on a walkable slope, adjust velocity to slide along it
+            const projectedVelocity = this.playerVelocity.clone();
+            projectedVelocity.projectOnPlane(collisionNormal);
+            this.playerVelocity.copy(projectedVelocity);
+            
+            // Push player out of the geometry
+            this.player.position.add(pushFromCollision);
+
+            this.isGrounded = true;
+
+        } else {
+            // Collision with a wall or steep slope, stop movement against it
+            const horizVel = new THREE.Vector3(this.playerVelocity.x, 0, this.playerVelocity.z);
+            const horizNormal = new THREE.Vector3(collisionNormal.x, 0, collisionNormal.z).normalize();
+            
+            // Project horizontal velocity onto the plane of the wall normal
+            const projectedHorizVel = horizVel.clone().projectOnPlane(horizNormal);
+            
+            this.playerVelocity.x = projectedHorizVel.x;
+            this.playerVelocity.z = projectedHorizVel.z;
+            
+            // If the wall is a ceiling, cancel upward velocity
+            if (normalY < 0) {
+                this.playerVelocity.y = Math.min(this.playerVelocity.y, 0);
+            }
+            
+            // Push player out of the geometry
+            this.player.position.add(pushFromCollision);
+        }
     } else {
-        console.warn("Collider or boundsTree not available—skipping collision.");
+        // If there's no collision, just apply the velocity.
+        this.player.position.addScaledVector(this.playerVelocity, delta);
     }
-
-    if (totalDeltaVec.length() > 0) {
-        // Separate the horizontal and vertical components of the push-out
-        const horizontalDelta = new THREE.Vector3(totalDeltaVec.x, 0, totalDeltaVec.z);
-        const verticalDelta = new THREE.Vector3(0, totalDeltaVec.y, 0);
-
-        // Apply the push-out
-        this.player.position.add(horizontalDelta);
-        this.player.position.add(verticalDelta);
-
-        // Adjust velocity based on the horizontal and vertical collisions.
-        const horizontalVelocity = new THREE.Vector3(this.playerVelocity.x, 0, this.playerVelocity.z);
-        const verticalVelocity = new THREE.Vector3(0, this.playerVelocity.y, 0);
-
-        if (horizontalDelta.length() > 0.001) {
-            const horizontalPushNormal = horizontalDelta.clone().normalize();
-            const proj = horizontalPushNormal.dot(horizontalVelocity);
-            horizontalVelocity.addScaledVector(horizontalPushNormal, -proj);
-
-            this.playerVelocity.x = horizontalVelocity.x;
-            this.playerVelocity.z = horizontalVelocity.z;
-        }
-
-        if (verticalDelta.y > 0.001) {
-            const verticalPushNormal = verticalDelta.clone().normalize();
-            const proj = verticalPushNormal.dot(verticalVelocity);
-            this.playerVelocity.addScaledVector(verticalPushNormal, -proj);
-        }
-    }
-
+    
+    // Final check to make sure player is grounded
     if (this.isGrounded) {
         this.playerVelocity.y = 0;
     }
