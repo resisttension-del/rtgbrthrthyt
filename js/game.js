@@ -624,7 +624,6 @@ export async function startGame(username, mapName, initialDetailsEnabled, ffaEna
     const networkOk = await initNetwork(username, mapName, gameId, ffaEnabled);
     if (!networkOk) return;
     await RAPIER.init();
-    // These references are now correctly set within the createGameButtonHit function
     playersRef = dbRefs.playersRef;
     gameConfigRef = dbRefs.gameConfigRef;
 
@@ -641,9 +640,6 @@ export async function startGame(username, mapName, initialDetailsEnabled, ffaEna
     if (!localPlayerId) return;
 
     // --- Map and Physics Initialization ---
-    // Only create PhysicsController after map/collider is loaded in scene init
-    // The scene init functions will set window.physicsController and window.spawnPoints
-
     if (mapName === 'CrocodilosConstruction') {
         await initSceneCrocodilosConstruction();
     } else if (mapName === 'SigmaCity') {
@@ -685,7 +681,7 @@ export async function startGame(username, mapName, initialDetailsEnabled, ffaEna
         deaths: 0,
         ks: 0,
         bodyColor: initialBodyColor,
-        originalBodyColor: initialBodyColor, // <-- add this
+        originalBodyColor: initialBodyColor,
         isDead: false
     };
 
@@ -760,7 +756,6 @@ export async function startGame(username, mapName, initialDetailsEnabled, ffaEna
         gameConfigRef.remove();
     }
 
-    // Spawn/camera position is set in scene init function
     createLeaderboardOverlay();
 }
 
@@ -856,10 +851,9 @@ toggleSceneDetails(detailsEnabled);
 
 // --- Map and Physics Initialization ---
 // AWAIT the creation of the map and spawn points
-    const { spawnPoints, collider } = await createCrocodilosConstruction(scene);
+    const { spawnPoints, rapierColliderDesc } = await createCrocodilosConstruction(scene);
     window.spawnPoints = spawnPoints;
-    window.physicsController = new PhysicsController(window.camera, scene);
-    window.physicsController.setCollider(collider);
+    window.physicsController = new PhysicsController(window.camera, scene, rapierColliderDesc);
     const initialSpawnPoint = findFurthestSpawn();
     window.physicsController.setPlayerPosition(initialSpawnPoint);
 
@@ -970,10 +964,9 @@ toggleSceneDetails(detailsEnabled);
 
 // --- Map and Physics Initialization ---
 // AWAIT the creation of the map and spawn points
-    const { spawnPoints, collider } = await createSigmaCity(scene);
+    const { spawnPoints, rapierColliderDesc } = await createSigmaCity(scene);
     window.spawnPoints = spawnPoints;
-    window.physicsController = new PhysicsController(window.camera, scene);
-    window.physicsController.setCollider(collider);
+    window.physicsController = new PhysicsController(window.camera, scene, rapierColliderDesc);
     const initialSpawnPoint = findFurthestSpawn();
     window.physicsController.setPlayerPosition(initialSpawnPoint);
 
@@ -1086,10 +1079,9 @@ toggleSceneDetails(detailsEnabled);
 
 // --- Map and Physics Initialization ---
 // AWAIT the creation of the map and spawn points
-    const { spawnPoints, collider } = await createDiddyDunes(scene);
+    const { spawnPoints, rapierColliderDesc } = await createDiddyDunes(scene);
     window.spawnPoints = spawnPoints;
-    window.physicsController = new PhysicsController(window.camera, scene);
-    window.physicsController.setCollider(collider);
+    window.physicsController = new PhysicsController(window.camera, scene, rapierColliderDesc);
     const initialSpawnPoint = findFurthestSpawn();
     window.physicsController.setPlayerPosition(initialSpawnPoint);
 
@@ -2964,6 +2956,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
