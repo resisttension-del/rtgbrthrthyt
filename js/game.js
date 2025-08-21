@@ -623,7 +623,10 @@ export async function pulsePlayerHit(victimId) {
 export async function startGame(username, mapName, initialDetailsEnabled, ffaEnabled, gameId) {
     const networkOk = await initNetwork(username, mapName, gameId, ffaEnabled);
     if (!networkOk) return;
-    await RAPIER.init();
+    await RAPIER.init({
+  gravity: { x: 0, y: -27.5, z: 0 },
+  skip_wasm_check: false,
+});
     playersRef = dbRefs.playersRef;
     gameConfigRef = dbRefs.gameConfigRef;
 
@@ -2966,6 +2969,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
