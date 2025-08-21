@@ -51,7 +51,7 @@ import { usersRef } from './firebase-config.js';
 
 import { initInput, inputState, postFrameCleanup, handleWeaponSwitch } from "./input.js";
 import { PhysicsController } from "./physics.js";
-import { WeaponController, _prototypeModels, getWeaponModel, activeTracers }  from "./weapons.js";
+import { WeaponController, _prototypeModels, getWeaponModel, activeTracers, renderLoopCleanup }  from "./weapons.js";
 let detailsEnabled;
 let renderPass;
 const bodyColor = Math.floor(Math.random() * 0xffffff);
@@ -2972,6 +2972,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
