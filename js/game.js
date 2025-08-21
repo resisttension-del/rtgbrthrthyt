@@ -644,7 +644,7 @@ export async function startGame(username, mapName, initialDetailsEnabled, ffaEna
 
     if (!localPlayerId) return;
 
-    window.physicsController = new PhysicsController(window.camera, scene);
+    window.physicsController = new PhysicsController(window.camera, window.scene);
     physicsController = window.physicsController;
     weaponController = new WeaponController(
         window.camera,
@@ -2972,6 +2972,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
