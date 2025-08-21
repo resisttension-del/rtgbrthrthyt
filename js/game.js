@@ -869,6 +869,7 @@ toggleSceneDetails(detailsEnabled);
     window.physicsController = new PhysicsController(window.camera, scene, rapierColliderDesc);
     const initialSpawnPoint = findFurthestSpawn();
     window.physicsController.setPlayerPosition(initialSpawnPoint);
+    window.physicsController.setCollider(colliderMesh);
 
 // --- Audio Initialization ---
 if (typeof windSound !== 'undefined') {
@@ -982,6 +983,7 @@ toggleSceneDetails(detailsEnabled);
     window.physicsController = new PhysicsController(window.camera, scene, rapierColliderDesc);
     const initialSpawnPoint = findFurthestSpawn();
     window.physicsController.setPlayerPosition(initialSpawnPoint);
+    window.physicsController.setCollider(colliderMesh);
 
 // --- Audio Initialization ---
 if (typeof forestNoise !== 'undefined') {
@@ -1097,7 +1099,7 @@ toggleSceneDetails(detailsEnabled);
     window.physicsController = new PhysicsController(window.camera, scene, rapierColliderDesc);
     const initialSpawnPoint = findFurthestSpawn();
     window.physicsController.setPlayerPosition(initialSpawnPoint);
-
+window.physicsController.setCollider(colliderMesh);
 
     
 // --- Audio Initialization ---
@@ -2969,6 +2971,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
