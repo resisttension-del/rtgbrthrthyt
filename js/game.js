@@ -978,7 +978,7 @@ toggleSceneDetails(detailsEnabled);
 
 // --- Map and Physics Initialization ---
 // AWAIT the creation of the map and spawn points
-    const { spawnPoints, rapierColliderDesc } = await createSigmaCity(scene);
+   const { spawnPoints, colliderMesh } = await createSigmaCity(scene);
     window.spawnPoints = spawnPoints;
     window.physicsController = new PhysicsController(window.camera, scene, rapierColliderDesc);
     const initialSpawnPoint = findFurthestSpawn();
@@ -2971,6 +2971,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
