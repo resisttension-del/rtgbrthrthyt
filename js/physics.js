@@ -350,47 +350,53 @@ export class PhysicsController {
     }
 
     // --- Main Physics Update ---
-    _updatePlayerPhysics(delta) {
-        this._stepUpIfPossible();
-        const wasGrounded = this.isGrounded;
-        this.isGrounded = false;
+_updatePlayerPhysics(delta) {
+    this._stepUpIfPossible();
 
-        // Gravity
-        if (wasGrounded) {
-            this.playerVelocity.y = -GRAVITY * delta * 0.1;
-        } else {
-            this.playerVelocity.y -= GRAVITY * delta;
-        }
+    const wasGrounded = this.isGrounded;
+    this.isGrounded = false;
 
-        // Cap horizontal speed
-        const horiz = Math.hypot(this.playerVelocity.x, this.playerVelocity.z);
-        const maxHoriz = MAX_SPEED * this.speedModifier;
-        if (horiz > maxHoriz) {
-            const scale = maxHoriz / horiz;
-            this.playerVelocity.x *= scale;
-            this.playerVelocity.z *= scale;
-        }
+    // Gravity
+    if (wasGrounded) {
+        this.playerVelocity.y = -GRAVITY * delta * 0.1;
+    } else {
+        this.playerVelocity.y -= GRAVITY * delta;
+    }
 
-        // Crouch height
-        const currentScaleY = this.player.scale.y;
-        const targetScaleY = this.targetPlayerHeight / PLAYER_TOTAL_HEIGHT;
-        if (Math.abs(currentScaleY - targetScaleY) > 0.001) {
-            const newScaleY = THREE.MathUtils.lerp(currentScaleY, targetScaleY, CROUCH_SPEED * delta);
-            const oldHeight = PLAYER_TOTAL_HEIGHT * currentScaleY;
-            const newHeight = PLAYER_TOTAL_HEIGHT * newScaleY;
-            this.player.scale.y = newScaleY;
-            this.player.position.y -= (oldHeight - newHeight);
-            this.player.capsuleInfo.segment.end.y = -this.originalCapsuleSegmentLength * newScaleY;
-        }
+    // Cap horizontal speed
+    const horiz = Math.hypot(this.playerVelocity.x, this.playerVelocity.z);
+    const maxHoriz = MAX_SPEED * this.speedModifier;
+    if (horiz > maxHoriz) {
+        const scale = maxHoriz / horiz;
+        this.playerVelocity.x *= scale;
+        this.playerVelocity.z *= scale;
+    }
 
-        // Move the mesh
-        this.player.position.addScaledVector(this.playerVelocity, delta);
-        this.player.updateMatrixWorld();
+    // Crouch height
+    const currentScaleY = this.player.scale.y;
+    const targetScaleY = this.targetPlayerHeight / PLAYER_TOTAL_HEIGHT;
+    if (Math.abs(currentScaleY - targetScaleY) > 0.001) {
+        const newScaleY = THREE.MathUtils.lerp(currentScaleY, targetScaleY, CROUCH_SPEED * delta);
+        const oldHeight = PLAYER_TOTAL_HEIGHT * currentScaleY;
+        const newHeight = PLAYER_TOTAL_HEIGHT * newScaleY;
+        this.player.scale.y = newScaleY;
+        this.player.position.y -= (oldHeight - newHeight);
+        this.player.capsuleInfo.segment.end.y = -this.originalCapsuleSegmentLength * newScaleY;
+    }
 
-        // --- Collision ---
-        const capsuleInfo = this.player.capsuleInfo;
-        const collisionRadius = capsuleInfo.radius + 0.001;
+    // Move the mesh
+    this.player.position.addScaledVector(this.playerVelocity, delta);
+    this.player.updateMatrixWorld();
 
+    // --- Robust Capsule Collision Resolution ---
+    // Repeat collision resolution up to N times (prevents clipping in any direction)
+    const capsuleInfo = this.player.capsuleInfo;
+    const collisionRadius = capsuleInfo.radius + 0.001;
+    let maxIterations = 5;
+    let collided = false;
+
+    while (maxIterations-- > 0) {
+        // Build AABB
         this.tempBox.makeEmpty();
         this.tempSegment.copy(capsuleInfo.segment)
             .applyMatrix4(this.player.matrixWorld)
@@ -413,6 +419,7 @@ export class PhysicsController {
                     const dist = tri.closestPointToSegment(this.tempSegment, triPoint, capPoint);
                     if (dist < collisionRadius) {
                         hasCollision = true;
+                        collided = true;
                         const depth = collisionRadius - dist;
                         const pushDir = capPoint.sub(triPoint).normalize();
                         this.tempSegment.start.addScaledVector(pushDir, depth);
@@ -424,12 +431,18 @@ export class PhysicsController {
             });
         }
 
-        // Compute offset
+        // Compute offset and apply
         const newStartWorld = this.tempVector.copy(this.tempSegment.start).applyMatrix4(this.collider.matrixWorld);
         const deltaVec = newStartWorld.sub(this.player.position);
         const offset = Math.max(0, deltaVec.length() - 1e-5);
-        deltaVec.normalize().multiplyScalar(offset);
-        this.player.position.add(deltaVec);
+        if (offset > 0.0001) {
+            // Move player out of collision
+            deltaVec.normalize().multiplyScalar(offset);
+            this.player.position.add(deltaVec);
+            this.player.updateMatrixWorld();
+        } else {
+            break; // No collision remains
+        }
 
         // Slope/wall handling
         if (hasCollision) {
@@ -438,16 +451,25 @@ export class PhysicsController {
                 this.isGrounded = true;
                 this.playerVelocity.y = 0;
             } else {
+                // Slide along wall: remove velocity along normal
                 const proj = collisionNormal.dot(this.playerVelocity);
                 this.playerVelocity.addScaledVector(collisionNormal, -proj);
             }
         }
-        if (this.isGrounded) this.playerVelocity.y = 0;
-
-        // Sync camera
-        this.camera.position.copy(this.player.position);
-        this._lastAirYaw = this.camera.rotation.y;
     }
+
+    // --- Zero velocity when stationary and grounded ---
+    if (this.isGrounded) {
+        // If velocity is very small, snap to zero
+        if (Math.abs(this.playerVelocity.x) < 0.001) this.playerVelocity.x = 0;
+        if (Math.abs(this.playerVelocity.z) < 0.001) this.playerVelocity.z = 0;
+        if (Math.abs(this.playerVelocity.y) < 0.001) this.playerVelocity.y = 0;
+    }
+
+    // Sync camera
+    this.camera.position.copy(this.player.position);
+    this._lastAirYaw = this.camera.rotation.y;
+}
 
     // --- Out Of Bounds ---
     teleportIfOob() {
