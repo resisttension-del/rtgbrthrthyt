@@ -1,8 +1,12 @@
 // js/game.js
 
 import * as THREE from "https://cdnjs.cloudflare.com/ajax/libs/three.js/0.152.0/three.module.js";
-// Removed EffectComposer / RenderPass / UnrealBloomPass / ShaderPass / CopyShader imports
+import { EffectComposer } from "https://cdn.jsdelivr.net/npm/three@0.152.0/examples/jsm/postprocessing/EffectComposer.js";
+import { RenderPass }     from "https://cdn.jsdelivr.net/npm/three@0.152.0/examples/jsm/postprocessing/RenderPass.js";
+import { UnrealBloomPass } from "https://cdn.jsdelivr.net/npm/three@0.152.0/examples/jsm/postprocessing/UnrealBloomPass.js";
 import { currentKeybinds, isChatting } from "./input.js";
+import { ShaderPass } from "https://cdn.jsdelivr.net/npm/three@0.152.0/examples/jsm/postprocessing/ShaderPass.js";
+import { CopyShader } from "https://cdn.jsdelivr.net/npm/three@0.152.0/examples/jsm/shaders/CopyShader.js";
 import Stats from 'stats.js';
 import { dbRefs, disposeGame, fullCleanup, activeGameId, setupDamageListener } from "./network.js";
 import * as BufferGeometryUtils from 'three/examples/jsm/utils/BufferGeometryUtils.js';
@@ -10,12 +14,14 @@ import {
     computeBoundsTree,
     disposeBoundsTree,
     acceleratedRaycast,
-    MeshBVH,
+    MeshBVH, // <--- Added MeshBVH import
     MeshBVHHelper,
     StaticGeometryGenerator
 } from 'https://cdn.jsdelivr.net/npm/three-mesh-bvh@0.9.1/+esm';
 
-// BVH Setup
+// ffffffffffffffffffffffffffff
+// ─── BVH Setup ────────────────────────────────────────────────────────────
+// Extend THREE.BufferGeometry and THREE.Mesh prototypes for BVH functionality
 THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
 THREE.BufferGeometry.prototype.disposeBoundsTree = disposeBoundsTree;
 THREE.Mesh.prototype.raycast = acceleratedRaycast;
@@ -26,19 +32,19 @@ import { initNetwork, sendPlayerUpdate, localPlayerId, remotePlayers, updateHeal
 import { claimGameSlot, releaseGameSlot, getSlotNameForGameId } from './firebase-config.js';
 import { initMenuUI } from "./menu.js";
 import {
-  initChatUI,
-  addChatMessage,
-  updateKillFeed,
-  updateScoreboard,
-  initBulletHoles,
-  initInventory,
-  updateInventory,
-  initAmmoDisplay,
-  updateAmmoDisplay,
-  createHealthBar,
-  updateHealthShieldUI,
-  createTracer,
-  uiDbRefs
+initChatUI,
+addChatMessage,
+updateKillFeed,
+updateScoreboard,
+initBulletHoles,
+initInventory,
+updateInventory,
+initAmmoDisplay,
+updateAmmoDisplay,
+createHealthBar,
+updateHealthShieldUI,
+createTracer,
+uiDbRefs
 } from "./ui.js";
 
 import { usersRef } from './firebase-config.js';
@@ -46,17 +52,21 @@ import { usersRef } from './firebase-config.js';
 import { initInput, inputState, postFrameCleanup, handleWeaponSwitch } from "./input.js";
 import { PhysicsController } from "./physics.js";
 import { WeaponController, _prototypeModels, getWeaponModel, activeTracers }  from "./weapons.js";
-
 let detailsEnabled;
+let renderPass;
 const bodyColor = Math.floor(Math.random() * 0xffffff);
 
 const FIXED_WIDTH  = 1920;
 const FIXED_HEIGHT = 1080;
 
-let scene, camera, renderer, composer, fog;
+
+
+let scene, camera, renderer, composer, bloomPass, fog;
 window.camera = window.camera || new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
 window.scene = window.scene || new THREE.Scene();
 
+
+// f
 let dirLight, hemi;
 let localPlayer = null;
 let physicsController;
@@ -65,18 +75,17 @@ let spawnPoints = [];
 let skyMesh, starField;
 
 export const KILLSTREAK_SOUNDS = {
-  1:  'https://codehs.com/uploads/5626b4ea9d389c0936a1971b1f3a6beb',
-  2:  'https://codehs.com/uploads/3b7b1aa5c4a9f532aa16ac0d7f4ffdb5',
-  3:  'https://codehs.com/uploads/81976fee406a0346b5b75de70c7e2c0e',
-  4:  'https://codehs.com/uploads/b337a894983ddc58e778bdb76eb0efe4',
-  5:  'https://codehs.com/uploads/03edb8ea396418fbc3630d1262c7e991',
-  6:  'https://codehs.com/uploads/413cb56b57597f40aa223dc6488eecca',
-  7:  'https://codehs.com/uploads/f4bca7128545c430257bc59d0c169e45',
-  8:  'https://codehs.com/uploads/373998fa75359ae1ca6462fe1b023bf7',
-  9:  'https://codehs.com/uploads/bac5a38abad4d17c00f7adf629af9063',
-  10: 'https://codehs.com/uploads/c2645a73d7b76fa17634d8a4f2ffd15a'
+1:  'https://codehs.com/uploads/5626b4ea9d389c0936a1971b1f3a6beb',
+2:  'https://codehs.com/uploads/3b7b1aa5c4a9f532aa16ac0d7f4ffdb5',
+3:  'https://codehs.com/uploads/81976fee406a0346b5b75de70c7e2c0e',
+4:  'https://codehs.com/uploads/b337a894983ddc58e778bdb76eb0efe4',
+5:  'https://codehs.com/uploads/03edb8ea396418fbc3630d1262c7e991',
+6:  'https://codehs.com/uploads/413cb56b57597f40aa223dc6488eecca',
+7:  'https://codehs.com/uploads/f4bca7128545c430257bc59d0c169e45',
+8:  'https://codehs.com/uploads/373998fa75359ae1ca6462fe1b023bf7',
+9:  'https://codehs.com/uploads/bac5a38abad4d17c00f7adf629af9063',
+10: 'https://codehs.com/uploads/c2645a73d7b76fa17634d8a4f2ffd15a'
 };
-
 let chatInput;
 let respawnOverlay = null;
 let respawnButton  = null;
@@ -88,17 +97,24 @@ let deathTheme = new Audio("https://codehs.com/uploads/720078943b931e7eb258b01fb
 deathTheme.loop = true;
 deathTheme.volume = 0.5;
 
-const windSound = new Audio("https://codehs.com/uploads/91aa5e56fc63838b4bdc06f596849daa");
+const windSound = new Audio(
+"https://codehs.com/uploads/91aa5e56fc63838b4bdc06f596849daa"
+);
 windSound.loop   = true;
 windSound.volume = 0.1;
 
-const dessertWindSound = new Audio("https://codehs.com/uploads/37a04df493b1a86c91ccccc53c7a09d4");
+const dessertWindSound = new Audio(
+"https://codehs.com/uploads/37a04df493b1a86c91ccccc53c7a09d4"
+);
 dessertWindSound.loop   = true;
 dessertWindSound.volume = 0.25;
 
-const forestNoise = new Audio("https://codehs.com/uploads/e26ad4fc80829f48ecd9b470fe84987d");
+const forestNoise = new Audio(
+"https://codehs.com/uploads/e26ad4fc80829f48ecd9b470fe84987d"
+);
 forestNoise.loop   = true;
 forestNoise.volume = 0.15;
+
 
 const bulletHoleMeshes = {};
 
@@ -120,72 +136,106 @@ let playersRef = null;
 let chatRef = null;
 let killsRef = null;
 let mapStateRef = null;
-let gameConfigRef  = null;
+let gameConfigRef  = null;    // ← add this
 
-let gameEndTime   = null;
-let gameInterval  = null;
+
+let gameEndTime   = null;   // will be fetched from gameConfigRef
+let gameInterval  = null;   // ID returned by setInterval()
 
 let manager;
 
 
-// Fog helpers
 export function initGlobalFogAndShadowParams() {
-  window.originalFogParams = {
-    type:    "exp2",
-    color:   0x888888,
-    density: 0.015
-  };
+
+  window.originalFogParams = {
+
+    type:    "exp2",
+
+    color:   0x888888,
+
+    density: 0.015
+
+  };
+
 }
 
 function createFog() {
-  const fp = originalFogParams;
-  if (fp.type === "exp2") {
-    window.scene.fog = new THREE.FogExp2(fp.color, fp.density);
-  } else if (fp.type === "linear") {
-    window.scene.fog = new THREE.Fog(fp.color, fp.near, fp.far);
-  } else {
-    window.scene.fog = null;
-  }
+const fp = originalFogParams;
+if (fp.type === "exp2") {
+window.scene.fog = new THREE.FogExp2(fp.color, fp.density);
+} else if (fp.type === "linear") {
+window.scene.fog = new THREE.Fog(fp.color, fp.near, fp.far);
+} else {
+window.scene.fog = null; // No fog
+}
 }
 
 function destroyFog() {
-  window.scene.fog = null;
+window.scene.fog = null;
 }
 
 function enableShadows() {
-  if (!dirLight) {
-    dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
-    dirLight.position.set(50, 200, 100);
-    dirLight.castShadow = true;
+if (!dirLight) {
+dirLight = new THREE.DirectionalLight(0xffffff, 0.8); // Color, intensity
+dirLight.position.set(50, 200, 100); // Position the light
+dirLight.castShadow = true;
 
-    dirLight.shadow.mapSize.width = 2048;
-    dirLight.shadow.mapSize.height = 2048;
-    dirLight.shadow.camera.near = 0.5;
-    dirLight.shadow.camera.far = 500;
-    dirLight.shadow.camera.left = -200;
-    dirLight.shadow.camera.right = 200;
-    dirLight.shadow.camera.top = 200;
-    dirLight.shadow.camera.bottom = -200;
+// Shadow map settings (adjust resolution and camera frustum for your scene)
+dirLight.shadow.mapSize.width = 2048; // Higher resolution for better shadows
+dirLight.shadow.mapSize.height = 2048;
+dirLight.shadow.camera.near = 0.5;
+dirLight.shadow.camera.far = 500; // Far plane for shadow camera
+dirLight.shadow.camera.left = -200;
+dirLight.shadow.camera.right = 200;
+dirLight.shadow.camera.top = 200;
+dirLight.shadow.camera.bottom = -200;
+// dirLight.shadow.bias = -0.001; // Adjust bias to fight shadow acne if needed
 
-    window.scene.add(dirLight);
-  }
-  dirLight.castShadow = true;
-  if (renderer) renderer.shadowMap.enabled = true;
+window.scene.add(dirLight);
+}
+dirLight.castShadow = true; // Ensure castShadow is true
+if (renderer) { // Check if renderer is initialized
+renderer.shadowMap.enabled = true;
+}
 }
 
 function disableShadows() {
-  if (dirLight) {
-    dirLight.castShadow = false;
-    window.scene.remove(dirLight);
-    // three DirectionalLight has no dispose() in core; clear reference so GC can collect
-    dirLight = null;
-  }
-  if (renderer) renderer.shadowMap.enabled = false;
+if (dirLight) {
+dirLight.castShadow = false; // Disable casting
+window.scene.remove(dirLight); // Remove from scene
+dirLight.dispose(); // Release resources
+dirLight = null; // Set to null for re-creation
+}
+if (renderer) { // Check if renderer is initialized
+renderer.shadowMap.enabled = false;
+}
 }
 
-// Removed createBloom() and destroyBloom() entirely — postprocessing removed.
+function createBloom() {
+// Ensure composer and renderPass are initialized
+if (!composer || !renderPass) {
+console.warn("Composer or RenderPass not initialized. Cannot create Bloom.");
+return;
+}
+if (!bloomPass) { // Only create if it doesn't exist
+bloomPass = new UnrealBloomPass(
+new THREE.Vector2(window.innerWidth, window.innerHeight), // Use window dimensions for bloom
+originalBloomStrength, // Use the stored original strength
+1, // Radius
+0.6 // Threshold
+);
+composer.addPass(bloomPass);
+}
+}
 
-// determineWinnerAndEndGame and DOM initialization remain unchanged
+function destroyBloom() {
+if (bloomPass && composer) {
+composer.removePass(bloomPass);
+bloomPass.dispose(); // Release resources
+bloomPass = null;
+}
+}
+
 async function determineWinnerAndEndGame() {
     console.log("Determining winner and ending game...");
     if (!playersRef) {
@@ -198,6 +248,7 @@ async function determineWinnerAndEndGame() {
     playersSnapshot.forEach(childSnap => {
         const p = childSnap.val();
         if (!p || typeof p.kills !== 'number') return;
+        // use the username as stored in DB (canonical form)
         statsByUser[p.username] = {
             kills: p.kills || 0,
             deaths: p.deaths || 0,
@@ -239,13 +290,18 @@ async function determineWinnerAndEndGame() {
         }
     }
 
+    // ⭐ Only increment stats for the local player — but resolve the canonical username
     const statUpdates = [];
     if (window.localPlayer && window.localPlayer.username) {
         const provided = String(window.localPlayer.username).trim();
         if (provided !== "") {
             const providedLower = provided.toLowerCase();
+
+            // Find the canonical username key that matches case-insensitively
             const canonical = Object.keys(statsByUser).find(k => String(k).toLowerCase() === providedLower);
+
             if (!canonical) {
+                // If we couldn't find a match among the players, do NOT create a user or increment anything.
                 console.warn(`[determineWinnerAndEndGame] Local player username '${provided}' not found among players (case-insensitive). Skipping stat increment to avoid creating new user.`);
             } else {
                 const localPlayerStats = statsByUser[canonical];
@@ -263,6 +319,7 @@ async function determineWinnerAndEndGame() {
         }
     }
 
+    // await all stat updates (no-op if statUpdates is empty)
     try {
         await Promise.all(statUpdates);
     } catch (e) {
@@ -310,119 +367,165 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 });
 
+
 function createStars() {
-  if (sceneNum !== 1) return;
-  if (starField) return;
+if (sceneNum !== 1) return; // Only create for CrocodilosConstruction
 
-  const starCount = 1000;
-  const positions = new Float32Array(starCount * 3);
-  for (let i = 0; i < starCount; i++) {
-    const theta = Math.random() * 2 * Math.PI;
-    const phi = Math.acos(2 * Math.random() - 1);
-    const r = 90 + Math.random() * 100;
-    positions[3 * i] = r * Math.sin(phi) * Math.cos(theta);
-    positions[3 * i + 1] = r * Math.sin(phi) * Math.sin(theta);
-    positions[3 * i + 2] = r * Math.cos(phi);
-  }
+console.log("Creating stars for CrocodilosConstruction...");
+if (starField) return; // Already created
 
-  const starsGeo = new THREE.BufferGeometry().setAttribute("position", new THREE.BufferAttribute(positions, 3));
-  const starsMat = new THREE.PointsMaterial({
-    color: 0xeeeeff,
-    size: 0.5,
-    sizeAttenuation: true,
-    fog: false
-  });
-  starField = new THREE.Points(starsGeo, starsMat);
-  scene.add(starField);
+const starCount = 1000;
+const positions = new Float32Array(starCount * 3);
+
+for (let i = 0; i < starCount; i++) {
+const theta = Math.random() * 2 * Math.PI;
+const phi = Math.acos(2 * Math.random() - 1);
+const r = 90 + Math.random() * 100;
+
+positions[3 * i] = r * Math.sin(phi) * Math.cos(theta);
+positions[3 * i + 1] = r * Math.sin(phi) * Math.sin(theta);
+positions[3 * i + 2] = r * Math.cos(phi);
 }
 
+const starsGeo = new THREE.BufferGeometry().setAttribute(
+"position",
+new THREE.BufferAttribute(positions, 3)
+);
+const starsMat = new THREE.PointsMaterial({
+color: 0xeeeeff,
+size: 0.5,
+sizeAttenuation: true,
+fog: false // Stars should ignore fog
+});
+starField = new THREE.Points(starsGeo, starsMat);
+scene.add(starField);
+}
+
+/**
+* Destroys the stars specifically for CrocodilosConstruction.
+*/
 function destroyStars() {
-  if (starField) {
-    scene.remove(starField);
-    starField.geometry.dispose();
-    starField.material.dispose();
-    starField = null;
-  }
+if (starField) {
+console.log("Destroying stars for CrocodilosConstruction...");
+scene.remove(starField);
+starField.geometry.dispose();
+starField.material.dispose();
+starField = null;
+}
 }
 
+/**
+* Creates the fog dots specifically for CrocodilosConstruction.
+*/
 function createFogDots() {
-  if (sceneNum !== 1) return;
-  if (window.worldFog) return;
+if (sceneNum !== 1) return; // Only create for CrocodilosConstruction
 
-  const BOUNDS = { x: 100, y: 20, z: 100 };
-  const fogCount = 5000;
-  const fogGeo = new THREE.BufferGeometry();
-  const pos = new Float32Array(fogCount * 3);
-  for (let i = 0; i < fogCount; i++) {
-    pos[3 * i] = (Math.random() * 2 - 1) * BOUNDS.x;
-    pos[3 * i + 1] = Math.random() * BOUNDS.y;
-    pos[3 * i + 2] = (Math.random() * 2 - 1) * BOUNDS.z;
-  }
-  fogGeo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
-  const fogMat = new THREE.PointsMaterial({
-    color: 0xcccccc,
-    size: 0.2,
-    transparent: true,
-    opacity: 0.3,
-    sizeAttenuation: true,
-    fog: true
-  });
-  window.worldFog = new THREE.Points(fogGeo, fogMat);
-  scene.add(window.worldFog);
+console.log("Creating fog dots for CrocodilosConstruction...");
+if (worldFog) return; // Already created
+
+const BOUNDS = { x: 100, y: 20, z: 100 };
+const fogCount = 5000;
+const fogGeo = new THREE.BufferGeometry();
+const pos = new Float32Array(fogCount * 3);
+
+for (let i = 0; i < fogCount; i++) {
+pos[3 * i] = (Math.random() * 2 - 1) * BOUNDS.x;
+pos[3 * i + 1] = Math.random() * BOUNDS.y;
+pos[3 * i + 2] = (Math.random() * 2 - 1) * BOUNDS.z;
 }
 
+fogGeo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+const fogMat = new THREE.PointsMaterial({
+color: 0xcccccc,
+size: 0.2,
+transparent: true,
+opacity: 0.3,
+sizeAttenuation: true,
+fog: true // Fog dots should be affected by fog
+});
+worldFog = new THREE.Points(fogGeo, fogMat);
+scene.add(worldFog);
+window.worldFog = worldFog; // Keep window.worldFog updated
+}
+
+/**
+* Destroys the fog dots specifically for CrocodilosConstruction.
+*/
 function destroyFogDots() {
-  if (window.worldFog) {
-    scene.remove(window.worldFog);
-    window.worldFog.geometry.dispose();
-    window.worldFog.material.dispose();
-    window.worldFog = null;
-  }
+if (worldFog) {
+console.log("Destroying fog dots for CrocodilosConstruction...");
+scene.remove(worldFog);
+worldFog.geometry.dispose();
+worldFog.material.dispose();
+worldFog = null;
+}
 }
 
-// Main toggle function: now only handles fog/shadows/stars/fogdots — no postprocessing
+// --- Main toggle function (exported for main.js to call) ---
+
+/**
+* Toggles the creation/destruction of scene details like fog, shadows, bloom, stars, and fog dots.
+* This function is now intelligent about which scene is active.
+* @param {boolean} isOn - True to enable details, false to disable.
+*/
 export function toggleSceneDetails(isOn) {
-  if (isOn !== detailsEnabled) {
-    detailsEnabled = isOn;
-    if (isOn) {
-      createFog();
-      enableShadows();
-      if (sceneNum === 1) {
-        createStars();
-        createFogDots();
-      }
-    } else {
-      destroyFog();
-      disableShadows();
-      if (sceneNum === 1) {
-        destroyStars();
-        destroyFogDots();
-      }
-    }
-  }
+if (isOn !== detailsEnabled) {
+detailsEnabled = isOn; // Update internal state
+
+if (isOn) {
+console.log("Enabling scene details...");
+// Universal details
+createFog();
+enableShadows();
+createBloom();
+
+// Scene-specific details
+if (sceneNum === 1) { // CrocodilosConstruction specific
+createStars();
+createFogDots();
+}
+// SigmaCity doesn't have unique details beyond universal ones, so no 'else if (sceneNum === 2)' needed here
+} else {
+console.log("Disabling scene details...");
+// Universal details
+destroyFog();
+disableShadows();
+destroyBloom();
+
+// Scene-specific details
+if (sceneNum === 1) { //CrocodilosConstruction specific
+destroyStars();
+destroyFogDots();
+}
+}
+}
 }
 
-// Crosshair and hit pulse code unchanged
+
+// Crosshair
+
 const BASE_GAP      = 2;
 const SPREAD_SCALAR = 50;
 
 export function updateCrosshair(spreadAngle) {
-  if (window.localPlayer?.isDead) return;
+if (window.localPlayer?.isDead) return;
 
-  const gap = BASE_GAP + spreadAngle * SPREAD_SCALAR;
+const gap = BASE_GAP + spreadAngle * SPREAD_SCALAR;
 
-  const up    = document.getElementById("line-up");
-  const down  = document.getElementById("line-down");
-  const left  = document.getElementById("line-left");
-  const right = document.getElementById("line-right");
+const up    = document.getElementById("line-up");
+const down  = document.getElementById("line-down");
+const left  = document.getElementById("line-left");
+const right = document.getElementById("line-right");
 
-  up.style.top    = `${-gap - up.clientHeight}px`;
-  down.style.top  = `${gap}px`;
-  left.style.left = `${-gap - left.clientWidth}px`;
-  right.style.left= `${gap}px`;
+up.style.top    = `${-gap - up.clientHeight}px`;
+down.style.top  = `${gap}px`;
+left.style.left = `${-gap - left.clientWidth}px`;
+right.style.left= `${gap}px`;
 
-  document.getElementById("crosshair").style.display = "";
+document.getElementById("crosshair").style.display = "";
 }
+
+// Hit Pulse
 
 const pendingRestore = {};
 const originalColor   = {};
@@ -432,21 +535,36 @@ export async function pulsePlayerHit(victimId) {
   const flashColor = 0xff0000;
   const PULSE_MS   = 200;
 
+  // --- 0) Ensure we have the "original" color cached ---
   if (typeof originalColor[victimId] !== 'number') {
     try {
+      // Prefer DB field originalBodyColor
       const origSnap = await playerRef.child('originalBodyColor').once('value');
       const origVal = origSnap.val();
+
       if (typeof origVal === 'number') {
         originalColor[victimId] = origVal;
       } else if (victimId === localPlayerId && window.localPlayer && typeof window.localPlayer.originalBodyColor === 'number') {
+        // local player's original is available on the client
         originalColor[victimId] = window.localPlayer.originalBodyColor;
-        try { await playerRef.update({ originalBodyColor: originalColor[victimId] }); } catch (e) { console.warn('[pulsePlayerHit] could not write originalBodyColor for local player:', e); }
+        // best-effort: ensure DB has it too
+        try {
+          await playerRef.update({ originalBodyColor: originalColor[victimId] });
+        } catch (e) {
+          console.warn('[pulsePlayerHit] could not write originalBodyColor for local player:', e);
+        }
       } else {
+        // DB missing originalBodyColor: fall back to reading current bodyColor and initialize originalBodyColor in DB
         const curSnap = await playerRef.child('bodyColor').once('value');
         const curVal = curSnap.val();
         if (typeof curVal === 'number') {
           originalColor[victimId] = curVal;
-          try { await playerRef.update({ originalBodyColor: curVal }); } catch (e) { console.warn('[pulsePlayerHit] unable to persist originalBodyColor to DB (best-effort):', e); }
+          // Best-effort write so future clients/readers can use the DB-stored original
+          try {
+            await playerRef.update({ originalBodyColor: curVal });
+          } catch (e) {
+            console.warn('[pulsePlayerHit] unable to persist originalBodyColor to DB (best-effort):', e);
+          }
         } else {
           console.warn(`[pulsePlayerHit] Can't flash ${victimId}, no numeric original or bodyColor available:`, curVal);
           return;
@@ -458,36 +576,63 @@ export async function pulsePlayerHit(victimId) {
     }
   }
 
-  if (pendingRestore[victimId]) clearTimeout(pendingRestore[victimId]);
+  // --- 1) Cancel any pending restore so repeated hits keep the flash visible ---
+  if (pendingRestore[victimId]) {
+    clearTimeout(pendingRestore[victimId]);
+  }
 
-  try { await playerRef.update({ bodyColor: flashColor }); } catch (err) { console.error('[pulsePlayerHit] Error flashing RED:', err); }
+  // --- 2) Flash RED immediately (best-effort) ---
+  try {
+    await playerRef.update({ bodyColor: flashColor });
+  } catch (err) {
+    console.error('[pulsePlayerHit] Error flashing RED:', err);
+    // continue to schedule restore even if flashing failed
+  }
 
+  // --- 3) Schedule restore after PULSE_MS, but only if the current color isn't already the original ---
   pendingRestore[victimId] = setTimeout(async () => {
     const orig = originalColor[victimId];
-    if (typeof orig !== 'number') { delete pendingRestore[victimId]; return; }
+    if (typeof orig !== 'number') {
+      delete pendingRestore[victimId];
+      return;
+    }
+
     try {
       const curSnap = await playerRef.child('bodyColor').once('value');
       const cur = curSnap.val();
+
+      // restore only when the current color differs from desired original
       if (cur !== orig) {
         await playerRef.update({ bodyColor: orig });
       }
     } catch (err) {
       console.error('[pulsePlayerHit] Error restoring color:', err);
     }
+
     delete pendingRestore[victimId];
+    // keep originalColor cached for future hits
   }, PULSE_MS);
 }
+
+
+
+
 
 // Game Start
 export async function startGame(username, mapName, initialDetailsEnabled, ffaEnabled, gameId) {
     const networkOk = await initNetwork(username, mapName, gameId, ffaEnabled);
     if (!networkOk) return;
 
+    // These references are now correctly set within the createGameButtonHit function
     playersRef = dbRefs.playersRef;
     gameConfigRef = dbRefs.gameConfigRef;
 
     const gameTimerElement = document.getElementById('game-timer');
 
+
+
+    
+    // The rest of your startGame function remains the same
     initGlobalFogAndShadowParams();
     window.isGamePaused = false;
     document.getElementById('menu-overlay').style.display = 'none';
@@ -523,31 +668,31 @@ export async function startGame(username, mapName, initialDetailsEnabled, ffaEna
     initBulletHoles();
     initializeAudioManager(window.camera, scene);
     startSoundListener();
-  //  enableShadows();
- //   createFog();
- //   createFogDots();
-    
-    const initialBodyColor = Math.floor(Math.random() * 0xffffff);
 
-    window.localPlayer = {
-        id: localPlayerId,
-        username,
-        x: 0,
-        y: 1000,
-        z: 0,
-        rotY: 0,
-        health: initialPlayerHealth,
-        shield: initialPlayerShield,
-        weapon: initialPlayerWeapon,
-        kills: 0,
-        deaths: 0,
-        ks: 0,
-        bodyColor: initialBodyColor,
-        originalBodyColor: initialBodyColor,
-        isDead: false
-    };
 
-    await dbRefs.playersRef.child(localPlayerId).set({ ...window.localPlayer });
+const initialBodyColor = Math.floor(Math.random() * 0xffffff);
+
+window.localPlayer = {
+    id: localPlayerId,
+    username,
+    x: 0,
+    y: 1000,
+    z: 0,
+    rotY: 0,
+    health: initialPlayerHealth,
+    shield: initialPlayerShield,
+    weapon: initialPlayerWeapon,
+    kills: 0,
+    deaths: 0,
+    ks: 0,
+    bodyColor: initialBodyColor,
+    originalBodyColor: initialBodyColor, // <-- add this
+    isDead: false
+};
+
+    await dbRefs.playersRef.child(localPlayerId).set({
+        ...window.localPlayer
+    });
     updateHealthShieldUI(window.localPlayer.health, window.localPlayer.shield);
     weaponController.equipWeapon(window.localPlayer.weapon);
     initInventory(window.localPlayer.weapon);
@@ -561,18 +706,24 @@ export async function startGame(username, mapName, initialDetailsEnabled, ffaEna
     setupPlayersListener(playersRef);
     updateScoreboard(playersRef);
 
+
+
     if (ffaEnabled) {
       gameTimerElement.style.display = 'block';
+    
       let currentRemainingSeconds = null;
       let gameEnded = false;
       let uiInterval = null;
-
+    
+      // --- NO owner election here. menu app will elect & update gameDuration ---
       const durationRef = gameConfigRef.child('gameDuration');
       durationRef.on('value', snap => {
         const val = snap.val();
-        if (typeof val === 'number') currentRemainingSeconds = val;
+        if (typeof val === 'number') {
+          currentRemainingSeconds = val;
+        }
       });
-
+    
       const endedRef = gameConfigRef.child('ended');
       endedRef.on('value', snap => {
         if (snap.val() === true && !gameEnded) {
@@ -584,7 +735,7 @@ export async function startGame(username, mapName, initialDetailsEnabled, ffaEna
           determineWinnerAndEndGame();
         }
       });
-
+    
       uiInterval = setInterval(() => {
         if (currentRemainingSeconds == null) {
           gameTimerElement.textContent = 'Time: Syncing…';
@@ -594,25 +745,33 @@ export async function startGame(username, mapName, initialDetailsEnabled, ffaEna
           gameTimerElement.textContent = `Time: ${mins}:${secs < 10 ? '0' : ''}${secs}`;
         }
       }, 250);
-
-      if (playersKillsListener) playersRef.off('value', playersKillsListener);
+    
+      // keep your kills-based early end logic
+      if (playersKillsListener) {
+        playersRef.off('value', playersKillsListener);
+      }
       playersKillsListener = playersRef.on('value', snap => {
         let reached = false;
         snap.forEach(childSnap => {
           if (childSnap.val().kills >= 40) reached = true;
         });
-        if (reached && !gameEnded) endedRef.set(true);
+        if (reached && !gameEnded) {
+          endedRef.set(true);
+        }
       });
-
+    
     } else {
         gameTimerElement.style.display = 'none';
         if (gameInterval) clearInterval(gameInterval);
         gameConfigRef.remove();
     }
 
-    const spawn = findFurthestSpawn();
-    window.camera.position.copy(spawn).add(new THREE.Vector3(0, 1.6, 0));
+
+    
+        const spawn = findFurthestSpawn();
+        window.camera.position.copy(spawn).add(new THREE.Vector3(0, 1.6, 0));
     createLeaderboardOverlay();
+    
 }
 
 export function hideGameUI() {
@@ -635,300 +794,368 @@ function setupDetailToggle() {
         scene.fog = new THREE.Fog(fp.color, fp.near, fp.far);
       }
       renderer.shadowMap.enabled = true;
-      if (dirLight) dirLight.castShadow = true;
-      btn.textContent = "Details: On";
+      dirLight.castShadow      = true;
+      window.bloomPass.strength = window.originalBloomStrength;
+      btn.textContent           = "Details: On";
     } else {
-      scene.fog = null;
+      scene.fog                = null;
       renderer.shadowMap.enabled = false;
-      if (dirLight) dirLight.castShadow = false;
-      btn.textContent = "Details: Off";
+      dirLight.castShadow        = false;
+      window.bloomPass.strength   = 0;
+      btn.textContent             = "Details: Off";
     }
   });
 
   btn.textContent = detailsEnabled ? "Details: On" : "Details: Off";
+  
 }
 
-export async function initSceneCrocodilosConstruction() {
-  sceneNum = 1;
-  console.log("Initializing CrocodilosConstruction scene...");
 
-  scene = new THREE.Scene();
-  const skyGeo = new THREE.SphereGeometry(200, 32, 32).scale(-1, 1, 1);
-  const skyMat = new THREE.MeshBasicMaterial({ color: 0x000022, side: THREE.BackSide, fog: false });
-  const skyColor = new THREE.Color(0x111122);
-  scene.background = skyColor;
-  skyMesh = new THREE.Mesh(skyGeo, skyMat);
-  scene.add(skyMesh);
-  window.scene = scene;
+export async function initSceneCrocodilosConstruction() { // Make initSceneCrocodilosConstruction async
+sceneNum = 1;
+console.log("Initializing CrocodilosConstruction scene...");
 
-  window.camera.rotation.order = "YXZ";
-  scene.add(window.camera);
 
-  // Renderer
-  window.renderer = new THREE.WebGLRenderer({ antialias: false });
-  renderer = window.renderer;
-  renderer.domElement.style.position = "relative";
-  renderer.domElement.style.zIndex = "0";
-  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-  renderer.setClearColor(0x000000, 1);
-  document.getElementById("game-container").appendChild(renderer.domElement);
-  window.renderer = renderer;
 
-  // Hemisphere Light
-  hemi = new THREE.HemisphereLight(0xffffff, 0x444444, 0.05);
-  scene.add(hemi);
-  window.hemi = hemi;
 
-  // Composer shim: minimal object so existing animate() calls composer.render() safely.
-  composer = {
-    render: () => { if (renderer && scene && window.camera) renderer.render(scene, window.camera); },
-    setSize: () => {},
-    addPass: () => {},
-    removePass: () => {}
-  };
-  window.composer = composer;
 
-  // Initial Detail Setup
-  toggleSceneDetails(detailsEnabled);
+// 1. Scene
+scene = new THREE.Scene();
+const skyGeo = new THREE.SphereGeometry(200, 32, 32).scale(-1, 1, 1);
+const skyMat = new THREE.MeshBasicMaterial({
+color: 0x000022,
+side: THREE.BackSide,
+fog: false
+});
+const skyColor = new THREE.Color(0x111122);
+scene.background = skyColor;
+skyMesh = new THREE.Mesh(skyGeo, skyMat);
+scene.add(skyMesh);
+window.scene = scene;
 
-  // Map and Physics Initialization
-  spawnPoints = await createCrocodilosConstruction(scene, physicsController);
-  window.spawnPoints = spawnPoints;
-  const initialSpawnPoint = findFurthestSpawn();
-  physicsController.setPlayerPosition(initialSpawnPoint);
 
-  if (typeof windSound !== 'undefined') {
-    windSound.play().catch(err => console.warn("Failed to play wind sound:", err));
-    window.windSound = windSound;
-  } else {
-    console.warn("windSound is not defined. Audio might not play for CrocodilosConstruction.");
-  }
+window.camera.rotation.order = "YXZ";
+scene.add( window.camera );
 
-  function onWindowResize() {
-    const container = document.getElementById("game-container");
-    const displayWidth  = container.clientWidth;
-    const displayHeight = container.clientHeight;
 
-    renderer.setSize(FIXED_WIDTH, FIXED_HEIGHT, false);
-    // composer.setSize is a shim no-op
+// 3. Renderer
+window.renderer = new THREE.WebGLRenderer({ antialias: false }); // Antialias might reduce the "pixelated" effect of lower resolution
+renderer = window.renderer;
+renderer.domElement.style.position = "relative";
+renderer.domElement.style.zIndex = "0";
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.setClearColor(0x000000, 1);
+document.getElementById("game-container").appendChild(renderer.domElement);
+window.renderer = renderer;
 
-    renderer.domElement.style.width  = `${displayWidth}px`;
-    renderer.domElement.style.height = `${displayHeight}px`;
+// 4. Hemisphere Light
+hemi = new THREE.HemisphereLight(0xffffff, 0x444444, 0.05);
+scene.add(hemi);
+window.hemi = hemi;
 
-    window.camera.aspect = displayWidth / displayHeight;
-    window.camera.updateProjectionMatrix();
+// 5. Post-processing Composer
+// Note: EffectComposer also needs to know the renderer's *display* size
+composer = new EffectComposer(renderer);
+renderPass = new RenderPass(scene, window.camera);
+composer.addPass(renderPass);
+window.composer = composer;
+window.renderPass = renderPass;
 
-    if (window.weaponController && window.localPlayer && typeof getWeaponModel === 'function' && typeof attachWeaponToPlayer === 'function') {
-      const key = window.localPlayer.weapon.replace(/-/g, "").toLowerCase();
-      const proto = getWeaponModel(key);
-      if (proto) attachWeaponToPlayer(window.localPlayer.id, key);
-    }
+// --- Initial Detail Setup for CrocodilosConstruction ---
+toggleSceneDetails(detailsEnabled);
 
-    if (window.remotePlayers) {
-      Object.values(window.remotePlayers).forEach(({ currentWeapon, weaponRoot }) => {
-        if (currentWeapon && weaponRoot && typeof attachWeaponToPlayer === 'function') {
-          attachWeaponToPlayer(weaponRoot.userData.playerId, currentWeapon);
-        }
-      });
-    }
+// --- Map and Physics Initialization ---
+// AWAIT the creation of the map and spawn points
+spawnPoints = await createCrocodilosConstruction(scene, physicsController);
+window.spawnPoints = spawnPoints; // Now window.spawnPoints will be the actual array
 
-    const hud = document.getElementById("hud");
-    if (hud) {
-      hud.style.width  = `${displayWidth}px`;
-      hud.style.height = `${displayHeight}px`;
-    }
-  }
+const initialSpawnPoint = findFurthestSpawn(); // Call your function to get a spawn point
+physicsController.setPlayerPosition(initialSpawnPoint);
 
-  window.addEventListener("resize", onWindowResize, false);
-  onWindowResize();
+// --- Audio Initialization ---
+if (typeof windSound !== 'undefined') {
+windSound.play().catch(err => console.warn("Failed to play wind sound:", err));
+window.windSound = windSound;
+} else {
+console.warn("windSound is not defined. Audio might not play for CrocodilosConstruction.");
 }
 
-export async function initSceneSigmaCity() {
-  sceneNum = 2;
-  console.log("Initializing SigmaCity scene...");
+// --- Window Resize Handling ---
+function onWindowResize() {
+const container = document.getElementById("game-container");
+const displayWidth  = container.clientWidth;
+const displayHeight = container.clientHeight;
 
-  scene = new THREE.Scene();
-  const skyColor = new THREE.Color(0x87CEEB);
-  scene.background = skyColor;
-  window.scene = scene;
+// 1) Render & post‑process at fixed 1280×720
+renderer.setSize(FIXED_WIDTH, FIXED_HEIGHT, false);
+if (composer) composer.setSize(FIXED_WIDTH, FIXED_HEIGHT);
 
-  const skyGeo = new THREE.SphereGeometry(200, 32, 32).scale(-1, 1, 1);
-  const skyMat = new THREE.MeshBasicMaterial({ color: 0x000022, side: THREE.BackSide, fog: false });
-  skyMesh = new THREE.Mesh(skyGeo, skyMat);
-  scene.add(skyMesh);
-  window.scene = scene;
+// 2) Stretch the canvas via CSS to fill the container
+renderer.domElement.style.width  = `${displayWidth}px`;
+renderer.domElement.style.height = `${displayHeight}px`;
 
-  window.camera.rotation.order = "YXZ";
-  scene.add(window.camera);
+// 3) Update camera to match the display aspect ratio
+window.camera.aspect = displayWidth / displayHeight;
+window.camera.updateProjectionMatrix();
 
-  window.renderer = new THREE.WebGLRenderer({ antialias: false });
-  renderer = window.renderer;
-  renderer.domElement.style.position = "relative";
-  renderer.domElement.style.zIndex = "0";
-  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-  renderer.setClearColor(0x000000, 1);
-  document.getElementById("game-container").appendChild(renderer.domElement);
-  window.renderer = renderer;
-
-  hemi = new THREE.HemisphereLight(0xffffff, 0x444444, 0.05);
-  scene.add(hemi);
-  window.hemi = hemi;
-
-  composer = {
-    render: () => { if (renderer && scene && window.camera) renderer.render(scene, window.camera); },
-    setSize: () => {},
-    addPass: () => {},
-    removePass: () => {}
-  };
-  window.composer = composer;
-
-  toggleSceneDetails(detailsEnabled);
-
-  spawnPoints = await createSigmaCity(scene, physicsController);
-  window.spawnPoints = spawnPoints;
-
-  const initialSpawnPoint = findFurthestSpawn();
-  physicsController.setPlayerPosition(initialSpawnPoint);
-
-  if (typeof forestNoise !== 'undefined') {
-    forestNoise.volume = 0.05;
-    forestNoise.play().catch(err => console.warn("Failed to play forest noise:", err));
-    window.windSound = forestNoise;
-  } else {
-    console.warn("forestNoise is not defined. Audio might not play for SigmaCity.");
-  }
-
-  function onWindowResize() {
-    const container = document.getElementById("game-container");
-    const displayWidth  = container.clientWidth;
-    const displayHeight = container.clientHeight;
-
-    renderer.setSize(FIXED_WIDTH, FIXED_HEIGHT, false);
-
-    renderer.domElement.style.width  = `${displayWidth}px`;
-    renderer.domElement.style.height = `${displayHeight}px`;
-
-    window.camera.aspect = displayWidth / displayHeight;
-    window.camera.updateProjectionMatrix();
-
-    if (window.weaponController && window.localPlayer && typeof getWeaponModel === 'function' && typeof attachWeaponToPlayer === 'function') {
-      const key = window.localPlayer.weapon.replace(/-/g, "").toLowerCase();
-      const proto = getWeaponModel(key);
-      if (proto) attachWeaponToPlayer(window.localPlayer.id, key);
-    }
-
-    if (window.remotePlayers) {
-      Object.values(window.remotePlayers).forEach(({ currentWeapon, weaponRoot }) => {
-        if (currentWeapon && weaponRoot && typeof attachWeaponToPlayer === 'function') {
-          attachWeaponToPlayer(weaponRoot.userData.playerId, currentWeapon);
-        }
-      });
-    }
-
-    const hud = document.getElementById("hud");
-    if (hud) {
-      hud.style.width  = `${displayWidth}px`;
-      hud.style.height = `${displayHeight}px`;
-    }
-  }
-
-  window.addEventListener("resize", onWindowResize, false);
-  onWindowResize();
+// 4) Re‑attach weapon to local player (if needed)
+if (window.weaponController && window.localPlayer && typeof getWeaponModel === 'function' && typeof attachWeaponToPlayer === 'function') {
+const key = window.localPlayer.weapon.replace(/-/g, "").toLowerCase();
+const proto = getWeaponModel(key);
+if (proto) attachWeaponToPlayer(window.localPlayer.id, key);
 }
 
-export async function initSceneDiddyDunes() {
-  sceneNum = 3;
-  console.log("Initializing DiddyDunes scene...");
-
-  scene = new THREE.Scene();
-  const skyColor = new THREE.Color(0x87CEEB);
-  scene.background = skyColor;
-  window.scene = scene;
-
-  const skyGeo = new THREE.SphereGeometry(200, 32, 32).scale(-1, 1, 1);
-  const skyMat = new THREE.MeshBasicMaterial({ color: 0x000022, side: THREE.BackSide, fog: false });
-  skyMesh = new THREE.Mesh(skyGeo, skyMat);
-  scene.add(skyMesh);
-  window.scene = scene;
-
-  window.camera.rotation.order = "YXZ";
-  scene.add(window.camera);
-
-  window.renderer = new THREE.WebGLRenderer({ antialias: false });
-  renderer = window.renderer;
-  renderer.domElement.style.position = "relative";
-  renderer.domElement.style.zIndex = "0";
-  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-  renderer.setClearColor(0x000000, 1);
-  document.getElementById("game-container").appendChild(renderer.domElement);
-  window.renderer = renderer;
-
-  hemi = new THREE.HemisphereLight(0xffffff, 0x444444, 0.05);
-  scene.add(hemi);
-  window.hemi = hemi;
-
-  composer = {
-    render: () => { if (renderer && scene && window.camera) renderer.render(scene, window.camera); },
-    setSize: () => {},
-    addPass: () => {},
-    removePass: () => {}
-  };
-  window.composer = composer;
-
-  toggleSceneDetails(detailsEnabled);
-
-  spawnPoints = await createDiddyDunes(scene, physicsController);
-  window.spawnPoints = spawnPoints;
-
-  const initialSpawnPoint = findFurthestSpawn();
-  physicsController.setPlayerPosition(initialSpawnPoint);
-
-  if (typeof dessertWindSound !== 'undefined') {
-    dessertWindSound.volume = 0.25;
-    dessertWindSound.play().catch(err => console.warn("Failed to play forest noise:", err));
-    window.windSound = dessertWindSound;
-  } else {
-    console.warn("dessertWindSound is not defined. Audio might not play for DiddyDunes.");
-  }
-
-  function onWindowResize() {
-    const container = document.getElementById("game-container");
-    const displayWidth  = container.clientWidth;
-    const displayHeight = container.clientHeight;
-
-    renderer.setSize(FIXED_WIDTH, FIXED_HEIGHT, false);
-
-    renderer.domElement.style.width  = `${displayWidth}px`;
-    renderer.domElement.style.height = `${displayHeight}px`;
-
-    window.camera.aspect = displayWidth / displayHeight;
-    window.camera.updateProjectionMatrix();
-
-    if (window.weaponController && window.localPlayer && typeof getWeaponModel === 'function' && typeof attachWeaponToPlayer === 'function') {
-      const key = window.localPlayer.weapon.replace(/-/g, "").toLowerCase();
-      const proto = getWeaponModel(key);
-      if (proto) attachWeaponToPlayer(window.localPlayer.id, key);
-    }
-
-    if (window.remotePlayers) {
-      Object.values(window.remotePlayers).forEach(({ currentWeapon, weaponRoot }) => {
-        if (currentWeapon && weaponRoot && typeof attachWeaponToPlayer === 'function') {
-          attachWeaponToPlayer(weaponRoot.userData.playerId, currentWeapon);
-        }
-      });
-    }
-
-    const hud = document.getElementById("hud");
-    if (hud) {
-      hud.style.width  = `${displayWidth}px`;
-      hud.style.height = `${displayHeight}px`;
-    }
-  }
-
-  window.addEventListener("resize", onWindowResize, false);
-  onWindowResize();
+// 5) Re‑attach weapons for remote players
+if (window.remotePlayers) {
+Object.values(window.remotePlayers).forEach(({ currentWeapon, weaponRoot }) => {
+if (currentWeapon && weaponRoot && typeof attachWeaponToPlayer === 'function') {
+attachWeaponToPlayer(weaponRoot.userData.playerId, currentWeapon);
+}
+});
 }
 
+// 6) Resize HUD overlay
+const hud = document.getElementById("hud");
+if (hud) {
+hud.style.width  = `${displayWidth}px`;
+hud.style.height = `${displayHeight}px`;
+}
+}
+
+window.addEventListener("resize", onWindowResize, false);
+onWindowResize(); // Call once initially to set the correct sizes
+}
+
+export async function initSceneSigmaCity() { // Make initSceneCrocodilosConstruction async
+sceneNum = 2;
+console.log("Initializing SigmaCity scene...");
+
+scene = new THREE.Scene();
+const skyColor = new THREE.Color(0x87CEEB);
+scene.background = skyColor;
+window.scene = scene;
+
+
+const skyGeo = new THREE.SphereGeometry(200, 32, 32).scale(-1, 1, 1);
+const skyMat = new THREE.MeshBasicMaterial({
+color: 0x000022,
+side: THREE.BackSide,
+fog: false
+});
+skyMesh = new THREE.Mesh(skyGeo, skyMat);
+scene.add(skyMesh);
+window.scene = scene;
+
+
+window.camera.rotation.order = "YXZ";
+scene.add( window.camera );
+
+
+// 3. Renderer
+window.renderer = new THREE.WebGLRenderer({ antialias: false }); // Antialias might reduce the "pixelated" effect of lower resolution
+renderer = window.renderer;
+renderer.domElement.style.position = "relative";
+renderer.domElement.style.zIndex = "0";
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.setClearColor(0x000000, 1);
+document.getElementById("game-container").appendChild(renderer.domElement);
+window.renderer = renderer;
+
+// 4. Hemisphere Light
+hemi = new THREE.HemisphereLight(0xffffff, 0x444444, 0.05);
+scene.add(hemi);
+window.hemi = hemi;
+
+// 5. Post-processing Composer
+// Note: EffectComposer also needs to know the renderer's *display* size
+composer = new EffectComposer(renderer);
+renderPass = new RenderPass(scene, window.camera);
+composer.addPass(renderPass);
+window.composer = composer;
+window.renderPass = renderPass;
+
+// --- Initial Detail Setup for SigmaCity ---
+toggleSceneDetails(detailsEnabled);
+
+// --- Map and Physics Initialization ---
+// AWAIT the creation of the map and spawn points
+spawnPoints = await createSigmaCity(scene, physicsController);
+window.spawnPoints = spawnPoints; // Now window.spawnPoints will be the actual array
+
+const initialSpawnPoint = findFurthestSpawn(); // Call your function to get a spawn point
+physicsController.setPlayerPosition(initialSpawnPoint);
+
+// --- Audio Initialization ---
+if (typeof forestNoise !== 'undefined') {
+forestNoise.volume = 0.05;
+forestNoise.play().catch(err => console.warn("Failed to play forest noise:", err));
+window.windSound = forestNoise; // Renamed to windSound for consistency if only one wind sound
+} else {
+console.warn("forestNoise is not defined. Audio might not play for SigmaCity.");
+}
+
+// --- Window Resize Handling ---
+function onWindowResize() {
+const container = document.getElementById("game-container");
+const displayWidth  = container.clientWidth;
+const displayHeight = container.clientHeight;
+
+// 1) Render & post‑process at fixed 1280×720
+renderer.setSize(FIXED_WIDTH, FIXED_HEIGHT, false);
+if (composer) composer.setSize(FIXED_WIDTH, FIXED_HEIGHT);
+
+// 2) Stretch the canvas via CSS to fill the container
+renderer.domElement.style.width  = `${displayWidth}px`;
+renderer.domElement.style.height = `${displayHeight}px`;
+
+// 3) Update camera to match the display aspect ratio
+window.camera.aspect = displayWidth / displayHeight;
+window.camera.updateProjectionMatrix();
+
+// 4) Re‑attach weapon to local player (if needed)
+if (window.weaponController && window.localPlayer && typeof getWeaponModel === 'function' && typeof attachWeaponToPlayer === 'function') {
+const key = window.localPlayer.weapon.replace(/-/g, "").toLowerCase();
+const proto = getWeaponModel(key);
+if (proto) attachWeaponToPlayer(window.localPlayer.id, key);
+}
+
+// 5) Re‑attach weapons for remote players
+if (window.remotePlayers) {
+Object.values(window.remotePlayers).forEach(({ currentWeapon, weaponRoot }) => {
+if (currentWeapon && weaponRoot && typeof attachWeaponToPlayer === 'function') {
+attachWeaponToPlayer(weaponRoot.userData.playerId, currentWeapon);
+}
+});
+}
+
+// 6) Resize HUD overlay
+const hud = document.getElementById("hud");
+if (hud) {
+hud.style.width  = `${displayWidth}px`;
+hud.style.height = `${displayHeight}px`;
+}
+}
+
+window.addEventListener("resize", onWindowResize, false);
+onWindowResize(); // Call once initially to set the correct sizes
+}
+
+
+export async function initSceneDiddyDunes() { // Make initSceneCrocodilosConstruction async
+sceneNum = 3;
+console.log("Initializing DiddyDunes scene...");
+
+scene = new THREE.Scene();
+const skyColor = new THREE.Color(0x87CEEB);
+scene.background = skyColor;
+window.scene = scene;
+
+
+const skyGeo = new THREE.SphereGeometry(200, 32, 32).scale(-1, 1, 1);
+const skyMat = new THREE.MeshBasicMaterial({
+color: 0x000022,
+side: THREE.BackSide,
+fog: false
+});
+skyMesh = new THREE.Mesh(skyGeo, skyMat);
+scene.add(skyMesh);
+window.scene = scene;
+
+
+window.camera.rotation.order = "YXZ";
+scene.add( window.camera );
+
+
+// 3. Renderer
+window.renderer = new THREE.WebGLRenderer({ antialias: false }); // Antialias might reduce the "pixelated" effect of lower resolution
+renderer = window.renderer;
+renderer.domElement.style.position = "relative";
+renderer.domElement.style.zIndex = "0";
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.setClearColor(0x000000, 1);
+document.getElementById("game-container").appendChild(renderer.domElement);
+window.renderer = renderer;
+
+// 4. Hemisphere Light
+hemi = new THREE.HemisphereLight(0xffffff, 0x444444, 0.05);
+scene.add(hemi);
+window.hemi = hemi;
+
+// 5. Post-processing Composer
+// Note: EffectComposer also needs to know the renderer's *display* size
+composer = new EffectComposer(renderer);
+renderPass = new RenderPass(scene, window.camera);
+composer.addPass(renderPass);
+window.composer = composer;
+window.renderPass = renderPass;
+
+// --- Initial Detail Setup for DiddyDunes ---
+toggleSceneDetails(detailsEnabled);
+
+// --- Map and Physics Initialization ---
+// AWAIT the creation of the map and spawn points
+spawnPoints = await createDiddyDunes(scene, physicsController);
+window.spawnPoints = spawnPoints; // Now window.spawnPoints will be the actual array
+
+const initialSpawnPoint = findFurthestSpawn(); // Call your function to get a spawn point
+physicsController.setPlayerPosition(initialSpawnPoint);
+
+
+    
+// --- Audio Initialization ---
+if (typeof dessertWindSound !== 'undefined') {
+dessertWindSound.volume = 0.25;
+dessertWindSound.play().catch(err => console.warn("Failed to play forest noise:", err));
+window.windSound = dessertWindSound; // Renamed to windSound for consistency if only one wind sound
+} else {
+console.warn("dessertWindSound is not defined. Audio might not play for DiddyDunes.");
+}
+
+// --- Window Resize Handling ---
+function onWindowResize() {
+const container = document.getElementById("game-container");
+const displayWidth  = container.clientWidth;
+const displayHeight = container.clientHeight;
+
+// 1) Render & post‑process at fixed 1280×720
+renderer.setSize(FIXED_WIDTH, FIXED_HEIGHT, false);
+if (composer) composer.setSize(FIXED_WIDTH, FIXED_HEIGHT);
+
+// 2) Stretch the canvas via CSS to fill the container
+renderer.domElement.style.width  = `${displayWidth}px`;
+renderer.domElement.style.height = `${displayHeight}px`;
+
+// 3) Update camera to match the display aspect ratio
+window.camera.aspect = displayWidth / displayHeight;
+window.camera.updateProjectionMatrix();
+
+// 4) Re‑attach weapon to local player (if needed)
+if (window.weaponController && window.localPlayer && typeof getWeaponModel === 'function' && typeof attachWeaponToPlayer === 'function') {
+const key = window.localPlayer.weapon.replace(/-/g, "").toLowerCase();
+const proto = getWeaponModel(key);
+if (proto) attachWeaponToPlayer(window.localPlayer.id, key);
+}
+
+// 5) Re‑attach weapons for remote players
+if (window.remotePlayers) {
+Object.values(window.remotePlayers).forEach(({ currentWeapon, weaponRoot }) => {
+if (currentWeapon && weaponRoot && typeof attachWeaponToPlayer === 'function') {
+attachWeaponToPlayer(weaponRoot.userData.playerId, currentWeapon);
+}
+});
+}
+
+// 6) Resize HUD overlay
+const hud = document.getElementById("hud");
+if (hud) {
+hud.style.width  = `${displayWidth}px`;
+hud.style.height = `${displayHeight}px`;
+}
+}
+
+window.addEventListener("resize", onWindowResize, false);
+onWindowResize(); // Call once initially to set the correct sizes
+}
 
 
 
@@ -1900,138 +2127,131 @@ function round2(n) {
 
 
 export function animate(timestamp) {
-    // schedule next frame first (keeps loop alive even if an exception occurs)
+    // Schedule the next frame *first*. This ensures the loop continues
+    // even if an error occurs later in this frame.
     requestAnimationFrame(animate);
 
-    // --- quick guards ---
-    if (localPlayerId === null || window.isGamePaused) return;
-
-    // --- frame throttling (aim for 60fps) ---
-    const FRAME_INTERVAL = 1000 / 60; // ms
-    if (!animate.lastTime) animate.lastTime = timestamp;
-    let deltaMs = timestamp - animate.lastTime;
-    if (deltaMs < FRAME_INTERVAL) return;
-    // carry over remainder for stable timesteps
-    animate.lastTime = timestamp - (deltaMs % FRAME_INTERVAL);
-    const delta = deltaMs / 1000; // seconds
-
-    // --- one-time initialization of cached stuff & intervals ---
-    if (!animate._init) {
-        animate._init = true;
-
-        // intervals (ms)
-        animate._SEND_INTERVAL = 100; // send player update at 10Hz (tweakable)
-        animate._COLLIDABLES_REBUILD_INTERVAL = 250; // rebuild collidables every 250ms
-        animate._REMOTE_UPDATE_INTERVAL = 33; // ~30Hz for remote interpolation/visuals
-
-        // timers / trackers
-        animate._lastSend = 0;
-        animate._lastCollidablesRebuild = 0;
-        animate._lastRemoteUpdate = 0;
-
-        // cache DOMrefs (avoid getElementById per-frame)
-        animate._dom = {
-            crosshair: document.getElementById("crosshair"),
-            fadeOverlay: typeof fadeOverlay !== "undefined" ? fadeOverlay : null,
-            respawnOverlay: typeof respawnOverlay !== "undefined" ? respawnOverlay : null
-        };
-
-        // sensitivity cache + storage listener to update when user changes it
-        const readSens = () => parseFloat(localStorage.getItem("sensitivity") || "5.00");
-        animate._baseSens = readSens();
-        window.addEventListener("storage", (e) => {
-            if (e.key === "sensitivity") animate._baseSens = readSens();
-        });
-
-        // death state tracker (so we only do death setup once)
-        animate._wasDead = false;
+ 
+    // --- Disconnection/Pause Logic ---
+    // If localPlayerId is null, it means the local player has disconnected.
+    // The game state should already be paused and UI updated by the handler
+    // that sets localPlayerId to null. This function simply stops further animation logic.
+    if (localPlayerId === null || window.isGamePaused) {
+        // console.log("Animation loop paused or stopped due to local player disconnection."); // Only for debugging
+        return;
     }
 
-    // --- basic readiness checks (cheap) ---
-    if (!physicsController || !weaponController || !window.mapReady || !window.localPlayer) {
-        // still run minimal cleanup if you need to
+    // --- Frame Throttling (60fps) ---
+    const FRAME_INTERVAL = 1000 / 60; // ≈16.67ms
+    if (!animate.lastTime) {
+        animate.lastTime = timestamp; // Initialize for the first frame
+    }
+    const deltaMs = timestamp - animate.lastTime;
+
+    if (deltaMs < FRAME_INTERVAL) {
+        return; // Too early, skip this frame
+    }
+    // Carry over any "extra" time for smoother timing
+    animate.lastTime = timestamp - (deltaMs % FRAME_INTERVAL);
+
+    // Convert to seconds for game logic
+    const delta = deltaMs / 1000;
+
+    // --- Pre-animation checks ---
+    if (!physicsController || !weaponController) {
+        console.warn("Skipping animate(): controllers not yet initialized");
+        postFrameCleanup(); // Clean up even if controllers aren't ready
+        return;
+    }
+    if (!window.mapReady) {
+        // console.warn("Skipping animate(): map not ready."); // Can be noisy
+        postFrameCleanup();
+        return;
+    }
+    if (!window.localPlayer) {
+        console.warn("Skipping animate(): window.localPlayer is not initialized.");
         postFrameCleanup();
         return;
     }
 
     try {
-        const dom = animate._dom;
-
-        // --- Death state handling: run transition logic only when state changes ---
+        // --- Death Screen Logic ---
         if (window.localPlayer.isDead) {
-            if (!animate._wasDead) {
-                // first frame of death: perform the one-time things
-                if (dom.crosshair) dom.crosshair.style.display = "none";
+            const cross = document.getElementById("crosshair");
+            if (cross) cross.style.display = "none";
 
-                if (windSound && !windSound.paused) windSound.pause();
-                if (forestNoise && !forestNoise.paused) forestNoise.pause();
-                if (dessertWindSound && !dessertWindSound.paused) dessertWindSound.pause();
-                if (deathTheme && deathTheme.paused) {
-                    deathTheme.currentTime = 0;
-                    deathTheme.play().catch(e => console.error("Error playing death theme:", e));
-                }
-
-                if (dom.fadeOverlay) {
-                    dom.fadeOverlay.style.pointerEvents = "auto";
-                    dom.fadeOverlay.style.opacity = "1";
-                }
-                if (dom.respawnOverlay) dom.respawnOverlay.style.display = "flex";
+            // Ensure death-related sounds are playing and others are paused
+            if (windSound && !windSound.paused) windSound.pause();
+            if (forestNoise && !forestNoise.paused) forestNoise.pause();
+            if (dessertWindSound && !dessertWindSound.paused) dessertWindSound.pause();
+            if (deathTheme && deathTheme.paused) {
+                deathTheme.currentTime = 0;
+                deathTheme.play().catch(e => console.error("Error playing death theme:", e));
             }
-            // mark dead and render once for visuals, then skip the rest of the heavy logic
-            animate._wasDead = true;
+
+            // Show death overlays
+            if (fadeOverlay) {
+                fadeOverlay.style.pointerEvents = "auto";
+                fadeOverlay.style.opacity = "1";
+            }
+            if (respawnOverlay) respawnOverlay.style.display = "flex";
+
             composer.render();
             postFrameCleanup();
-            return;
+            return; // Exit early if player is dead
         } else {
-            // if we were dead previously and now alive, undo those UI changes once
-            if (animate._wasDead) {
-                if (dom.fadeOverlay) {
-                    // assume hideFadeOverlay handles pointerEvents and opacity
-                }
-                if (dom.respawnOverlay) hideRespawn();
-                animate._wasDead = false;
+
+            if (fadeOverlay && fadeOverlay.style.opacity !== "0") {
+                hideFadeOverlay(); // Assumes this function correctly sets opacity to "0" and pointerEvents to "none"
             }
-            if (dom.crosshair) dom.crosshair.style.display = "block";
+            if (respawnOverlay && respawnOverlay.style.display !== "none") {
+                hideRespawn(); // Assumes this function correctly sets display to "none"
+            }
+
+            // Ensure crosshair is visible if not dead
+            const cross = document.getElementById("crosshair");
+            if (cross) cross.style.display = "block"; // Or "flex" depending on its original display type
         }
 
-        // --- visual & minor updates that are cheap ---
-        checkForDamagePulse();
+        // --- Normal Game Updates ---
+        checkForDamagePulse(); // Check for visual damage effects
 
         if (weaponController.stats.speedModifier != null) {
             physicsController.setSpeedModifier(weaponController.stats.speedModifier);
         }
 
-        // remote players falling (iterate without allocations)
+        // Remote players falling (simplified gravity application)
         const GRAVITY = 9.8;
-        for (const k in window.remotePlayers) {
-            const rp = window.remotePlayers[k];
+        Object.values(window.remotePlayers).forEach(rp => {
             const g = rp.group;
-            if (g && g.userData && g.userData.isFalling) {
+            if (g?.userData.isFalling) {
                 g.userData.velocityY = (g.userData.velocityY || 0) + GRAVITY * delta;
                 g.position.y -= g.userData.velocityY * delta;
-                if (g.position.y < -20) {
+                if (g.position.y < -20) { // Off-map threshold
                     g.userData.isFalling = false;
                     g.userData.velocityY = 0;
-                    g.visible = false;
+                    g.visible = false; // Hide player once they fall off the map
                 }
             }
-        }
+        });
 
-        // sky/starfield/worldFog rotations using seconds (consistent across frame-rate)
-        if (skyMesh) skyMesh.rotation.x += 0.0001 * deltaMs; // small tweak: kept ms multiplier for very slow rotation
+        // Sky, Fog, and Starfield rotation (time-dependent)
+        // Ensure skyMesh, starField, worldFog are defined or set to null if not used
+        if (skyMesh) skyMesh.rotation.x += 0.0001 * deltaMs; // Use deltaMs for consistent speed, or calculate a rate per second
         if (starField) starField.rotation.x += 0.00008 * deltaMs;
-        if (window.worldFog) {
+
+        if (window.worldFog) { // Use window.worldFog as that's what you assign in createFogDots
             window.worldFog.rotation.y += delta * 0.005;
             const nowMs = performance.now();
-            // small position drift (cheap)
             window.worldFog.position.x += Math.sin(nowMs * 0.0001) * delta * 2;
             window.worldFog.position.z += Math.cos(nowMs * 0.0001) * delta * 2;
         }
 
-        // --- Physics & Input Update (core: keep at full frequency) ---
+        
+        // Physics & Input Update
         const physState = physicsController.update(delta, inputState, window.collidables);
 
-        // --- Weapon update (core) ---
+        // Weapon Update
         weaponController.update(
             inputState,
             delta, {
@@ -2043,77 +2263,80 @@ export function animate(timestamp) {
             }
         );
 
-        // --- Active tracers (iterate backwards; already efficient) ---
+        // Active Tracers Update
         for (let i = activeTracers.length - 1; i >= 0; i--) {
             const tracer = activeTracers[i];
-            tracer.update(delta);
+            tracer.update(delta); // Pass the calculated delta (in seconds)
+
             if (tracer.remove) {
                 tracer.dispose();
                 activeTracers.splice(i, 1);
             }
         }
 
-        // --- Network: throttle sendPlayerUpdate to reduce intensive I/O ---
-        const now = performance.now();
-        if (now - animate._lastSend >= animate._SEND_INTERVAL) {
-            if (dbRefs && dbRefs.playersRef && localPlayerId) {
-                sendPlayerUpdate({
-                    x: physState.x,
-                    y: physState.y,
-                    z: physState.z,
-                    rotY: round2(physState.rotY),
-                    rotX: round2(window.camera.rotation.x),
-                    rotZ: round2(window.camera.rotation.z),
-                    weapon: window.localPlayer.weapon,
-                    knifeSwing: window.localPlayer.knifeSwing || false,
-                    knifeHeavy: window.localPlayer.knifeHeavy || false
-                });
-                // clear local transient flags
-                window.localPlayer.knifeSwing = false;
-                window.localPlayer.knifeHeavy = false;
-            } else {
-                // only warn occasionally to avoid spamming console
-                if (!animate._warnedAboutDbRefs) {
-                    console.warn("Skipping sendPlayerUpdate: dbRefs, dbRefs.playersRef or localPlayerId is null.");
-                    animate._warnedAboutDbRefs = true;
-                }
-            }
-            animate._lastSend = now;
+        // Network Sync - Send local player's updated state
+        // dbRefs is now global, so just check it.
+        if (dbRefs && dbRefs.playersRef && localPlayerId) {
+            sendPlayerUpdate({
+                x: physState.x,
+                y: physState.y,
+                z: physState.z,
+                rotY: round2(physState.rotY),
+                rotX: round2(window.camera.rotation.x),
+                rotZ: round2(window.camera.rotation.z),
+                weapon: window.localPlayer.weapon,
+                knifeSwing: window.localPlayer.knifeSwing || false,
+                knifeHeavy: window.localPlayer.knifeHeavy || false
+            });
+            // Reset knife swing flags after sending
+            window.localPlayer.knifeSwing = false;
+            window.localPlayer.knifeHeavy = false;
+        } else {
+            console.warn("Skipping sendPlayerUpdate: dbRefs, dbRefs.playersRef or localPlayerId is null.");
         }
 
-        // --- Remote players visual update: throttle to ~30Hz to reduce per-frame cost ---
-        if (now - animate._lastRemoteUpdate >= animate._REMOTE_UPDATE_INTERVAL) {
-            for (const id in window.remotePlayers) {
-                const rp = window.remotePlayers[id];
-                if (rp && rp.data) updateRemotePlayer(rp.data);
-            }
-            animate._lastRemoteUpdate = now;
-        }
 
-        // --- Weapon switching handling (cheap) ---
+        // Remote avatars update: This loop is for local visual updates/interpolation
+        // based on data already received and processed by network.js.
+        for (const id in window.remotePlayers) {
+            const rp = window.remotePlayers[id];
+            if (rp.data) updateRemotePlayer(rp.data); // Assuming rp.data is the latest received network state
+        }
+        // Removed handleWeaponSwitch() call here as the logic is now inline below
+
+        // Weapon Switching
         if (inputState.weaponSwitch) {
             const oldW = window.localPlayer.weapon;
             weaponAmmo[oldW] = weaponController.getCurrentAmmo();
             const newW = inputState.weaponSwitch;
             window.localPlayer.weapon = newW;
 
+            // Update Firebase if dbRefs and localPlayerId are available
             if (dbRefs && dbRefs.playersRef && localPlayerId) {
                 try {
-                    dbRefs.playersRef.child(localPlayerId).update({ weapon: newW });
+                    dbRefs.playersRef.child(localPlayerId).update({
+                        weapon: newW
+                    });
                 } catch (error) {
                     console.error("Failed to update local player weapon in Firebase:", error);
                 }
+            } else {
+                console.warn("Cannot update local player weapon in Firebase: dbRefs or localPlayerId is null.");
             }
+
             weaponController.equipWeapon(newW);
             weaponController.ammoInMagazine = weaponAmmo[newW] ?? weaponController.stats.magazineSize;
+            // ***************************************************************
+            // FIX: Pass the 'newW' (weapon key) to updateInventory
             updateInventory(newW);
+            // ***************************************************************
             updateAmmoDisplay(weaponController.ammoInMagazine, weaponController.stats.magazineSize);
-            inputState.weaponSwitch = null;
-            if (newW === "knife") activeRecoils.length = 0;
+            inputState.weaponSwitch = null; // Reset input state
+            if (newW === "knife") activeRecoils.length = 0; // Clear recoil for knife
         }
 
-        // --- Mouse look and recoil (use cached base sensitivity) ---
-        const baseSens = animate._baseSens;
+        // Mouse Look + Recoil
+        const baseSens = parseFloat(localStorage.getItem("sensitivity") || "5.00");
         const aimMul = inputState.aim ? (window.localPlayer.weapon === "marshal" ? 0.15 : 0.5) : 1;
         const finalSens = baseSens * aimMul;
 
@@ -2121,55 +2344,46 @@ export function animate(timestamp) {
         let newPitch = window.camera.rotation.x - inputState.mouseDY * finalSens * 0.002;
         window.camera.rotation.x = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, newPitch));
 
-        // recoil processing (already O(n) on small array)
+        // Recoil processing: apply recoil based on active recoil objects
         {
-            const tNow = performance.now() / 1000;
+            const now = performance.now() / 1000;
             let totalOffset = 0;
             for (let i = activeRecoils.length - 1; i >= 0; i--) {
                 const r = activeRecoils[i];
-                const t = (tNow - r.start) / r.duration;
+                const t = (now - r.start) / r.duration; // Normalized time (0 to 1)
                 if (t >= 1) {
-                    activeRecoils.splice(i, 1);
+                    activeRecoils.splice(i, 1); // Recoil effect finished
                     continue;
                 }
-                totalOffset += r.angle * (1 - t);
+                totalOffset += r.angle * (1 - t); // Linear decay for simplicity
             }
             window.camera.rotation.x += totalOffset;
         }
 
-        // --- Rebuild collidables less frequently (expensive traversal) ---
-        if (window.mapReady && (now - animate._lastCollidablesRebuild >= animate._COLLIDABLES_REBUILD_INTERVAL)) {
-            const newCollidables = [];
-            // include environment
-            if (window.envMeshes && window.envMeshes.length) {
-                for (let i = 0; i < window.envMeshes.length; i++) newCollidables.push(window.envMeshes[i]);
-            }
-            // include visible remote player body parts
+        // Rebuild collidables: includes environment meshes and visible remote player body parts
+        if (window.mapReady) {
+            window.collidables = [...window.envMeshes]; // Start with environment
             for (const otherId in window.remotePlayers) {
-                if (otherId === window.localPlayer.id) continue;
+                if (otherId === window.localPlayer.id) continue; // Don't collide with self
                 const other = window.remotePlayers[otherId];
                 if (other.group?.visible) {
                     other.group.traverse(child => {
                         if (child.isMesh && child.userData?.isPlayerBodyPart) {
-                            newCollidables.push(child);
+                            window.collidables.push(child);
                         }
                     });
                 }
             }
-            window.collidables = newCollidables;
-            animate._lastCollidablesRebuild = now;
         }
 
-        // --- final render ---
+        // Render the scene
         composer.render();
-
     } catch (err) {
         console.error("Error in animate:", err);
     } finally {
-        postFrameCleanup();
+        postFrameCleanup(); // Ensure cleanup runs even if an error occurs
     }
 }
-
 
 
 function resetWeaponPose(weaponKey, mesh) {
@@ -2757,11 +2971,6 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
-
-
-
-
-
 
 
 
