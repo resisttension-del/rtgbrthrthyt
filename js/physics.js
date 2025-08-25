@@ -1,5 +1,3 @@
-
-
 import * as THREE from "https://cdnjs.cloudflare.com/ajax/libs/three.js/0.152.0/three.module.js";
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
 import { sendSoundEvent } from "./network.js"; // Assuming this path is correct
@@ -163,55 +161,62 @@ export class PhysicsController {
         // —— NEW: stuck-in-air detection fields —— 
         this._lastY = null;
         this._yStuckTimer = 0;
+
+        // BVH / collider readiness & warnings
+        this.worldBVH = null;
+        this.colliderReady = false;
+        this._missingColliderWarn = false;
     }
 
     /**
      * Sets the MeshBVH collider for collision detection. This is called by map.js.
      * @param {THREE.Mesh} colliderMesh The mesh with the computed MeshBVH boundsTree.
      */
-setCollider(colliderMesh) {
-  // Defensive: handle null/undefined input
-  if (!colliderMesh) {
-    console.warn('setCollider called with null/undefined. Clearing collider references.');
-    this.collider = null;
-    this.worldBVH = null;
-    this.colliderReady = false;
-    return;
-  }
+    setCollider(colliderMesh) {
+      // Defensive: handle null/undefined input
+      if (!colliderMesh) {
+        console.warn('setCollider called with null/undefined. Clearing collider references.');
+        this.collider = null;
+        this.worldBVH = null;
+        this.colliderReady = false;
+        this._missingColliderWarn = true;
+        return;
+      }
 
-  this.collider = colliderMesh;
+      this.collider = colliderMesh;
 
-  // Ensure the mesh world matrix is up-to-date before reading matrixWorld.
-  // Force an update for safety (true -> update children too).
-  try {
-    this.collider.updateMatrixWorld(true);
-  } catch (e) {
-    console.warn('Error updating collider.matrixWorld (continuing):', e);
-  }
+      // Ensure the mesh world matrix is up-to-date before reading matrixWorld.
+      // Force an update for safety (true -> update children too).
+      try {
+        this.collider.updateMatrixWorld(true);
+      } catch (e) {
+        console.warn('Error updating collider.matrixWorld (continuing):', e);
+      }
 
-  // Safely compute inverse of the collider's matrixWorld (may throw if not invertible)
-  try {
-    // make sure the matrix exists
-    if (!this.collider.matrixWorld) this.collider.updateMatrixWorld(true);
-    this.colliderMatrixWorldInverse.copy(this.collider.matrixWorld).invert();
-  } catch (e) {
-    console.warn('Failed to invert collider.matrixWorld — colliderMatrixWorldInverse not set.', e);
-    // keep a fallback identity so code that reads this won't crash
-    this.colliderMatrixWorldInverse.identity();
-  }
+      // Safely compute inverse of the collider's matrixWorld (may throw if not invertible)
+      try {
+        // make sure the matrix exists
+        if (!this.collider.matrixWorld) this.collider.updateMatrixWorld(true);
+        this.colliderMatrixWorldInverse.copy(this.collider.matrixWorld).invert();
+      } catch (e) {
+        console.warn('Failed to invert collider.matrixWorld — colliderMatrixWorldInverse not set.', e);
+        // keep a fallback identity so code that reads this won't crash
+        this.colliderMatrixWorldInverse.identity();
+      }
 
-  // Cache the BVH if available
-  if (this.collider.geometry && this.collider.geometry.boundsTree) {
-    this.worldBVH = this.collider.geometry.boundsTree;
-  } else {
-    this.worldBVH = null;
-    console.warn('setCollider: mesh.geometry.boundsTree is not present yet. Make sure BVH is computed before calling setCollider().');
-  }
+      // Cache the BVH if available
+      if (this.collider.geometry && this.collider.geometry.boundsTree) {
+        this.worldBVH = this.collider.geometry.boundsTree;
+      } else {
+        this.worldBVH = null;
+        console.warn('setCollider: mesh.geometry.boundsTree is not present yet. Make sure BVH is computed before calling setCollider().');
+      }
 
-  // mark readiness
-  this.colliderReady = !!(this.collider && this.worldBVH);
-  console.log('PhysicsController: collider set. colliderReady =', this.colliderReady);
-}
+      // mark readiness
+      this.colliderReady = !!(this.collider && this.worldBVH);
+      this._missingColliderWarn = !this.colliderReady;
+      console.log('PhysicsController: collider set. colliderReady =', this.colliderReady);
+    }
 
 
     /**
@@ -246,112 +251,130 @@ setCollider(colliderMesh) {
     }
 
     /**
+     * Safe wrapper around Raycaster.intersectObject to avoid passing null to Three.js.
+     * Returns an empty array if object is null or if Three.js throws internally.
+     * @param {THREE.Raycaster} raycaster
+     * @param {THREE.Object3D|null} object3d
+     * @param {boolean} recursive
+     * @returns {Array} intersections
+     */
+    _safeIntersectObject(raycaster, object3d, recursive = false) {
+      if (!object3d) return [];
+      try {
+        return raycaster.intersectObject(object3d, recursive);
+      } catch (err) {
+        console.warn('safeIntersectObject: raycast failed', err);
+        return [];
+      }
+    }
+
+    /**
      * Handles player input and updates player velocity.
      * @param {number} deltaTime The time elapsed since the last frame.
      * @param {object} input An object containing input states (e.g., forward, backward, jump, crouch, slow, aim).
      */
-_applyControls(deltaTime, input) {
-    // Calculate desired movement speed based on MAX_SPEED and modifiers
-    const baseSpeed = MAX_SPEED;
-    const currentMoveSpeed = baseSpeed * this.speedModifier * (input.crouch ? 0.3 : input.slow ? 0.5 : this.isAim ? 0.65 : 1);
+    _applyControls(deltaTime, input) {
+        // Calculate desired movement speed based on MAX_SPEED and modifiers
+        const baseSpeed = MAX_SPEED;
+        const currentMoveSpeed = baseSpeed * this.speedModifier * (input.crouch ? 0.3 : input.slow ? 0.5 : this.isAim ? 0.65 : 1);
 
-    const moveDirection = new THREE.Vector3();
-    if (input.forward) {
-        moveDirection.add(this.getForwardVector());
-    }
-    if (input.backward) {
-        moveDirection.add(this.getForwardVector().multiplyScalar(-1));
-    }
-    if (input.left) {
-        moveDirection.add(this.getSideVector().multiplyScalar(-1));
-    }
-    if (input.right) {
-        moveDirection.add(this.getSideVector());
-    }
+        const moveDirection = new THREE.Vector3();
+        if (input.forward) {
+            moveDirection.add(this.getForwardVector());
+        }
+        if (input.backward) {
+            moveDirection.add(this.getForwardVector().multiplyScalar(-1));
+        }
+        if (input.left) {
+            moveDirection.add(this.getSideVector().multiplyScalar(-1));
+        }
+        if (input.right) {
+            moveDirection.add(this.getSideVector());
+        }
 
-    // Normalize the movement direction if there's input
-    if (moveDirection.lengthSq() > 0) {
-        moveDirection.normalize();
-    }
+        // Normalize the movement direction if there's input
+        if (moveDirection.lengthSq() > 0) {
+            moveDirection.normalize();
+        }
 
-    // Calculate the target horizontal velocity
-    const targetVelocityX = moveDirection.x * currentMoveSpeed;
-    const targetVelocityZ = moveDirection.z * currentMoveSpeed;
+        // Calculate the target horizontal velocity
+        const targetVelocityX = moveDirection.x * currentMoveSpeed;
+        const targetVelocityZ = moveDirection.z * currentMoveSpeed;
 
-    // Determine acceleration/deceleration rate based on grounded state and input
-    let accelRateX, accelRateZ;
+        // Determine acceleration/deceleration rate based on grounded state and input
+        let accelRateX, accelRateZ;
 
-    if (this.isGrounded) {
-        accelRateX = input.forward || input.backward || input.left || input.right ? PLAYER_ACCEL_GROUND : PLAYER_DECEL_GROUND;
-        accelRateZ = input.forward || input.backward || input.left || input.right ? PLAYER_ACCEL_GROUND : PLAYER_DECEL_GROUND;
-    } else {
-        accelRateX = input.forward || input.backward || input.left || input.right ? PLAYER_ACCEL_AIR : PLAYER_DECEL_AIR;
-        accelRateZ = input.forward || input.backward || input.left || input.right ? PLAYER_ACCEL_AIR : PLAYER_DECEL_AIR;
-    }
-
-    if (!this.isGrounded) {
-        this.input = input;
-        this._applyAirControl(deltaTime);
-    }
-
-    // Apply acceleration/deceleration to horizontal velocity components
-    this.playerVelocity.x = THREE.MathUtils.lerp(this.playerVelocity.x, targetVelocityX, accelRateX * deltaTime);
-    this.playerVelocity.z = THREE.MathUtils.lerp(this.playerVelocity.z, targetVelocityZ, accelRateZ * deltaTime);
-
-    // Handle jumping
-    if (this.isGrounded && input.jump) {
-        this.playerVelocity.y = JUMP_VELOCITY; // Apply upward jump velocity
-        this.isGrounded = false; // Player is no longer on the ground
-        this.jumpTriggered = true; // Set jump flag
-    }
-
-    // Crouching logic
-    const currentCrouchHeight = PLAYER_TOTAL_HEIGHT * CROUCH_HEIGHT_RATIO;
-    const standingHeight = PLAYER_TOTAL_HEIGHT;
-
-    // Determine target height based on input and ceiling check
-    if (input.crouch) {
-        this.isCrouching = true;
-        this.targetPlayerHeight = currentCrouchHeight;
-    } else {
-        // Player wants to uncrouch, but we must check for a ceiling
-        if (this._canUncrouch()) {
-            this.isCrouching = false;
-            this.targetPlayerHeight = standingHeight;
+        if (this.isGrounded) {
+            accelRateX = input.forward || input.backward || input.left || input.right ? PLAYER_ACCEL_GROUND : PLAYER_DECEL_GROUND;
+            accelRateZ = input.forward || input.backward || input.left || input.right ? PLAYER_ACCEL_GROUND : PLAYER_DECEL_GROUND;
         } else {
-            // If there's a ceiling, stay crouched
+            accelRateX = input.forward || input.backward || input.left || input.right ? PLAYER_ACCEL_AIR : PLAYER_DECEL_AIR;
+            accelRateZ = input.forward || input.backward || input.left || input.right ? PLAYER_ACCEL_AIR : PLAYER_DECEL_AIR;
+        }
+
+        if (!this.isGrounded) {
+            this.input = input;
+            this._applyAirControl(deltaTime);
+        }
+
+        // Apply acceleration/deceleration to horizontal velocity components
+        this.playerVelocity.x = THREE.MathUtils.lerp(this.playerVelocity.x, targetVelocityX, accelRateX * deltaTime);
+        this.playerVelocity.z = THREE.MathUtils.lerp(this.playerVelocity.z, targetVelocityZ, accelRateZ * deltaTime);
+
+        // Handle jumping
+        if (this.isGrounded && input.jump) {
+            this.playerVelocity.y = JUMP_VELOCITY; // Apply upward jump velocity
+            this.isGrounded = false; // Player is no longer on the ground
+            this.jumpTriggered = true; // Set jump flag
+        }
+
+        // Crouching logic
+        const currentCrouchHeight = PLAYER_TOTAL_HEIGHT * CROUCH_HEIGHT_RATIO;
+        const standingHeight = PLAYER_TOTAL_HEIGHT;
+
+        // Determine target height based on input and ceiling check
+        if (input.crouch) {
             this.isCrouching = true;
             this.targetPlayerHeight = currentCrouchHeight;
+        } else {
+            // Player wants to uncrouch, but we must check for a ceiling
+            if (this._canUncrouch()) {
+                this.isCrouching = false;
+                this.targetPlayerHeight = standingHeight;
+            } else {
+                // If there's a ceiling, stay crouched
+                this.isCrouching = true;
+                this.targetPlayerHeight = currentCrouchHeight;
+            }
         }
     }
-}
 
-_applyAirControl(dt) {
-  // 1) How much has the camera yaw changed this step?
-  let yawNow = this.camera.rotation.y;
-  let deltaYaw = yawNow - this._lastAirYaw;
+    _applyAirControl(dt) {
+      // 1) How much has the camera yaw changed this step?
+      let yawNow = this.camera.rotation.y;
+      let deltaYaw = yawNow - this._lastAirYaw;
 
-  // Normalize to [-π, +π]
-  deltaYaw = ((deltaYaw + Math.PI) % (2*Math.PI)) - Math.PI;
+      // Normalize to [-π, +π]
+      deltaYaw = ((deltaYaw + Math.PI) % (2*Math.PI)) - Math.PI;
 
-  // 2) Clamp by your max turn rate
-  const maxYaw = AIR_TURN_RATE * dt;       // radians allowed this frame
-  const appliedYaw = Math.sign(deltaYaw) * Math.min(Math.abs(deltaYaw), maxYaw);
-  if (appliedYaw === 0) return;            // no turning
+      // 2) Clamp by your max turn rate
+      const maxYaw = AIR_TURN_RATE * dt;       // radians allowed this frame
+      const appliedYaw = Math.sign(deltaYaw) * Math.min(Math.abs(deltaYaw), maxYaw);
+      if (appliedYaw === 0) return;            // no turning
 
-  // 3) Build a quaternion around world‑up
-  const q = new THREE.Quaternion().setFromAxisAngle(
-    new THREE.Vector3(0,1,0),
-    appliedYaw
-  );
+      // 3) Build a quaternion around world-up
+      const q = new THREE.Quaternion().setFromAxisAngle(
+        new THREE.Vector3(0,1,0),
+        appliedYaw
+      );
 
-  // 4) Rotate _only_ the horizontal part of your velocity
-  const v = this.playerVelocity;
-  const horizontal = new THREE.Vector3(v.x, 0, v.z).applyQuaternion(q);
-  v.x = horizontal.x;
-  v.z = horizontal.z;
-  // leave v.y untouched
-}
+      // 4) Rotate _only_ the horizontal part of your velocity
+      const v = this.playerVelocity;
+      const horizontal = new THREE.Vector3(v.x, 0, v.z).applyQuaternion(q);
+      v.x = horizontal.x;
+      v.z = horizontal.z;
+      // leave v.y untouched
+    }
 
     /**
      * Checks if the player can stand up without hitting a ceiling.
@@ -461,7 +484,7 @@ _applyAirControl(dt) {
 }
 
 _stepUpIfPossible() {
-    if (!this.collider) return;
+    if (!this.colliderReady) return;
     if (this.playerVelocity.y > 0.1) return;
 
     // 1) Find true ground Y under the player
@@ -472,7 +495,7 @@ _stepUpIfPossible() {
         0,
         playerHeight + 0.2
     );
-    const groundHits = downRay.intersectObject(this.collider, true);
+    const groundHits = this._safeIntersectObject(downRay, this.collider, true);
     const actualGroundY = groundHits.length
         ? groundHits[0].point.y
         : this.player.position.y - playerHeight;
@@ -493,7 +516,7 @@ _stepUpIfPossible() {
             0,
             STEP_HEIGHT + 0.3
         );
-        const stepHits = stepRay.intersectObject(this.collider, true);
+        const stepHits = this._safeIntersectObject(stepRay, this.collider, true);
 
         if (stepHits.length) {
             const stepTopY = stepHits[0].point.y;
@@ -511,7 +534,7 @@ _stepUpIfPossible() {
                     0,
                     0.1
                 );
-                if (headCheck.intersectObject(this.collider, true).length === 0) {
+                if (this._safeIntersectObject(headCheck, this.collider, true).length === 0) {
                     // Snap up onto the step
                     this.player.position.y = stepTopY + playerHeight - 0.51;
                     this.playerVelocity.y = 0;
@@ -603,7 +626,10 @@ _updatePlayerPhysics(delta) {
             }
         });
     } else {
-        console.warn("Collider or boundsTree not available—skipping collision.");
+        if (!this._missingColliderWarn) {
+          console.warn("Collider or boundsTree not available—skipping collision.");
+          this._missingColliderWarn = true;
+        }
     }
 
     // Compute world-space collision offset
@@ -623,7 +649,7 @@ _updatePlayerPhysics(delta) {
         stepCheckOrigin.y += STEP_HEIGHT + 0.01; // Check from slightly above the step height
 
         const raycaster = new THREE.Raycaster(stepCheckOrigin, new THREE.Vector3(0, -1, 0), 0, STEP_HEIGHT + 0.02); // Ray pointing downwards
-        const intersects = raycaster.intersectObject(this.collider, true);
+        const intersects = this._safeIntersectObject(raycaster, this.collider, true);
 
         if (intersects.length > 0) {
             const stepHit = intersects[0];
@@ -639,7 +665,7 @@ _updatePlayerPhysics(delta) {
                 const requiredClearance = currentStandingHeight; // Need enough space for the player to stand
 
                 const wallRaycaster = new THREE.Raycaster(wallCheckOrigin, new THREE.Vector3(0, 1, 0), 0, requiredClearance);
-                const wallIntersects = wallRaycaster.intersectObject(this.collider, true);
+                const wallIntersects = this._safeIntersectObject(wallRaycaster, this.collider, true);
 
                 let wallIsClear = true;
                 if (wallIntersects.length > 0) {
@@ -831,89 +857,91 @@ _updatePlayerPhysics(delta) {
      * @param {object} input An object containing input states.
      * @returns {object} An object containing current player state information.
      */
-update(deltaTime, input) {
-    // 1) Cap deltaTime and accumulate for fixed-step physics
-    deltaTime = Math.min(0.1, deltaTime);
-    this.accumulator += deltaTime;
+    update(deltaTime, input) {
+        // 1) Cap deltaTime and accumulate for fixed-step physics
+        deltaTime = Math.min(0.1, deltaTime);
+        this.accumulator += deltaTime;
 
-    // 2) Store previous grounded state
-    this.prevPlayerIsOnGround = this.isGrounded;
+        // 2) Store previous grounded state
+        this.prevPlayerIsOnGround = this.isGrounded;
 
-    // 3) Run fixed‐step physics sub‐iterations
-    let stepsTaken = 0;
-    while (this.accumulator >= FIXED_TIME_STEP && stepsTaken < MAX_PHYSICS_STEPS) {
-        this._applyControls(FIXED_TIME_STEP, input);
-        this._updatePlayerPhysics(FIXED_TIME_STEP);
-        this.accumulator -= FIXED_TIME_STEP;
-        stepsTaken++;
-    }
-
-    // 4) Handle footsteps, landing sound, model rotation, out‐of‐bounds teleport
-    const currentSpeedXZ = Math.hypot(this.playerVelocity.x, this.playerVelocity.z);
-    this._handleFootsteps(currentSpeedXZ, deltaTime, input);
-    this._handleLandingSound();
-    this._rotatePlayerModel();
-    this.teleportIfOob();
-
-    // —— NEW: stuck‐in‐air detection + snap to ground ——
-    // Initialize _lastY on first invocation
-    if (this._lastY === null) {
-        this._lastY = this.player.position.y;
-    }
-
-    if (!this.isGrounded) {
-        const currentY = this.player.position.y;
-        const dy = Math.abs(currentY - this._lastY);
-
-        if (dy > 0.01) {
-            // Significant vertical movement → reset the timer
-            this._lastY = currentY;
-            this._yStuckTimer = 0;
-        } else {
-            // No vertical movement → accumulate stuck time
-            this._yStuckTimer += deltaTime;
-            if (this._yStuckTimer >= 1.0) {
-                // 1s stuck in air: clear velocity
-                this.playerVelocity.set(0, 0, 0);
-
-                // Raycast downward to snap to nearest ground
-                const downOrigin = this.player.position.clone();
-                const downDir = new THREE.Vector3(0, -1, 0);
-                // Cast down up to (capsule height + 1)
-                const maxDrop = (PLAYER_TOTAL_HEIGHT * this.player.scale.y) + 1;
-                const ray = new THREE.Raycaster(downOrigin, downDir, 0, maxDrop);
-                const hits = ray.intersectObject(this.collider, true);
-                if (hits.length > 0) {
-                    const hitY = hits[0].point.y;
-                    const scale = this.player.scale.y;
-                    // bottom offset = (segment length + radius) * scale
-                    const bottomOffset = (PLAYER_CAPSULE_SEGMENT_LENGTH + PLAYER_CAPSULE_RADIUS) * scale;
-                    // Position.y is top of capsule → set so bottom sits at hitY
-                    this.player.position.y = hitY + bottomOffset;
-                }
-
-                // Reset stuck detection
-                this._lastY = this.player.position.y;
-                this._yStuckTimer = 0;
-            }
+        // 3) Run fixed‐step physics sub‐iterations
+        let stepsTaken = 0;
+        while (this.accumulator >= FIXED_TIME_STEP && stepsTaken < MAX_PHYSICS_STEPS) {
+            this._applyControls(FIXED_TIME_STEP, input);
+            this._updatePlayerPhysics(FIXED_TIME_STEP);
+            this.accumulator -= FIXED_TIME_STEP;
+            stepsTaken++;
         }
-    } else {
-        // On ground → reset stuck detection immediately
-        this._lastY = this.player.position.y;
-        this._yStuckTimer = 0;
-    }
 
-    // 5) Return the player’s current state
-    return {
-      x: round2(this.player.position.x),
-      y: round2(this.player.position.y),
-      z: round2(this.player.position.z),
-      rotY: this.camera.rotation.y,
-      isGrounded: this.isGrounded,
-      velocity: this.playerVelocity.clone(),
-      velocityY: this.playerVelocity.y
-    };
-}
+        // 4) Handle footsteps, landing sound, model rotation, out‐of‐bounds teleport
+        const currentSpeedXZ = Math.hypot(this.playerVelocity.x, this.playerVelocity.z);
+        this._handleFootsteps(currentSpeedXZ, deltaTime, input);
+        this._handleLandingSound();
+        this._rotatePlayerModel();
+        this.teleportIfOob();
+
+        // —— NEW: stuck‐in‐air detection + snap to ground ——
+        // Initialize _lastY on first invocation
+        if (this._lastY === null) {
+            this._lastY = this.player.position.y;
+        }
+
+        if (!this.isGrounded) {
+            const currentY = this.player.position.y;
+            const dy = Math.abs(currentY - this._lastY);
+
+            if (dy > 0.01) {
+                // Significant vertical movement → reset the timer
+                this._lastY = currentY;
+                this._yStuckTimer = 0;
+            } else {
+                // No vertical movement → accumulate stuck time
+                this._yStuckTimer += deltaTime;
+                if (this._yStuckTimer >= 1.0) {
+                    // 1s stuck in air: clear velocity
+                    this.playerVelocity.set(0, 0, 0);
+
+                    // Raycast downward to snap to nearest ground
+                    if (this.colliderReady) {
+                      const downOrigin = this.player.position.clone();
+                      const downDir = new THREE.Vector3(0, -1, 0);
+                      // Cast down up to (capsule height + 1)
+                      const maxDrop = (PLAYER_TOTAL_HEIGHT * this.player.scale.y) + 1;
+                      const ray = new THREE.Raycaster(downOrigin, downDir, 0, maxDrop);
+                      const hits = this._safeIntersectObject(ray, this.collider, true);
+                      if (hits.length > 0) {
+                          const hitY = hits[0].point.y;
+                          const scale = this.player.scale.y;
+                          // bottom offset = (segment length + radius) * scale
+                          const bottomOffset = (PLAYER_CAPSULE_SEGMENT_LENGTH + PLAYER_CAPSULE_RADIUS) * scale;
+                          // Position.y is top of capsule → set so bottom sits at hitY
+                          this.player.position.y = hitY + bottomOffset;
+                      }
+                    }
+
+                    // Reset stuck detection
+                    this._lastY = this.player.position.y;
+                    this._yStuckTimer = 0;
+                }
+            }
+        } else {
+            // On ground → reset stuck detection immediately
+            this._lastY = this.player.position.y;
+            this._yStuckTimer = 0;
+        }
+
+        // 5) Return the player’s current state
+        return {
+          x: round2(this.player.position.x),
+          y: round2(this.player.position.y),
+          z: round2(this.player.position.z),
+          rotY: this.camera.rotation.y,
+          isGrounded: this.isGrounded,
+          velocity: this.playerVelocity.clone(),
+          velocityY: this.playerVelocity.y
+        };
+    }
 
     _pos() {
       const p = this.player.position;
