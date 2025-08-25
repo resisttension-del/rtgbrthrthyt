@@ -169,11 +169,50 @@ export class PhysicsController {
      * Sets the MeshBVH collider for collision detection. This is called by map.js.
      * @param {THREE.Mesh} colliderMesh The mesh with the computed MeshBVH boundsTree.
      */
-    setCollider(colliderMesh) {
-        this.collider = colliderMesh;
-        this.colliderMatrixWorldInverse.copy(this.collider.matrixWorld).invert(); // Cache inverse matrix
-        console.log("MeshBVH collider set in PhysicsController.");
-    }
+setCollider(colliderMesh) {
+  // Defensive: handle null/undefined input
+  if (!colliderMesh) {
+    console.warn('setCollider called with null/undefined. Clearing collider references.');
+    this.collider = null;
+    this.worldBVH = null;
+    this.colliderReady = false;
+    return;
+  }
+
+  this.collider = colliderMesh;
+
+  // Ensure the mesh world matrix is up-to-date before reading matrixWorld.
+  // Force an update for safety (true -> update children too).
+  try {
+    this.collider.updateMatrixWorld(true);
+  } catch (e) {
+    console.warn('Error updating collider.matrixWorld (continuing):', e);
+  }
+
+  // Safely compute inverse of the collider's matrixWorld (may throw if not invertible)
+  try {
+    // make sure the matrix exists
+    if (!this.collider.matrixWorld) this.collider.updateMatrixWorld(true);
+    this.colliderMatrixWorldInverse.copy(this.collider.matrixWorld).invert();
+  } catch (e) {
+    console.warn('Failed to invert collider.matrixWorld — colliderMatrixWorldInverse not set.', e);
+    // keep a fallback identity so code that reads this won't crash
+    this.colliderMatrixWorldInverse.identity();
+  }
+
+  // Cache the BVH if available
+  if (this.collider.geometry && this.collider.geometry.boundsTree) {
+    this.worldBVH = this.collider.geometry.boundsTree;
+  } else {
+    this.worldBVH = null;
+    console.warn('setCollider: mesh.geometry.boundsTree is not present yet. Make sure BVH is computed before calling setCollider().');
+  }
+
+  // mark readiness
+  this.colliderReady = !!(this.collider && this.worldBVH);
+  console.log('PhysicsController: collider set. colliderReady =', this.colliderReady);
+}
+
 
     /**
      * Sets the speed modifier for player movement.
@@ -487,6 +526,7 @@ _stepUpIfPossible() {
 
     
 _updatePlayerPhysics(delta) {
+  if (!this.colliderReady) return;
     this._stepUpIfPossible();
     // Store previous grounded state and reset for this frame
     const wasGrounded = this.isGrounded;
