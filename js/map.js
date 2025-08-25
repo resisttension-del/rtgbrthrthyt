@@ -12,7 +12,7 @@ import {
     StaticGeometryGenerator
 } from 'https://cdn.jsdelivr.net/npm/three-mesh-bvh@0.9.1/+esm';
 
-// ─── BVH Setup ────────────────────────────────────────────────────────────
+// ─── BVH Setup ──────f──────────────────────────────────────────────────────
 // Attach BVH helpers (must run before any computeBoundsTree calls)
 THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
 THREE.BufferGeometry.prototype.disposeBoundsTree = disposeBoundsTree;
