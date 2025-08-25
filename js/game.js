@@ -523,9 +523,9 @@ export async function startGame(username, mapName, initialDetailsEnabled, ffaEna
     initBulletHoles();
     initializeAudioManager(window.camera, scene);
     startSoundListener();
-    enableShadows();
-    createFog();
-    createFogDots();
+  //  enableShadows();
+ //   createFog();
+ //   createFogDots();
     
     const initialBodyColor = Math.floor(Math.random() * 0xffffff);
 
@@ -2758,6 +2758,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
