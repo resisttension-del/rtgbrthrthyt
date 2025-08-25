@@ -1987,7 +1987,6 @@ export function animate(timestamp) {
             if (animate._wasDead) {
                 if (dom.fadeOverlay) {
                     // assume hideFadeOverlay handles pointerEvents and opacity
-                    hideFadeOverlay();
                 }
                 if (dom.respawnOverlay) hideRespawn();
                 animate._wasDead = false;
@@ -2758,6 +2757,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
