@@ -517,6 +517,7 @@ equipWeapon(weaponKey) {
         // 7) Do animation‑in
         this.viewModel.position.copy(this.offPos);
         this.viewModel.rotation.copy(this.readyRot);
+        this.viewModel.renderOrder = 9999;    
         this.camera.add(this.viewModel);
         this.state.pulling = true;
         this.state.pullStart = performance.now() / 1000;
