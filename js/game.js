@@ -2127,131 +2127,139 @@ function round2(n) {
 
 
 export function animate(timestamp) {
-    // Schedule the next frame *first*. This ensures the loop continues
-    // even if an error occurs later in this frame.
+    // schedule next frame first (keeps loop alive even if an exception occurs)
     requestAnimationFrame(animate);
 
- 
-    // --- Disconnection/Pause Logic ---
-    // If localPlayerId is null, it means the local player has disconnected.
-    // The game state should already be paused and UI updated by the handler
-    // that sets localPlayerId to null. This function simply stops further animation logic.
-    if (localPlayerId === null || window.isGamePaused) {
-        // console.log("Animation loop paused or stopped due to local player disconnection."); // Only for debugging
-        return;
-    }
+    // --- quick guards ---
+    if (localPlayerId === null || window.isGamePaused) return;
 
-    // --- Frame Throttling (60fps) ---
-    const FRAME_INTERVAL = 1000 / 60; // ≈16.67ms
-    if (!animate.lastTime) {
-        animate.lastTime = timestamp; // Initialize for the first frame
-    }
-    const deltaMs = timestamp - animate.lastTime;
-
-    if (deltaMs < FRAME_INTERVAL) {
-        return; // Too early, skip this frame
-    }
-    // Carry over any "extra" time for smoother timing
+    // --- frame throttling (aim for 60fps) ---
+    const FRAME_INTERVAL = 1000 / 60; // ms
+    if (!animate.lastTime) animate.lastTime = timestamp;
+    let deltaMs = timestamp - animate.lastTime;
+    if (deltaMs < FRAME_INTERVAL) return;
+    // carry over remainder for stable timesteps
     animate.lastTime = timestamp - (deltaMs % FRAME_INTERVAL);
+    const delta = deltaMs / 1000; // seconds
 
-    // Convert to seconds for game logic
-    const delta = deltaMs / 1000;
+    // --- one-time initialization of cached stuff & intervals ---
+    if (!animate._init) {
+        animate._init = true;
 
-    // --- Pre-animation checks ---
-    if (!physicsController || !weaponController) {
-        console.warn("Skipping animate(): controllers not yet initialized");
-        postFrameCleanup(); // Clean up even if controllers aren't ready
-        return;
+        // intervals (ms)
+        animate._SEND_INTERVAL = 100; // send player update at 10Hz (tweakable)
+        animate._COLLIDABLES_REBUILD_INTERVAL = 250; // rebuild collidables every 250ms
+        animate._REMOTE_UPDATE_INTERVAL = 33; // ~30Hz for remote interpolation/visuals
+
+        // timers / trackers
+        animate._lastSend = 0;
+        animate._lastCollidablesRebuild = 0;
+        animate._lastRemoteUpdate = 0;
+
+        // cache DOMrefs (avoid getElementById per-frame)
+        animate._dom = {
+            crosshair: document.getElementById("crosshair"),
+            fadeOverlay: typeof fadeOverlay !== "undefined" ? fadeOverlay : null,
+            respawnOverlay: typeof respawnOverlay !== "undefined" ? respawnOverlay : null
+        };
+
+        // sensitivity cache + storage listener to update when user changes it
+        const readSens = () => parseFloat(localStorage.getItem("sensitivity") || "5.00");
+        animate._baseSens = readSens();
+        window.addEventListener("storage", (e) => {
+            if (e.key === "sensitivity") animate._baseSens = readSens();
+        });
+
+        // death state tracker (so we only do death setup once)
+        animate._wasDead = false;
     }
-    if (!window.mapReady) {
-        // console.warn("Skipping animate(): map not ready."); // Can be noisy
-        postFrameCleanup();
-        return;
-    }
-    if (!window.localPlayer) {
-        console.warn("Skipping animate(): window.localPlayer is not initialized.");
+
+    // --- basic readiness checks (cheap) ---
+    if (!physicsController || !weaponController || !window.mapReady || !window.localPlayer) {
+        // still run minimal cleanup if you need to
         postFrameCleanup();
         return;
     }
 
     try {
-        // --- Death Screen Logic ---
+        const dom = animate._dom;
+
+        // --- Death state handling: run transition logic only when state changes ---
         if (window.localPlayer.isDead) {
-            const cross = document.getElementById("crosshair");
-            if (cross) cross.style.display = "none";
+            if (!animate._wasDead) {
+                // first frame of death: perform the one-time things
+                if (dom.crosshair) dom.crosshair.style.display = "none";
 
-            // Ensure death-related sounds are playing and others are paused
-            if (windSound && !windSound.paused) windSound.pause();
-            if (forestNoise && !forestNoise.paused) forestNoise.pause();
-            if (dessertWindSound && !dessertWindSound.paused) dessertWindSound.pause();
-            if (deathTheme && deathTheme.paused) {
-                deathTheme.currentTime = 0;
-                deathTheme.play().catch(e => console.error("Error playing death theme:", e));
+                if (windSound && !windSound.paused) windSound.pause();
+                if (forestNoise && !forestNoise.paused) forestNoise.pause();
+                if (dessertWindSound && !dessertWindSound.paused) dessertWindSound.pause();
+                if (deathTheme && deathTheme.paused) {
+                    deathTheme.currentTime = 0;
+                    deathTheme.play().catch(e => console.error("Error playing death theme:", e));
+                }
+
+                if (dom.fadeOverlay) {
+                    dom.fadeOverlay.style.pointerEvents = "auto";
+                    dom.fadeOverlay.style.opacity = "1";
+                }
+                if (dom.respawnOverlay) dom.respawnOverlay.style.display = "flex";
             }
-
-            // Show death overlays
-            if (fadeOverlay) {
-                fadeOverlay.style.pointerEvents = "auto";
-                fadeOverlay.style.opacity = "1";
-            }
-            if (respawnOverlay) respawnOverlay.style.display = "flex";
-
+            // mark dead and render once for visuals, then skip the rest of the heavy logic
+            animate._wasDead = true;
             composer.render();
             postFrameCleanup();
-            return; // Exit early if player is dead
+            return;
         } else {
-
-            if (fadeOverlay && fadeOverlay.style.opacity !== "0") {
-                hideFadeOverlay(); // Assumes this function correctly sets opacity to "0" and pointerEvents to "none"
+            // if we were dead previously and now alive, undo those UI changes once
+            if (animate._wasDead) {
+                if (dom.fadeOverlay) {
+                    // assume hideFadeOverlay handles pointerEvents and opacity
+                    hideFadeOverlay();
+                }
+                if (dom.respawnOverlay) hideRespawn();
+                animate._wasDead = false;
             }
-            if (respawnOverlay && respawnOverlay.style.display !== "none") {
-                hideRespawn(); // Assumes this function correctly sets display to "none"
-            }
-
-            // Ensure crosshair is visible if not dead
-            const cross = document.getElementById("crosshair");
-            if (cross) cross.style.display = "block"; // Or "flex" depending on its original display type
+            if (dom.crosshair) dom.crosshair.style.display = "block";
         }
 
-        // --- Normal Game Updates ---
-        checkForDamagePulse(); // Check for visual damage effects
+        // --- visual & minor updates that are cheap ---
+        checkForDamagePulse();
 
         if (weaponController.stats.speedModifier != null) {
             physicsController.setSpeedModifier(weaponController.stats.speedModifier);
         }
 
-        // Remote players falling (simplified gravity application)
+        // remote players falling (iterate without allocations)
         const GRAVITY = 9.8;
-        Object.values(window.remotePlayers).forEach(rp => {
+        for (const k in window.remotePlayers) {
+            const rp = window.remotePlayers[k];
             const g = rp.group;
-            if (g?.userData.isFalling) {
+            if (g && g.userData && g.userData.isFalling) {
                 g.userData.velocityY = (g.userData.velocityY || 0) + GRAVITY * delta;
                 g.position.y -= g.userData.velocityY * delta;
-                if (g.position.y < -20) { // Off-map threshold
+                if (g.position.y < -20) {
                     g.userData.isFalling = false;
                     g.userData.velocityY = 0;
-                    g.visible = false; // Hide player once they fall off the map
+                    g.visible = false;
                 }
             }
-        });
+        }
 
-        // Sky, Fog, and Starfield rotation (time-dependent)
-        // Ensure skyMesh, starField, worldFog are defined or set to null if not used
-        if (skyMesh) skyMesh.rotation.x += 0.0001 * deltaMs; // Use deltaMs for consistent speed, or calculate a rate per second
+        // sky/starfield/worldFog rotations using seconds (consistent across frame-rate)
+        if (skyMesh) skyMesh.rotation.x += 0.0001 * deltaMs; // small tweak: kept ms multiplier for very slow rotation
         if (starField) starField.rotation.x += 0.00008 * deltaMs;
-
-        if (window.worldFog) { // Use window.worldFog as that's what you assign in createFogDots
+        if (window.worldFog) {
             window.worldFog.rotation.y += delta * 0.005;
             const nowMs = performance.now();
+            // small position drift (cheap)
             window.worldFog.position.x += Math.sin(nowMs * 0.0001) * delta * 2;
             window.worldFog.position.z += Math.cos(nowMs * 0.0001) * delta * 2;
         }
 
-        
-        // Physics & Input Update
+        // --- Physics & Input Update (core: keep at full frequency) ---
         const physState = physicsController.update(delta, inputState, window.collidables);
 
-        // Weapon Update
+        // --- Weapon update (core) ---
         weaponController.update(
             inputState,
             delta, {
@@ -2263,80 +2271,77 @@ export function animate(timestamp) {
             }
         );
 
-        // Active Tracers Update
+        // --- Active tracers (iterate backwards; already efficient) ---
         for (let i = activeTracers.length - 1; i >= 0; i--) {
             const tracer = activeTracers[i];
-            tracer.update(delta); // Pass the calculated delta (in seconds)
-
+            tracer.update(delta);
             if (tracer.remove) {
                 tracer.dispose();
                 activeTracers.splice(i, 1);
             }
         }
 
-        // Network Sync - Send local player's updated state
-        // dbRefs is now global, so just check it.
-        if (dbRefs && dbRefs.playersRef && localPlayerId) {
-            sendPlayerUpdate({
-                x: physState.x,
-                y: physState.y,
-                z: physState.z,
-                rotY: round2(physState.rotY),
-                rotX: round2(window.camera.rotation.x),
-                rotZ: round2(window.camera.rotation.z),
-                weapon: window.localPlayer.weapon,
-                knifeSwing: window.localPlayer.knifeSwing || false,
-                knifeHeavy: window.localPlayer.knifeHeavy || false
-            });
-            // Reset knife swing flags after sending
-            window.localPlayer.knifeSwing = false;
-            window.localPlayer.knifeHeavy = false;
-        } else {
-            console.warn("Skipping sendPlayerUpdate: dbRefs, dbRefs.playersRef or localPlayerId is null.");
+        // --- Network: throttle sendPlayerUpdate to reduce intensive I/O ---
+        const now = performance.now();
+        if (now - animate._lastSend >= animate._SEND_INTERVAL) {
+            if (dbRefs && dbRefs.playersRef && localPlayerId) {
+                sendPlayerUpdate({
+                    x: physState.x,
+                    y: physState.y,
+                    z: physState.z,
+                    rotY: round2(physState.rotY),
+                    rotX: round2(window.camera.rotation.x),
+                    rotZ: round2(window.camera.rotation.z),
+                    weapon: window.localPlayer.weapon,
+                    knifeSwing: window.localPlayer.knifeSwing || false,
+                    knifeHeavy: window.localPlayer.knifeHeavy || false
+                });
+                // clear local transient flags
+                window.localPlayer.knifeSwing = false;
+                window.localPlayer.knifeHeavy = false;
+            } else {
+                // only warn occasionally to avoid spamming console
+                if (!animate._warnedAboutDbRefs) {
+                    console.warn("Skipping sendPlayerUpdate: dbRefs, dbRefs.playersRef or localPlayerId is null.");
+                    animate._warnedAboutDbRefs = true;
+                }
+            }
+            animate._lastSend = now;
         }
 
-
-        // Remote avatars update: This loop is for local visual updates/interpolation
-        // based on data already received and processed by network.js.
-        for (const id in window.remotePlayers) {
-            const rp = window.remotePlayers[id];
-            if (rp.data) updateRemotePlayer(rp.data); // Assuming rp.data is the latest received network state
+        // --- Remote players visual update: throttle to ~30Hz to reduce per-frame cost ---
+        if (now - animate._lastRemoteUpdate >= animate._REMOTE_UPDATE_INTERVAL) {
+            for (const id in window.remotePlayers) {
+                const rp = window.remotePlayers[id];
+                if (rp && rp.data) updateRemotePlayer(rp.data);
+            }
+            animate._lastRemoteUpdate = now;
         }
-        // Removed handleWeaponSwitch() call here as the logic is now inline below
 
-        // Weapon Switching
+        // --- Weapon switching handling (cheap) ---
         if (inputState.weaponSwitch) {
             const oldW = window.localPlayer.weapon;
             weaponAmmo[oldW] = weaponController.getCurrentAmmo();
             const newW = inputState.weaponSwitch;
             window.localPlayer.weapon = newW;
 
-            // Update Firebase if dbRefs and localPlayerId are available
             if (dbRefs && dbRefs.playersRef && localPlayerId) {
                 try {
-                    dbRefs.playersRef.child(localPlayerId).update({
-                        weapon: newW
-                    });
+                    dbRefs.playersRef.child(localPlayerId).update({ weapon: newW });
                 } catch (error) {
                     console.error("Failed to update local player weapon in Firebase:", error);
                 }
-            } else {
-                console.warn("Cannot update local player weapon in Firebase: dbRefs or localPlayerId is null.");
             }
-
             weaponController.equipWeapon(newW);
             weaponController.ammoInMagazine = weaponAmmo[newW] ?? weaponController.stats.magazineSize;
-            // ***************************************************************
-            // FIX: Pass the 'newW' (weapon key) to updateInventory
             updateInventory(newW);
-            // ***************************************************************
             updateAmmoDisplay(weaponController.ammoInMagazine, weaponController.stats.magazineSize);
-            inputState.weaponSwitch = null; // Reset input state
-            if (newW === "knife") activeRecoils.length = 0; // Clear recoil for knife
+            inputState.weaponSwitch = null;
+            if (newW === "knife") activeRecoils.length = 0;
         }
 
-        // Mouse Look + Recoil
-        const baseSens = parseFloat(localStorage.getItem("sensitivity") || "5.00");
+        // --- Mouse look and recoil (use cached base sensitivity) ---
+        const baseSens = animate._baseSens;
         const aimMul = inputState.aim ? (window.localPlayer.weapon === "marshal" ? 0.15 : 0.5) : 1;
         const finalSens = baseSens * aimMul;
 
@@ -2344,46 +2349,55 @@ export function animate(timestamp) {
         let newPitch = window.camera.rotation.x - inputState.mouseDY * finalSens * 0.002;
         window.camera.rotation.x = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, newPitch));
 
-        // Recoil processing: apply recoil based on active recoil objects
+        // recoil processing (already O(n) on small array)
         {
-            const now = performance.now() / 1000;
+            const tNow = performance.now() / 1000;
             let totalOffset = 0;
             for (let i = activeRecoils.length - 1; i >= 0; i--) {
                 const r = activeRecoils[i];
-                const t = (now - r.start) / r.duration; // Normalized time (0 to 1)
+                const t = (tNow - r.start) / r.duration;
                 if (t >= 1) {
-                    activeRecoils.splice(i, 1); // Recoil effect finished
+                    activeRecoils.splice(i, 1);
                     continue;
                 }
-                totalOffset += r.angle * (1 - t); // Linear decay for simplicity
+                totalOffset += r.angle * (1 - t);
             }
             window.camera.rotation.x += totalOffset;
         }
 
-        // Rebuild collidables: includes environment meshes and visible remote player body parts
-        if (window.mapReady) {
-            window.collidables = [...window.envMeshes]; // Start with environment
+        // --- Rebuild collidables less frequently (expensive traversal) ---
+        if (window.mapReady && (now - animate._lastCollidablesRebuild >= animate._COLLIDABLES_REBUILD_INTERVAL)) {
+            const newCollidables = [];
+            // include environment
+            if (window.envMeshes && window.envMeshes.length) {
+                for (let i = 0; i < window.envMeshes.length; i++) newCollidables.push(window.envMeshes[i]);
+            }
+            // include visible remote player body parts
             for (const otherId in window.remotePlayers) {
-                if (otherId === window.localPlayer.id) continue; // Don't collide with self
+                if (otherId === window.localPlayer.id) continue;
                 const other = window.remotePlayers[otherId];
                 if (other.group?.visible) {
                     other.group.traverse(child => {
                         if (child.isMesh && child.userData?.isPlayerBodyPart) {
-                            window.collidables.push(child);
+                            newCollidables.push(child);
                         }
                     });
                 }
             }
+            window.collidables = newCollidables;
+            animate._lastCollidablesRebuild = now;
         }
 
-        // Render the scene
+        // --- final render ---
         composer.render();
+
     } catch (err) {
         console.error("Error in animate:", err);
     } finally {
-        postFrameCleanup(); // Ensure cleanup runs even if an error occurs
+        postFrameCleanup();
     }
 }
+
 
 
 function resetWeaponPose(weaponKey, mesh) {
@@ -2971,6 +2985,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
