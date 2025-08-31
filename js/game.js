@@ -19,7 +19,7 @@ import {
     StaticGeometryGenerator
 } from 'https://cdn.jsdelivr.net/npm/three-mesh-bvh@0.9.1/+esm';
 
-// fffffffffffffffffffffffffffff
+// ffffffffffffffffffffffffffff
 // ─── BVH Setup ────────────────────────────────────────────────────────────
 // Extend THREE.BufferGeometry and THREE.Mesh prototypes for BVH functionality
 THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
@@ -838,7 +838,7 @@ scene.add( window.camera );
 
 
 // 3. Renderer
-window.renderer = new CanvasRenderer();
+await tryLoadLegacyCanvasRenderer();
 renderer = window.renderer;
 renderer.domElement.style.position = "relative";
 renderer.domElement.style.zIndex = "0";
@@ -951,7 +951,7 @@ scene.add( window.camera );
 
 
 // 3. Renderer
-window.renderer = new CanvasRenderer();
+await tryLoadLegacyCanvasRenderer();
 renderer = window.renderer;
 renderer.domElement.style.position = "relative";
 renderer.domElement.style.zIndex = "0";
@@ -1066,7 +1066,7 @@ scene.add( window.camera );
 
 
 // 3. Renderer
-window.renderer = new CanvasRenderer();
+await tryLoadLegacyCanvasRenderer();
 renderer = window.renderer;
 renderer.domElement.style.position = "relative";
 renderer.domElement.style.zIndex = "0";
@@ -2130,13 +2130,8 @@ export function animate(timestamp) {
     // even if an error occurs later in this frame.
     requestAnimationFrame(animate);
 
- 
     // --- Disconnection/Pause Logic ---
-    // If localPlayerId is null, it means the local player has disconnected.
-    // The game state should already be paused and UI updated by the handler
-    // that sets localPlayerId to null. This function simply stops further animation logic.
     if (localPlayerId === null || window.isGamePaused) {
-        // console.log("Animation loop paused or stopped due to local player disconnection."); // Only for debugging
         return;
     }
 
@@ -2163,7 +2158,6 @@ export function animate(timestamp) {
         return;
     }
     if (!window.mapReady) {
-        // console.warn("Skipping animate(): map not ready."); // Can be noisy
         postFrameCleanup();
         return;
     }
@@ -2195,58 +2189,54 @@ export function animate(timestamp) {
             }
             if (respawnOverlay) respawnOverlay.style.display = "flex";
 
-            if (window.scene && window.camera) window.renderer.render(window.scene, window.camera);
+            // use safeRender instead of composer.render()
+            safeRender();
             postFrameCleanup();
             return; // Exit early if player is dead
         } else {
 
             if (fadeOverlay && fadeOverlay.style.opacity !== "0") {
-                hideFadeOverlay(); // Assumes this function correctly sets opacity to "0" and pointerEvents to "none"
+                hideFadeOverlay();
             }
             if (respawnOverlay && respawnOverlay.style.display !== "none") {
-                hideRespawn(); // Assumes this function correctly sets display to "none"
+                hideRespawn();
             }
 
-            // Ensure crosshair is visible if not dead
             const cross = document.getElementById("crosshair");
-            if (cross) cross.style.display = "block"; // Or "flex" depending on its original display type
+            if (cross) cross.style.display = "block";
         }
 
         // --- Normal Game Updates ---
-        checkForDamagePulse(); // Check for visual damage effects
+        checkForDamagePulse();
 
         if (weaponController.stats.speedModifier != null) {
             physicsController.setSpeedModifier(weaponController.stats.speedModifier);
         }
 
-        // Remote players falling (simplified gravity application)
         const GRAVITY = 9.8;
         Object.values(window.remotePlayers).forEach(rp => {
             const g = rp.group;
             if (g?.userData.isFalling) {
                 g.userData.velocityY = (g.userData.velocityY || 0) + GRAVITY * delta;
                 g.position.y -= g.userData.velocityY * delta;
-                if (g.position.y < -20) { // Off-map threshold
+                if (g.position.y < -20) {
                     g.userData.isFalling = false;
                     g.userData.velocityY = 0;
-                    g.visible = false; // Hide player once they fall off the map
+                    g.visible = false;
                 }
             }
         });
 
-        // Sky, Fog, and Starfield rotation (time-dependent)
-        // Ensure skyMesh, starField, worldFog are defined or set to null if not used
-        if (skyMesh) skyMesh.rotation.x += 0.0001 * deltaMs; // Use deltaMs for consistent speed, or calculate a rate per second
+        if (skyMesh) skyMesh.rotation.x += 0.0001 * deltaMs;
         if (starField) starField.rotation.x += 0.00008 * deltaMs;
 
-        if (window.worldFog) { // Use window.worldFog as that's what you assign in createFogDots
+        if (window.worldFog) {
             window.worldFog.rotation.y += delta * 0.005;
             const nowMs = performance.now();
             window.worldFog.position.x += Math.sin(nowMs * 0.0001) * delta * 2;
             window.worldFog.position.z += Math.cos(nowMs * 0.0001) * delta * 2;
         }
 
-        
         // Physics & Input Update
         const physState = physicsController.update(delta, inputState, window.collidables);
 
@@ -2265,7 +2255,7 @@ export function animate(timestamp) {
         // Active Tracers Update
         for (let i = activeTracers.length - 1; i >= 0; i--) {
             const tracer = activeTracers[i];
-            tracer.update(delta); // Pass the calculated delta (in seconds)
+            tracer.update(delta);
 
             if (tracer.remove) {
                 tracer.dispose();
@@ -2273,8 +2263,7 @@ export function animate(timestamp) {
             }
         }
 
-        // Network Sync - Send local player's updated state
-        // dbRefs is now global, so just check it.
+        // Network Sync
         if (dbRefs && dbRefs.playersRef && localPlayerId) {
             sendPlayerUpdate({
                 x: physState.x,
@@ -2287,21 +2276,16 @@ export function animate(timestamp) {
                 knifeSwing: window.localPlayer.knifeSwing || false,
                 knifeHeavy: window.localPlayer.knifeHeavy || false
             });
-            // Reset knife swing flags after sending
             window.localPlayer.knifeSwing = false;
             window.localPlayer.knifeHeavy = false;
         } else {
             console.warn("Skipping sendPlayerUpdate: dbRefs, dbRefs.playersRef or localPlayerId is null.");
         }
 
-
-        // Remote avatars update: This loop is for local visual updates/interpolation
-        // based on data already received and processed by network.js.
         for (const id in window.remotePlayers) {
             const rp = window.remotePlayers[id];
-            if (rp.data) updateRemotePlayer(rp.data); // Assuming rp.data is the latest received network state
+            if (rp.data) updateRemotePlayer(rp.data);
         }
-        // Removed handleWeaponSwitch() call here as the logic is now inline below
 
         // Weapon Switching
         if (inputState.weaponSwitch) {
@@ -2310,7 +2294,6 @@ export function animate(timestamp) {
             const newW = inputState.weaponSwitch;
             window.localPlayer.weapon = newW;
 
-            // Update Firebase if dbRefs and localPlayerId are available
             if (dbRefs && dbRefs.playersRef && localPlayerId) {
                 try {
                     dbRefs.playersRef.child(localPlayerId).update({
@@ -2325,13 +2308,10 @@ export function animate(timestamp) {
 
             weaponController.equipWeapon(newW);
             weaponController.ammoInMagazine = weaponAmmo[newW] ?? weaponController.stats.magazineSize;
-            // ***************************************************************
-            // FIX: Pass the 'newW' (weapon key) to updateInventory
             updateInventory(newW);
-            // ***************************************************************
             updateAmmoDisplay(weaponController.ammoInMagazine, weaponController.stats.magazineSize);
-            inputState.weaponSwitch = null; // Reset input state
-            if (newW === "knife") activeRecoils.length = 0; // Clear recoil for knife
+            inputState.weaponSwitch = null;
+            if (newW === "knife") activeRecoils.length = 0;
         }
 
         // Mouse Look + Recoil
@@ -2343,27 +2323,27 @@ export function animate(timestamp) {
         let newPitch = window.camera.rotation.x - inputState.mouseDY * finalSens * 0.002;
         window.camera.rotation.x = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, newPitch));
 
-        // Recoil processing: apply recoil based on active recoil objects
+        // Recoil processing
         {
             const now = performance.now() / 1000;
             let totalOffset = 0;
             for (let i = activeRecoils.length - 1; i >= 0; i--) {
                 const r = activeRecoils[i];
-                const t = (now - r.start) / r.duration; // Normalized time (0 to 1)
+                const t = (now - r.start) / r.duration;
                 if (t >= 1) {
-                    activeRecoils.splice(i, 1); // Recoil effect finished
+                    activeRecoils.splice(i, 1);
                     continue;
                 }
-                totalOffset += r.angle * (1 - t); // Linear decay for simplicity
+                totalOffset += r.angle * (1 - t);
             }
             window.camera.rotation.x += totalOffset;
         }
 
-        // Rebuild collidables: includes environment meshes and visible remote player body parts
+        // Rebuild collidables
         if (window.mapReady) {
-            window.collidables = [...window.envMeshes]; // Start with environment
+            window.collidables = [...window.envMeshes];
             for (const otherId in window.remotePlayers) {
-                if (otherId === window.localPlayer.id) continue; // Don't collide with self
+                if (otherId === window.localPlayer.id) continue;
                 const other = window.remotePlayers[otherId];
                 if (other.group?.visible) {
                     other.group.traverse(child => {
@@ -2375,14 +2355,77 @@ export function animate(timestamp) {
             }
         }
 
-        // Render the scene
-        if (window.scene && window.camera) window.renderer.render(window.scene, window.camera);
+        // Render the scene using safeRender()
+        safeRender();
     } catch (err) {
         console.error("Error in animate:", err);
     } finally {
         postFrameCleanup(); // Ensure cleanup runs even if an error occurs
     }
 }
+
+window.THREE = THREE;
+
+async function tryLoadLegacyCanvasRenderer() {
+  const legacyUrl =
+    "https://rawcdn.githack.com/mrdoob/three.js/r110/examples/js/renderers/CanvasRenderer.js"; // r110 example file
+  try {
+    const resp = await fetch(legacyUrl);
+    if (!resp.ok) throw new Error("Failed to fetch CanvasRenderer.js: " + resp.status);
+    const code = await resp.text();
+
+    // Evaluate legacy code in global scope so it can patch window.THREE
+    (0, eval)(code);
+
+    if (typeof window.THREE.CanvasRenderer === "function") {
+      console.log("CanvasRenderer loaded (legacy). Using CPU renderer.");
+      window.renderer = new window.THREE.CanvasRenderer();
+    } else {
+      throw new Error("CanvasRenderer not defined after eval.");
+    }
+  } catch (err) {
+    console.warn("Could not load CanvasRenderer (falling back to WebGL):", err);
+    window.renderer = new THREE.WebGLRenderer({ antialias: false });
+  }
+
+  window.renderer.setSize(window.innerWidth, window.innerHeight);
+  document.body.appendChild(window.renderer.domElement);
+}
+
+function safeRender() {
+  try {
+    if (!window.scene || !window.camera) {
+      console.warn("safeRender: missing scene or camera, skipping render", {
+        scene: !!window.scene,
+        camera: !!window.camera
+      });
+      return;
+    }
+
+    const isCanvasRenderer =
+      typeof window.THREE !== "undefined" &&
+      typeof window.THREE.CanvasRenderer === "function" &&
+      window.renderer instanceof window.THREE.CanvasRenderer;
+
+    if (isCanvasRenderer) {
+      // CanvasRenderer doesn't support EffectComposer / shader passes.
+      window.renderer.render(window.scene, window.camera);
+      return;
+    }
+
+    // Prefer composer when available (postprocessing) otherwise renderer
+    if (window.composer && typeof window.composer.render === "function") {
+      window.composer.render();
+    } else if (window.renderer && typeof window.renderer.render === "function") {
+      window.renderer.render(window.scene, window.camera);
+    } else {
+      console.warn("safeRender: no composer or renderer available to render");
+    }
+  } catch (e) {
+    console.error("safeRender error:", e);
+  }
+}
+
 
 
 function resetWeaponPose(weaponKey, mesh) {
@@ -2970,9 +3013,6 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
-
-
-
 
 
 
