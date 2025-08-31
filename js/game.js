@@ -848,6 +848,7 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
 
   const api = {
     domElement: canvas,
+    debug: false, // set true to draw crosshairs + stats for debugging aspect/projection
     setSize(w, h, updateStyle = true) {
       canvas.width = w;
       canvas.height = h;
@@ -864,6 +865,23 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
 
     // Basic render: draw sprites (material.map.image) and approximated shapes for meshes
     render(scene, camera) {
+      // --- Ensure scene & camera matrices are up-to-date (important for .project())
+      // update object world matrices (safe: shallow update)
+      if (scene && scene.updateMatrixWorld) scene.updateMatrixWorld(true);
+      if (camera) {
+        if (camera.updateMatrixWorld) camera.updateMatrixWorld();
+        if (camera.updateProjectionMatrix) camera.updateProjectionMatrix();
+        // ensure camera has matrixWorldInverse and it's correct
+        if (!camera.matrixWorldInverse) camera.matrixWorldInverse = new THREE.Matrix4();
+        camera.matrixWorldInverse.copy(camera.matrixWorld).invert();
+        // Keep camera aspect consistent with internal canvas pixel aspect (prevents NDC->pixel mismatch)
+        const internalAspect = canvas.width / canvas.height;
+        if (Math.abs((camera.aspect || 0) - internalAspect) > 1e-6) {
+          camera.aspect = internalAspect;
+          if (camera.updateProjectionMatrix) camera.updateProjectionMatrix();
+        }
+      }
+
       // Clear with the clear color (converted to CSS)
       const c = api._clearColor;
       const r = (c.hex >> 16) & 0xff;
@@ -875,6 +893,18 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
       ctx.fillRect(0, 0, canvas.width, canvas.height);
       ctx.restore();
 
+      // debug overlay (optional)
+      if (api.debug) {
+        ctx.save();
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.font = "12px monospace";
+        ctx.fillStyle = "rgba(255,255,255,0.85)";
+        ctx.fillText(`canvas internal: ${canvas.width}x${canvas.height}`, 8, 14);
+        ctx.fillText(`canvas client: ${canvas.clientWidth}x${canvas.clientHeight}`, 8, 30);
+        ctx.fillText(`camera.aspect: ${camera ? (camera.aspect || 0).toFixed(4) : 'n/a'}`, 8, 46);
+        ctx.restore();
+      }
+
       // collect drawables (so we can sort by depth)
       const drawables = [];
       scene.traverse((obj) => {
@@ -885,17 +915,17 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
         obj.getWorldPosition(tmpPos);
         proj.copy(tmpPos).project(camera); // NDC -1..1
 
-        // quick NDC cull (if center far off-screen, skip). We allow some slack for large objects.
-        if (proj.z > 1 || proj.z < -1 || proj.x < -2 || proj.x > 2 || proj.y < -2 || proj.y > 2) {
-          // still allow meshes that have explicit userData.alwaysRender = true
+        // quick NDC cull (if center far off-screen, skip). Use conservative slack and allow alwaysRender flag.
+        const SLACK = 0.25; // smaller slack than before
+        if (proj.z > 1 || proj.z < -1 || proj.x < -1 - SLACK || proj.x > 1 + SLACK || proj.y < -1 - SLACK || proj.y > 1 + SLACK) {
           if (!obj.userData?.alwaysRender) return;
         }
 
-        // screen coords
+        // screen coords (use internal canvas pixel size)
         const sx = (proj.x * 0.5 + 0.5) * canvas.width;
         const sy = (-proj.y * 0.5 + 0.5) * canvas.height;
 
-        // distance for depth sorting
+        // distance for depth sorting (camera position & tmpPos must be world coords)
         const dist = camera.position.distanceTo(tmpPos);
 
         // check for texture
@@ -906,8 +936,8 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
           drawables.push({ type: 'image', obj, sx, sy, dist, projZ: proj.z, mapImage });
         } else if (obj.isMesh && obj.geometry) {
           const geom = obj.geometry;
-          if (!geom.boundingBox) geom.computeBoundingBox && geom.computeBoundingBox();
-          if (!geom.boundingSphere) geom.computeBoundingSphere && geom.computeBoundingSphere();
+          if (!geom.boundingBox && geom.computeBoundingBox) geom.computeBoundingBox();
+          if (!geom.boundingSphere && geom.computeBoundingSphere) geom.computeBoundingSphere();
 
           const worldPoints = [];
           if (geom.boundingBox) {
@@ -931,7 +961,8 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
           } else if (geom.boundingSphere) {
             const bs = geom.boundingSphere;
             const center = bs.center.clone().applyMatrix4(obj.matrixWorld);
-            const r = bs.radius * (obj.matrixWorld.getMaxScaleOnAxis ? obj.matrixWorld.getMaxScaleOnAxis() : 1);
+            const getMaxScale = obj.matrixWorld.getMaxScaleOnAxis ? obj.matrixWorld.getMaxScaleOnAxis() : 1;
+            const r = bs.radius * getMaxScale;
             worldPoints.push(center.clone());
             worldPoints.push(center.clone().add(new THREE.Vector3(r, 0, 0)));
             worldPoints.push(center.clone().add(new THREE.Vector3(-r, 0, 0)));
@@ -942,7 +973,9 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
           } else {
             const posAttr = geom.attributes && geom.attributes.position;
             if (posAttr && posAttr.count > 0) {
-              for (let i = 0; i < Math.min(12, posAttr.count); i += Math.max(1, Math.floor(posAttr.count / 12))) {
+              // sample up to 12 vertex positions spread through the buffer
+              const step = Math.max(1, Math.floor(posAttr.count / 12));
+              for (let i = 0; i < posAttr.count && worldPoints.length < 12; i += step) {
                 tmpVec.set(
                   posAttr.getX(i),
                   posAttr.getY(i),
@@ -965,9 +998,8 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
             pts2d.push({ x: px, y: py });
           }
 
-          // if no good projected points, skip drawing (no more spheres)
+          // if no good projected points, skip drawing (unless forceMarker)
           if (pts2d.length === 0) {
-            // If you want a fallback marker instead of skipping, set userData.forceMarker = true
             if (obj.userData?.forceMarker) {
               drawables.push({ type: 'rect', obj, sx, sy, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
             }
@@ -979,7 +1011,6 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
             } else if (hull.length === 2) {
               drawables.push({ type: 'line', obj, pts: hull, dist });
             } else {
-              // single point fallback: only draw if explicitly requested
               if (obj.userData?.forceMarker) {
                 drawables.push({ type: 'rect', obj, sx: pts2d[0].x, sy: pts2d[0].y, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
               }
@@ -1032,7 +1063,9 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
             size = Math.max(8, obj.userData?.sizePx ?? Math.max(wPx, hPx, 32));
           } else {
             const baseSize = obj.userData?.sizePx ?? 300;
-            size = Math.max(8, baseSize * (1 / Math.max(0.1, dist * 0.05)));
+            // guard against zero/near-zero dist
+            const safeDist = Math.max(0.0001, dist);
+            size = Math.max(8, baseSize * (1 / Math.max(0.1, safeDist * 0.05)));
           }
           ctx.save();
           ctx.translate(d.sx, d.sy);
@@ -1041,6 +1074,20 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
           ctx.globalAlpha = obj.userData?.opacity ?? (obj.material?.opacity ?? 1);
           ctx.drawImage(d.mapImage, -size / 2, -size / 2, size, size);
           ctx.restore();
+
+          // optional per-object debug crosshair
+          if (api.debug) {
+            ctx.save();
+            ctx.strokeStyle = "red";
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(d.sx - 6, d.sy);
+            ctx.lineTo(d.sx + 6, d.sy);
+            ctx.moveTo(d.sx, d.sy - 6);
+            ctx.lineTo(d.sx, d.sy + 6);
+            ctx.stroke();
+            ctx.restore();
+          }
         } else if (d.type === 'poly' && d.pts) {
           ctx.save();
           ctx.beginPath();
@@ -1055,6 +1102,16 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
           ctx.strokeStyle = 'rgba(0,0,0,0.6)';
           ctx.stroke();
           ctx.restore();
+
+          if (api.debug) {
+            // draw hull points
+            ctx.save();
+            for (let p of d.pts) {
+              ctx.fillStyle = 'yellow';
+              ctx.fillRect(p.x - 2, p.y - 2, 4, 4);
+            }
+            ctx.restore();
+          }
         } else if (d.type === 'line' && d.pts && d.pts.length === 2) {
           ctx.beginPath();
           ctx.moveTo(d.pts[0].x, d.pts[0].y);
@@ -3184,6 +3241,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
