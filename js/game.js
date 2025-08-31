@@ -849,7 +849,7 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
       fillQuads: true,            // fill quads (set false to only stroke)
 
       // new options:
-      maxVerticesPerGeometry: 10000,        // extra safety cap when scanning vertex lists
+      maxVerticesPerGeometry: 1000,        // extra safety cap when scanning vertex lists
       isolatedConnect: true,                // enable connecting isolated vertices to nearest neighbor
       isolatedConnectMaxPerGeom: 200,       // maximum isolated connections to create per geometry
       isolatedConnectMaxDistance: Infinity, // maximum distance (in local space) to connect an isolated vertex
@@ -865,53 +865,41 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
     // Projects a world Vector3 onto screen but avoids NaN/inf results by clamping points
     // that are behind the camera or too close to a minimum distance in front of the camera.
     // Returns {x,y,z} or null if projection cannot be produced.
-    _safeProjectToScreen(worldVec, camera) {
-      // quick project
-      const p = worldVec.clone().project(camera);
+_safeProjectToScreen(worldVec, camera) {
+  // ensure camera matrices are up to date
+  camera.updateMatrixWorld && camera.updateMatrixWorld();
+  camera.matrixWorldInverse && camera.matrixWorldInverse.copy(new THREE.Matrix4().getInverse(camera.matrixWorld));
 
-      // if projection is within clip region and finite, convert to screen and return
-      if (Number.isFinite(p.x) && Number.isFinite(p.y) && Number.isFinite(p.z) && p.z >= -1 && p.z <= 1) {
-        const sx = (p.x * 0.5 + 0.5) * canvas.width;
-        const sy = (-p.y * 0.5 + 0.5) * canvas.height;
-        return { x: sx, y: sy, z: p.z };
-      }
+  // copy so we don't mutate original
+  const camSpace = worldVec.clone().applyMatrix4(camera.matrixWorldInverse); // world -> camera space
 
-      // otherwise compute a safe fallback point in front of the camera
-      // get direction from camera to point
-      const dirToPoint = worldVec.clone().sub(camera.position);
-      const dist = dirToPoint.length();
+  // In three.js camera-space: camera looks down -Z, so "in front" has camSpace.z < 0.
+  // Ensure z is at least -minD (i.e., not too close or behind)
+  const minD = api.options.minProjectionDistance || 0.1;
+  if (!Number.isFinite(camSpace.x) || !Number.isFinite(camSpace.y) || !Number.isFinite(camSpace.z)) return null;
 
-      // camera forward direction (where camera is looking)
-      const camForward = new THREE.Vector3();
-      camera.getWorldDirection(camForward);
+  // If point is too close or behind (z >= -minD), clamp z to -minD
+  if (camSpace.z >= -minD) {
+    camSpace.z = -minD;
+  }
 
-      const minD = api.options.minProjectionDistance || 0.1;
+  // Convert back to world space
+  const safeWorld = camSpace.applyMatrix4(camera.matrixWorld);
 
-      // If point is behind camera (dot < 0) or too close, move it to a safe location in front of camera:
-      const dot = dirToPoint.dot(camForward);
-      let safeWorld;
-      if (dot <= 0 || dist < minD) {
-        // place safe point at camera.position + camForward * minD (slightly in front of camera)
-        safeWorld = camera.position.clone().add(camForward.clone().multiplyScalar(minD));
-      } else {
-        // point is in front but projection clipped - nudge it slightly away along line-of-sight
-        safeWorld = camera.position.clone().add(dirToPoint.clone().normalize().multiplyScalar(Math.max(minD, Math.min(dist, minD))));
-      }
+  // Now project safely
+  const p = safeWorld.clone().project(camera);
+  if (!Number.isFinite(p.x) || !Number.isFinite(p.y) || !Number.isFinite(p.z)) return null;
 
-      // project the safe point
-      const sp = safeWorld.clone().project(camera);
-      if (!Number.isFinite(sp.x) || !Number.isFinite(sp.y) || !Number.isFinite(sp.z)) return null;
+  let sx = (p.x * 0.5 + 0.5) * canvas.width;
+  let sy = (-p.y * 0.5 + 0.5) * canvas.height;
 
-      let sx = (sp.x * 0.5 + 0.5) * canvas.width;
-      let sy = (-sp.y * 0.5 + 0.5) * canvas.height;
+  // clamp to padded screen rect to avoid extreme values
+  const pad = 200;
+  sx = Math.max(-pad, Math.min(canvas.width + pad, sx));
+  sy = Math.max(-pad, Math.min(canvas.height + pad, sy));
 
-      // clamp to a padded screen rect to avoid extreme offscreen coordinates
-      const pad = 200; // px
-      sx = Math.max(-pad, Math.min(canvas.width + pad, sx));
-      sy = Math.max(-pad, Math.min(canvas.height + pad, sy));
-
-      return { x: sx, y: sy, z: sp.z };
-    },
+  return { x: sx, y: sy, z: p.z };
+}
 
     // internal helper: project 3D world pos to screen (returns {x,y,z} or null if clipping)
     _projectToScreen(worldVec, camera) {
@@ -3531,6 +3519,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
