@@ -2487,366 +2487,325 @@ window.THREE = THREE;
 // -----------------------------
 // SimpleCanvasRenderer (z-buffer rasterizer, flat shading)
 // -----------------------------
-class SimpleCanvasRenderer {
-  constructor(opts = {}) {
-    if (typeof THREE === 'undefined') {
-      throw new Error('SimpleCanvasRenderer requires THREE to be loaded first.');
-    }
+      class SimpleCanvasRenderer {
+            constructor(opts = {}) {
+                if (typeof THREE === 'undefined') {
+                    throw new Error('SimpleCanvasRenderer requires THREE to be loaded first.');
+                }
 
-    this.canvas = opts.canvas || document.createElement('canvas');
-    this.ctx = this.canvas.getContext('2d');
-    this.domElement = this.canvas;
-    this.clearColor = opts.clearColor || '#000000';
-    this.autoClear = opts.autoClear !== undefined ? opts.autoClear : true;
-    this.usePainter = opts.usePainter !== undefined ? opts.usePainter : true;
+                this.canvas = opts.canvas || document.createElement('canvas');
+                this.ctx = this.canvas.getContext('2d');
+                this.domElement = this.canvas;
+                this.clearColor = opts.clearColor || '#000000';
+                this.autoClear = opts.autoClear !== undefined ? opts.autoClear : true;
+                this.usePainter = opts.usePainter !== undefined ? opts.usePainter : true;
 
-    this.setSize(opts.width || window.innerWidth, opts.height || window.innerHeight);
+                this.setSize(opts.width || window.innerWidth, opts.height || window.innerHeight);
 
-    // temporaries
-    this._vA = new THREE.Vector3();
-    this._vB = new THREE.Vector3();
-    this._vC = new THREE.Vector3();
-    this._wA = new THREE.Vector3();
-    this._wB = new THREE.Vector3();
-    this._wC = new THREE.Vector3();
-    this._e1 = new THREE.Vector3();
-    this._e2 = new THREE.Vector3();
-    this._faceNormal = new THREE.Vector3();
-    this._centroid = new THREE.Vector3();
-    this._viewVec = new THREE.Vector3();
+                // Temporaries for matrix math
+                this._vA = new THREE.Vector3();
+                this._vB = new THREE.Vector3();
+                this._vC = new THREE.Vector3();
+                this._wA = new THREE.Vector3();
+                this._wB = new THREE.Vector3();
+                this._wC = new THREE.Vector3();
+                this._e1 = new THREE.Vector3();
+                this._e2 = new THREE.Vector3();
+                this._faceNormal = new THREE.Vector3();
+                this._centroid = new THREE.Vector3();
+                this._viewVec = new THREE.Vector3();
 
-    this._clipA = new THREE.Vector4();
-    this._clipB = new THREE.Vector4();
-    this._clipC = new THREE.Vector4();
+                this._clipA = new THREE.Vector4();
+                this._clipB = new THREE.Vector4();
+                this._clipC = new THREE.Vector4();
 
-    this._viewMatrix = new THREE.Matrix4();
-    this._viewProj = new THREE.Matrix4();
-    this._worldMatrix = new THREE.Matrix4();
+                this._viewMatrix = new THREE.Matrix4();
+                this._viewProj = new THREE.Matrix4();
+                this._worldMatrix = new THREE.Matrix4();
 
-    this.lightDir = new THREE.Vector3(0.5, 0.8, 0.2).normalize();
-    this.ambientFactor = 0.22;
-    this.diffuseFactor = 0.78;
+                this.lightDir = new THREE.Vector3(0.5, 0.8, 0.2).normalize();
+                this.ambientFactor = 0.22;
+                this.diffuseFactor = 0.78;
 
-    // debugging hook
-    this.debug = {
-      showWireframe: false,
-      maxTriangles: 200000 // safety cap
-    };
-  }
-
-  setSize(w, h) {
-    this.width = Math.max(1, Math.floor(w));
-    this.height = Math.max(1, Math.floor(h));
-    this.canvas.width = this.width;
-    this.canvas.height = this.height;
-    this.canvas.style.width = this.width + 'px';
-    this.canvas.style.height = this.height + 'px';
-    this.halfWidth = this.width / 2;
-    this.halfHeight = this.height / 2;
-  }
-
-  _clearToBackground(scene, imageData) {
-    let r = 0, g = 0, b = 0;
-    if (scene && scene.background && scene.background.isColor) {
-      const c = scene.background;
-      r = Math.round(c.r * 255);
-      g = Math.round(c.g * 255);
-      b = Math.round(c.b * 255);
-    } else {
-      const cc = new THREE.Color(this.clearColor);
-      r = Math.round(cc.r * 255);
-      g = Math.round(cc.g * 255);
-      b = Math.round(cc.b * 255);
-    }
-    const data = imageData.data;
-    for (let i = 0, n = data.length; i < n; i += 4) {
-      data[i] = r;
-      data[i + 1] = g;
-      data[i + 2] = b;
-      data[i + 3] = 255;
-    }
-  }
-
-  // ---- improved render ----
-  render(scene, camera) {
-    try {
-      if (!scene || !camera) return;
-
-      // matrices
-      camera.updateMatrixWorld(true);
-      camera.updateProjectionMatrix();
-      this._viewMatrix.copy(camera.matrixWorld).invert(); // world -> camera
-      this._viewProj.multiplyMatrices(camera.projectionMatrix, this._viewMatrix);
-
-      const w = this.width, h = this.height;
-      const imageData = this.ctx.createImageData(w, h);
-      if (this.autoClear) this._clearToBackground(scene, imageData);
-
-      // camera world pos (for centroid distance sort)
-      const camPos = new THREE.Vector3();
-      camera.getWorldPosition(camPos);
-
-      // gather triangles
-      const triangles = [];
-      const addTriangle = (sx0, sy0, sz0, sx1, sy1, sz1, sx2, sy2, sz2, colorArr, depthMetric, viewZ0, viewZ1, viewZ2) => {
-        if (triangles.length >= this.debug.maxTriangles) return;
-        triangles.push({
-          sx0, sy0, sz0,
-          sx1, sy1, sz1,
-          sx2, sy2, sz2,
-          colorArr,
-          depthMetric,     // used for painter sorting (centroid distance sq)
-          viewZ0, viewZ1, viewZ2 // used for z-buffer (view-space z)
-        });
-      };
-
-      scene.traverse(obj => {
-        if (!obj.visible || !obj.isMesh) return;
-        const mesh = obj;
-        const geometry = mesh.geometry;
-        if (!geometry) return;
-
-        mesh.updateMatrixWorld(true);
-        this._worldMatrix.copy(mesh.matrixWorld);
-
-        // positions & indices
-        let positions = null;
-        let indices = null;
-        let itemSize = 3;
-        if (geometry.isBufferGeometry) {
-          const posAttr = geometry.attributes.position;
-          if (!posAttr) return;
-          positions = posAttr.array;
-          itemSize = posAttr.itemSize || 3;
-          if (geometry.index) indices = geometry.index.array;
-        } else if (geometry.isGeometry) {
-          positions = new Float32Array(geometry.vertices.length * 3);
-          for (let i = 0; i < geometry.vertices.length; i++) {
-            positions[i * 3] = geometry.vertices[i].x;
-            positions[i * 3 + 1] = geometry.vertices[i].y;
-            positions[i * 3 + 2] = geometry.vertices[i].z;
-          }
-          indices = new Uint32Array(geometry.faces.length * 3);
-          for (let i = 0; i < geometry.faces.length; i++) {
-            indices[i * 3] = geometry.faces[i].a;
-            indices[i * 3 + 1] = geometry.faces[i].b;
-            indices[i * 3 + 2] = geometry.faces[i].c;
-          }
-          itemSize = 3;
-        } else {
-          return;
-        }
-
-        const getVertex = (idx, outVec3) => {
-          const i3 = idx * itemSize;
-          outVec3.set(positions[i3], positions[i3 + 1], positions[i3 + 2]);
-        };
-
-        const triCount = indices ? (indices.length / 3) : (positions.length / (itemSize * 3));
-
-        // material color fallback
-        const mat = Array.isArray(mesh.material) ? mesh.material[0] : mesh.material;
-        let baseColor = new THREE.Color(0x888888);
-        if (mat) {
-          if (mat.color) baseColor.copy(mat.color);
-          else if (mat.emissive) baseColor.copy(mat.emissive);
-        }
-
-        for (let t = 0; t < triCount; t++) {
-          let aIdx, bIdx, cIdx;
-          if (indices) {
-            aIdx = indices[t * 3];
-            bIdx = indices[t * 3 + 1];
-            cIdx = indices[t * 3 + 2];
-          } else {
-            aIdx = t * 3;
-            bIdx = t * 3 + 1;
-            cIdx = t * 3 + 2;
-          }
-
-          // object-space -> world
-          getVertex(aIdx, this._vA);
-          getVertex(bIdx, this._vB);
-          getVertex(cIdx, this._vC);
-
-          this._wA.copy(this._vA).applyMatrix4(this._worldMatrix);
-          this._wB.copy(this._vB).applyMatrix4(this._worldMatrix);
-          this._wC.copy(this._vC).applyMatrix4(this._worldMatrix);
-
-          // face normal (world space)
-          this._e1.subVectors(this._wB, this._wA);
-          this._e2.subVectors(this._wC, this._wA);
-          this._faceNormal.crossVectors(this._e1, this._e2);
-          if (this._faceNormal.lengthSq() < 1e-12) continue;
-          this._faceNormal.normalize();
-
-          // centroid (world space)
-          this._centroid.copy(this._wA).add(this._wB).add(this._wC).multiplyScalar(1 / 3);
-
-          // material side culling
-          this._viewVec.subVectors(camPos, this._centroid);
-          const frontFacing = this._faceNormal.dot(this._viewVec) > 0;
-          const side = mat && mat.side !== undefined ? mat.side : THREE.FrontSide;
-          if (side === THREE.FrontSide && !frontFacing) continue;
-          if (side === THREE.BackSide && frontFacing) continue;
-          // DoubleSide: no culling
-
-          // project to clip (NDC)
-          const clipA = this._clipA.set(this._wA.x, this._wA.y, this._wA.z, 1).applyMatrix4(this._viewProj);
-          const clipB = this._clipB.set(this._wB.x, this._wB.y, this._wB.z, 1).applyMatrix4(this._viewProj);
-          const clipC = this._clipC.set(this._wC.x, this._wC.y, this._wC.z, 1).applyMatrix4(this._viewProj);
-
-          if (Math.abs(clipA.w) < 1e-9 || Math.abs(clipB.w) < 1e-9 || Math.abs(clipC.w) < 1e-9) continue;
-
-          // NDC coords
-          const ndcAx = clipA.x / clipA.w, ndcAy = clipA.y / clipA.w, ndcAz = clipA.z / clipA.w;
-          const ndcBx = clipB.x / clipB.w, ndcBy = clipB.y / clipB.w, ndcBz = clipB.z / clipB.w;
-          const ndcCx = clipC.x / clipC.w, ndcCy = clipC.y / clipC.w, ndcCz = clipC.z / clipC.w;
-
-          // quick frustum reject
-          const outside =
-            (ndcAx < -1 && ndcBx < -1 && ndcCx < -1) ||
-            (ndcAx > 1 && ndcBx > 1 && ndcCx > 1) ||
-            (ndcAy < -1 && ndcBy < -1 && ndcCy < -1) ||
-            (ndcAy > 1 && ndcBy > 1 && ndcCy > 1) ||
-            (ndcAz < -1 && ndcBz < -1 && ndcCz < -1) ||
-            (ndcAz > 1 && ndcBz > 1 && ndcCz > 1);
-          if (outside) continue;
-
-          // screen coords
-          const sAx = ndcAx * this.halfWidth + this.halfWidth;
-          const sAy = -ndcAy * this.halfHeight + this.halfHeight;
-          const sBx = ndcBx * this.halfWidth + this.halfWidth;
-          const sBy = -ndcBy * this.halfHeight + this.halfHeight;
-          const sCx = ndcCx * this.halfWidth + this.halfWidth;
-          const sCy = -ndcCy * this.halfHeight + this.halfHeight;
-
-          // shading
-          const lambert = Math.max(0, this._faceNormal.dot(this.lightDir));
-          const shade = this.ambientFactor + this.diffuseFactor * lambert;
-          const rr = Math.min(1, baseColor.r * shade);
-          const gg = Math.min(1, baseColor.g * shade);
-          const bb = Math.min(1, baseColor.b * shade);
-          const colorArr = [Math.round(rr * 255), Math.round(gg * 255), Math.round(bb * 255)];
-
-          // Use centroid distance squared (world-space) as robust painter depth metric
-          const depthMetric = camPos.distanceToSquared(this._centroid);
-
-          // For z-buffer path: compute view-space z for each vertex (transform world->camera)
-          const vA_view = this._wA.clone().applyMatrix4(this._viewMatrix);
-          const vB_view = this._wB.clone().applyMatrix4(this._viewMatrix);
-          const vC_view = this._wC.clone().applyMatrix4(this._viewMatrix);
-          const viewZ0 = vA_view.z, viewZ1 = vB_view.z, viewZ2 = vC_view.z;
-
-          addTriangle(sAx, sAy, ndcAz, sBx, sBy, ndcBz, sCx, sCy, ndcCz, colorArr, depthMetric, viewZ0, viewZ1, viewZ2);
-        } // tri loop
-      }); // traverse
-
-      // if no triangles, blit background and return
-      if (triangles.length === 0) {
-        this.ctx.putImageData(imageData, 0, 0);
-        return;
-      }
-
-      // Painter's algorithm: sort far -> near using centroid distance
-      if (this.usePainter) {
-        triangles.sort((a, b) => b.depthMetric - a.depthMetric); // far (large distance) first
-
-        // draw background
-        this.ctx.putImageData(imageData, 0, 0);
-
-        // optionally draw wireframe overlay for debugging
-        const ctx = this.ctx;
-        if (this.debug.showWireframe) {
-          ctx.save();
-          ctx.lineWidth = 0.5;
-          for (let i = 0; i < triangles.length; i++) {
-            const tri = triangles[i];
-            ctx.beginPath();
-            ctx.moveTo(tri.sx0, tri.sy0);
-            ctx.lineTo(tri.sx1, tri.sy1);
-            ctx.lineTo(tri.sx2, tri.sy2);
-            ctx.closePath();
-            ctx.strokeStyle = `rgba(0,0,0,0.08)`;
-            ctx.stroke();
-            ctx.fillStyle = `rgb(${tri.colorArr[0]},${tri.colorArr[1]},${tri.colorArr[2]})`;
-            ctx.fill();
-          }
-          ctx.restore();
-        } else {
-          for (let i = 0; i < triangles.length; i++) {
-            const tri = triangles[i];
-            ctx.beginPath();
-            ctx.moveTo(tri.sx0, tri.sy0);
-            ctx.lineTo(tri.sx1, tri.sy1);
-            ctx.lineTo(tri.sx2, tri.sy2);
-            ctx.closePath();
-            ctx.fillStyle = `rgb(${tri.colorArr[0]},${tri.colorArr[1]},${tri.colorArr[2]})`;
-            ctx.fill();
-          }
-        }
-        return;
-      }
-
-      // Z-buffer raster (slower, uses view-space z for correct ordering)
-      const zBuffer = new Float32Array(w * h);
-      for (let i = 0; i < zBuffer.length; i++) zBuffer[i] = Infinity;
-      const data = imageData.data;
-      const edge = (ax, ay, bx, by, px, py) => (px - ax) * (by - ay) - (py - ay) * (bx - ax);
-
-      for (let ti = 0; ti < triangles.length; ti++) {
-        const tri = triangles[ti];
-        const p0x = tri.sx0, p0y = tri.sy0,
-              p1x = tri.sx1, p1y = tri.sy1,
-              p2x = tri.sx2, p2y = tri.sy2;
-
-        let minX = Math.floor(Math.min(p0x, p1x, p2x));
-        let maxX = Math.ceil(Math.max(p0x, p1x, p2x));
-        let minY = Math.floor(Math.min(p0y, p1y, p2y));
-        let maxY = Math.ceil(Math.max(p0y, p1y, p2y));
-
-        if (maxX < 0 || maxY < 0 || minX >= w || minY >= h) continue;
-        minX = Math.max(0, minX);
-        minY = Math.max(0, minY);
-        maxX = Math.min(w - 1, maxX);
-        maxY = Math.min(h - 1, maxY);
-
-        const denom = edge(p0x, p0y, p1x, p1y, p2x, p2y);
-        if (Math.abs(denom) < 1e-6) continue;
-
-        for (let y = minY; y <= maxY; y++) {
-          for (let x = minX; x <= maxX; x++) {
-            const px = x + 0.5, py = y + 0.5;
-            const w0 = edge(p1x, p1y, p2x, p2y, px, py) / denom;
-            const w1 = edge(p2x, p2y, p0x, p0y, px, py) / denom;
-            const w2 = edge(p0x, p0y, p1x, p1y, px, py) / denom;
-            if (w0 < -1e-6 || w1 < -1e-6 || w2 < -1e-6) continue;
-
-            // Interpolate view-space Z using the stored viewZs (these are camera-space z's).
-            const viewZ = w0 * tri.viewZ0 + w1 * tri.viewZ1 + w2 * tri.viewZ2;
-            // Use viewZ directly as depth (remember camera-space z is negative in front of camera).
-            // We'll convert to a monotonic value for zBuffer comparison:
-            const depthValue = -viewZ; // larger depthValue == farther away (positive)
-            const idx = y * w + x;
-            if (depthValue < zBuffer[idx]) {
-              zBuffer[idx] = depthValue;
-              const di = idx * 4;
-              data[di] = tri.colorArr[0];
-              data[di + 1] = tri.colorArr[1];
-              data[di + 2] = tri.colorArr[2];
-              data[di + 3] = 255;
+                // debugging hook
+                this.debug = {
+                    showWireframe: false,
+                    maxTriangles: 200000 // safety cap
+                };
             }
-          }
+
+            setSize(w, h) {
+                this.width = Math.max(1, Math.floor(w));
+                this.height = Math.max(1, Math.floor(h));
+                this.canvas.width = this.width;
+                this.canvas.height = this.height;
+                this.canvas.style.width = this.width + 'px';
+                this.canvas.style.height = this.height + 'px';
+                this.halfWidth = this.width / 2;
+                this.halfHeight = this.height / 2;
+            }
+
+            _clearToBackground(scene, imageData) {
+                let r = 0, g = 0, b = 0;
+                if (scene && scene.background && scene.background.isColor) {
+                    const c = scene.background;
+                    r = Math.round(c.r * 255);
+                    g = Math.round(c.g * 255);
+                    b = Math.round(c.b * 255);
+                } else {
+                    const cc = new THREE.Color(this.clearColor);
+                    r = Math.round(cc.r * 255);
+                    g = Math.round(cc.g * 255);
+                    b = Math.round(cc.b * 255);
+                }
+                const data = imageData.data;
+                for (let i = 0, n = data.length; i < n; i += 4) {
+                    data[i] = r;
+                    data[i + 1] = g;
+                    data[i + 2] = b;
+                    data[i + 3] = 255;
+                }
+            }
+
+            render(scene, camera) {
+                try {
+                    if (!scene || !camera) return;
+
+                    // matrices
+                    camera.updateMatrixWorld(true);
+                    camera.updateProjectionMatrix();
+                    this._viewMatrix.copy(camera.matrixWorld).invert();
+                    this._viewProj.multiplyMatrices(camera.projectionMatrix, this._viewMatrix);
+
+                    const w = this.width, h = this.height;
+                    const imageData = this.ctx.createImageData(w, h);
+                    if (this.autoClear) this._clearToBackground(scene, imageData);
+
+                    const camPos = new THREE.Vector3();
+                    camera.getWorldPosition(camPos);
+
+                    const triangles = [];
+                    const addTriangle = (data) => {
+                        if (triangles.length >= this.debug.maxTriangles) return;
+                        triangles.push(data);
+                    };
+
+                    scene.traverse(obj => {
+                        if (!obj.visible || !obj.isMesh) return;
+                        const mesh = obj;
+                        const geometry = mesh.geometry;
+                        if (!geometry) return;
+
+                        mesh.updateMatrixWorld(true);
+                        this._worldMatrix.copy(mesh.matrixWorld);
+
+                        let positions = null;
+                        let indices = null;
+                        let itemSize = 3;
+                        if (geometry.isBufferGeometry) {
+                            const posAttr = geometry.attributes.position;
+                            if (!posAttr) return;
+                            positions = posAttr.array;
+                            itemSize = posAttr.itemSize || 3;
+                            if (geometry.index) indices = geometry.index.array;
+                        } else if (geometry.isGeometry) { // deprecated, but support it
+                            positions = new Float32Array(geometry.vertices.length * 3);
+                            for (let i = 0; i < geometry.vertices.length; i++) {
+                                positions[i * 3] = geometry.vertices[i].x;
+                                positions[i * 3 + 1] = geometry.vertices[i].y;
+                                positions[i * 3 + 2] = geometry.vertices[i].z;
+                            }
+                            indices = new Uint32Array(geometry.faces.length * 3);
+                            for (let i = 0; i < geometry.faces.length; i++) {
+                                indices[i * 3] = geometry.faces[i].a;
+                                indices[i * 3 + 1] = geometry.faces[i].b;
+                                indices[i * 3 + 2] = geometry.faces[i].c;
+                            }
+                            itemSize = 3;
+                        } else {
+                            return;
+                        }
+
+                        const getVertex = (idx, outVec3) => {
+                            const i3 = idx * itemSize;
+                            outVec3.set(positions[i3], positions[i3 + 1], positions[i3 + 2]);
+                        };
+
+                        const triCount = indices ? (indices.length / 3) : (positions.length / (itemSize * 3));
+                        const mat = Array.isArray(mesh.material) ? mesh.material[0] : mesh.material;
+                        let baseColor = new THREE.Color(0x888888);
+                        if (mat && mat.color) baseColor.copy(mat.color);
+
+                        for (let t = 0; t < triCount; t++) {
+                            let aIdx, bIdx, cIdx;
+                            if (indices) {
+                                aIdx = indices[t * 3];
+                                bIdx = indices[t * 3 + 1];
+                                cIdx = indices[t * 3 + 2];
+                            } else {
+                                aIdx = t * 3;
+                                bIdx = t * 3 + 1;
+                                cIdx = t * 3 + 2;
+                            }
+
+                            getVertex(aIdx, this._vA);
+                            getVertex(bIdx, this._vB);
+                            getVertex(cIdx, this._vC);
+
+                            this._wA.copy(this._vA).applyMatrix4(this._worldMatrix);
+                            this._wB.copy(this._vB).applyMatrix4(this._worldMatrix);
+                            this._wC.copy(this._vC).applyMatrix4(this._worldMatrix);
+
+                            this._e1.subVectors(this._wB, this._wA);
+                            this._e2.subVectors(this._wC, this._wA);
+                            this._faceNormal.crossVectors(this._e1, this._e2);
+                            if (this._faceNormal.lengthSq() < 1e-12) continue;
+                            this._faceNormal.normalize();
+
+                            this._centroid.copy(this._wA).add(this._wB).add(this._wC).multiplyScalar(1 / 3);
+                            this._viewVec.subVectors(camPos, this._centroid);
+                            const frontFacing = this._faceNormal.dot(this._viewVec) > 0;
+                            const side = mat && mat.side !== undefined ? mat.side : THREE.FrontSide;
+                            if (side === THREE.FrontSide && !frontFacing) continue;
+                            if (side === THREE.BackSide && frontFacing) continue;
+
+                            const clipA = this._clipA.set(this._wA.x, this._wA.y, this._wA.z, 1).applyMatrix4(this._viewProj);
+                            const clipB = this._clipB.set(this._wB.x, this._wB.y, this._wB.z, 1).applyMatrix4(this._viewProj);
+                            const clipC = this._clipC.set(this._wC.x, this._wC.y, this._wC.z, 1).applyMatrix4(this._viewProj);
+
+                            if (Math.abs(clipA.w) < 1e-9 || Math.abs(clipB.w) < 1e-9 || Math.abs(clipC.w) < 1e-9) continue;
+
+                            const ndcAx = clipA.x / clipA.w, ndcAy = clipA.y / clipA.w;
+                            const ndcBx = clipB.x / clipB.w, ndcBy = clipB.y / clipB.w;
+                            const ndcCx = clipC.x / clipC.w, ndcCy = clipC.y / clipC.w;
+
+                            const sAx = ndcAx * this.halfWidth + this.halfWidth;
+                            const sAy = -ndcAy * this.halfHeight + this.halfHeight;
+                            const sBx = ndcBx * this.halfWidth + this.halfWidth;
+                            const sBy = -ndcBy * this.halfHeight + this.halfHeight;
+                            const sCx = ndcCx * this.halfWidth + this.halfWidth;
+                            const sCy = -ndcCy * this.halfHeight + this.halfHeight;
+                            
+                            // Shading
+                            const lambert = Math.max(0, this._faceNormal.dot(this.lightDir));
+                            const shade = this.ambientFactor + this.diffuseFactor * lambert;
+                            const rr = Math.min(1, baseColor.r * shade);
+                            const gg = Math.min(1, baseColor.g * shade);
+                            const bb = Math.min(1, baseColor.b * shade);
+                            const colorArr = [Math.round(rr * 255), Math.round(gg * 255), Math.round(bb * 255)];
+
+                            const depthMetric = camPos.distanceToSquared(this._centroid);
+
+                            const vA_view = this._wA.clone().applyMatrix4(this._viewMatrix);
+                            const vB_view = this._wB.clone().applyMatrix4(this._viewMatrix);
+                            const vC_view = this._wC.clone().applyMatrix4(this._viewMatrix);
+                            const viewZ0 = vA_view.z, viewZ1 = vB_view.z, viewZ2 = vC_view.z;
+
+                            // Perspective-correct z interpolation requires interpolating 1/z
+                            // We also need to store the screen-space vertices for rasterization
+                            const triData = {
+                                sx0: sAx, sy0: sAy,
+                                sx1: sBx, sy1: sBy,
+                                sx2: sCx, sy2: sCy,
+                                colorArr: colorArr,
+                                depthMetric: depthMetric,
+                                zInv0: 1 / viewZ0,
+                                zInv1: 1 / viewZ1,
+                                zInv2: 1 / viewZ2,
+                                viewZ0: viewZ0, viewZ1: viewZ1, viewZ2: viewZ2
+                            };
+                            addTriangle(triData);
+                        }
+                    });
+
+                    if (triangles.length === 0) {
+                        this.ctx.putImageData(imageData, 0, 0);
+                        return;
+                    }
+
+                    // Painter's algorithm
+                    if (this.usePainter) {
+                        triangles.sort((a, b) => b.depthMetric - a.depthMetric);
+                        this.ctx.putImageData(imageData, 0, 0);
+
+                        const ctx = this.ctx;
+                        for (let i = 0; i < triangles.length; i++) {
+                            const tri = triangles[i];
+                            ctx.beginPath();
+                            ctx.moveTo(tri.sx0, tri.sy0);
+                            ctx.lineTo(tri.sx1, tri.sy1);
+                            ctx.lineTo(tri.sx2, tri.sy2);
+                            ctx.closePath();
+                            if (this.debug.showWireframe) {
+                                ctx.strokeStyle = `rgba(0,0,0,0.2)`;
+                                ctx.stroke();
+                            }
+                            ctx.fillStyle = `rgb(${tri.colorArr[0]},${tri.colorArr[1]},${tri.colorArr[2]})`;
+                            ctx.fill();
+                        }
+                        return;
+                    }
+
+                    // Z-buffer raster
+                    const zBuffer = new Float32Array(w * h);
+                    for (let i = 0; i < zBuffer.length; i++) zBuffer[i] = Infinity;
+                    const data = imageData.data;
+                    const edge = (ax, ay, bx, by, px, py) => (px - ax) * (by - ay) - (py - ay) * (bx - ax);
+
+                    for (let ti = 0; ti < triangles.length; ti++) {
+                        const tri = triangles[ti];
+                        const p0x = tri.sx0, p0y = tri.sy0,
+                            p1x = tri.sx1, p1y = tri.sy1,
+                            p2x = tri.sx2, p2y = tri.sy2;
+
+                        let minX = Math.floor(Math.min(p0x, p1x, p2x));
+                        let maxX = Math.ceil(Math.max(p0x, p1x, p2x));
+                        let minY = Math.floor(Math.min(p0y, p1y, p2y));
+                        let maxY = Math.ceil(Math.max(p0y, p1y, p2y));
+
+                        if (maxX < 0 || maxY < 0 || minX >= w || minY >= h) continue;
+                        minX = Math.max(0, minX);
+                        minY = Math.max(0, minY);
+                        maxX = Math.min(w - 1, maxX);
+                        maxY = Math.min(h - 1, maxY);
+
+                        const denom = edge(p0x, p0y, p1x, p1y, p2x, p2y);
+                        if (Math.abs(denom) < 1e-6) continue;
+
+                        for (let y = minY; y <= maxY; y++) {
+                            for (let x = minX; x <= maxX; x++) {
+                                const px = x + 0.5, py = y + 0.5;
+                                const w0 = edge(p1x, p1y, p2x, p2y, px, py) / denom;
+                                const w1 = edge(p2x, p2y, p0x, p0y, px, py) / denom;
+                                const w2 = edge(p0x, p0y, p1x, p1y, px, py) / denom;
+                                if (w0 < -1e-6 || w1 < -1e-6 || w2 < -1e-6) continue;
+
+                                // Perspective-correct depth interpolation using inverse Z
+                                const zInv = w0 * tri.zInv0 + w1 * tri.zInv1 + w2 * tri.zInv2;
+                                const interpolatedViewZ = 1 / zInv;
+
+                                const idx = y * w + x;
+                                // The depth test is now correctly interpolated
+                                if (-interpolatedViewZ < zBuffer[idx]) {
+                                    zBuffer[idx] = -interpolatedViewZ;
+                                    const di = idx * 4;
+                                    data[di] = tri.colorArr[0];
+                                    data[di + 1] = tri.colorArr[1];
+                                    data[di + 2] = tri.colorArr[2];
+                                    data[di + 3] = 255;
+                                }
+                            }
+                        }
+                    }
+
+                    this.ctx.putImageData(imageData, 0, 0);
+
+                } catch (e) {
+                    console.error('SimpleCanvasRenderer.render error:', e);
+                }
+            }
         }
-      }
 
-      this.ctx.putImageData(imageData, 0, 0);
-
-    } catch (e) {
-      console.error('SimpleCanvasRenderer.render error:', e);
-    }
-  }
-}
 
 // expose
 window.SimpleCanvasRenderer = SimpleCanvasRenderer;
@@ -3586,6 +3545,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
