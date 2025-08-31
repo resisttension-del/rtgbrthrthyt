@@ -847,104 +847,121 @@ function createCanvasRenderer({ width = 1280, height = 720, opts = {} } = {}) {
   }
 
   // radial silhouette: cheap and handles camera-inside nicely
-  function drawRadialSilhouette(obj, geom, color, dist, camera) {
-    const posAttr = geom.attributes && geom.attributes.position;
-    if (!posAttr) return false;
-    const vertCount = posAttr.count;
-    const indexAttr = geom.index;
-    const triCount = indexAttr ? indexAttr.count / 3 : vertCount / 3;
-    if (vertCount > MAX_VERTS_FOR_HULL || triCount > MAX_TRIS_FOR_HULL) return false; // too big
+// put this near top-level of renderer (to persist across frames)
+const lastBinMap = new WeakMap();
+const SMOOTH_ALPHA = 0.6; // how much previous frame influences selection (0..1)
+const LERP_POS = 0.35;    // how much to lerp screen position toward previous (0..1)
 
-    // check if camera is inside object's bounding box (cheap)
-    let cameraInside = false;
-    if (geom.boundingBox) {
-      tmpInv.copy(obj.matrixWorld).invert();
-      const camLocal = camera.position.clone().applyMatrix4(tmpInv);
-      const min = geom.boundingBox.min, max = geom.boundingBox.max;
-      cameraInside = (camLocal.x >= min.x && camLocal.x <= max.x &&
-                      camLocal.y >= min.y && camLocal.y <= max.y &&
-                      camLocal.z >= min.z && camLocal.z <= max.z);
-    }
+function drawRadialSilhouette(obj, geom, color, dist, camera) {
+  const posAttr = geom.attributes && geom.attributes.position;
+  if (!posAttr) return false;
+  const vertCount = posAttr.count;
+  const indexAttr = geom.index;
+  const triCount = indexAttr ? indexAttr.count / 3 : vertCount / 3;
+  if (vertCount > MAX_VERTS_FOR_HULL || triCount > MAX_TRIS_FOR_HULL) return false;
 
-    // We will run radial method if camera is inside OR object is close enough and small
-    if (!cameraInside && dist > MAX_DIST_FOR_HULL) return false;
-
-    // bin by angle around canvas center
-    const cx = canvas.width * 0.5;
-    const cy = canvas.height * 0.5;
-    const bins = new Array(RADIAL_BINS).fill(null);
-
-    for (let i = 0; i < posAttr.count; i++) {
-      tmpVec.fromBufferAttribute(posAttr, i).applyMatrix4(obj.matrixWorld);
-      proj.copy(tmpVec).project(camera);
-      const z = proj.z;
-      // skip vertices that are fully behind camera
-      if (z > 1) continue;
-      const sx = (proj.x * 0.5 + 0.5) * canvas.width;
-      const sy = (-proj.y * 0.5 + 0.5) * canvas.height;
-      // angle relative to center
-      const ang = Math.atan2(sy - cy, sx - cx);
-      const angNorm = ang < 0 ? ang + Math.PI * 2 : ang;
-      const bin = Math.floor((angNorm / (Math.PI * 2)) * RADIAL_BINS);
-      // distance metric = world-space distance from camera (farthest preferred)
-      const worldDist = camera.position.distanceTo(tmpVec);
-      const entry = bins[bin];
-      if (!entry || worldDist > entry.worldDist) {
-        bins[bin] = { x: sx, y: sy, z: z, worldDist, ang: angNorm, idx: i };
-      }
-    }
-
-    // collect ordered points, optionally bridge small gaps
-    const pts = [];
-    const nonEmptyIdxs = [];
-    for (let i = 0; i < RADIAL_BINS; i++) if (bins[i]) nonEmptyIdxs.push(i);
-
-    if (nonEmptyIdxs.length === 0) return false;
-
-    // optionally bridge tiny holes: if a gap of consecutive empty bins <= BRIDGE_GAP_BINS, fill by using nearest neighbor
-    if (BRIDGE_GAP_BINS > 0) {
-      let bridged = 0;
-      for (let start = 0; start < RADIAL_BINS; start++) {
-        if (bins[start]) continue;
-        // count length of empty run
-        let run = 1;
-        while (run <= BRIDGE_GAP_BINS && bins[(start + run) % RADIAL_BINS] === null) run++;
-        if (run <= BRIDGE_GAP_BINS) {
-          // find left and right filled neighbors
-          let left = (start - 1 + RADIAL_BINS) % RADIAL_BINS;
-          while (left !== start && !bins[left]) left = (left - 1 + RADIAL_BINS) % RADIAL_BINS;
-          let right = (start + run) % RADIAL_BINS;
-          while (right !== start && !bins[right]) right = (right + 1) % RADIAL_BINS;
-          if (bins[left] && bins[right]) {
-            // create pseudo entries across the gap by linear interpolation in screen space
-            for (let g = 0; g < run; g++) {
-              const t = (g + 1) / (run + 1);
-              const lx = bins[left].x, ly = bins[left].y;
-              const rx = bins[right].x, ry = bins[right].y;
-              const ix = lx + (rx - lx) * t;
-              const iy = ly + (ry - ly) * t;
-              const iz = Math.min(bins[left].z, bins[right].z); // conservative
-              bins[(start + g) % RADIAL_BINS] = { x: ix, y: iy, z: iz, worldDist: Math.max(bins[left].worldDist, bins[right].worldDist) };
-              bridged++;
-            }
-          }
-        }
-        start += run;
-      }
-    }
-
-    // final ordered collect
-    for (let i = 0; i < RADIAL_BINS; i++) {
-      const b = bins[i];
-      if (b) pts.push({ x: b.x, y: b.y, z: b.z });
-    }
-
-    if (pts.length === 0) return false;
-
-    // draw polyline (close loop)
-    drawPolyline(pts, color, dist, true);
-    return true;
+  // compute object's projected centroid (use bbox center if available, else world position)
+  let worldCenter = new THREE.Vector3();
+  if (geom.boundingBox) {
+    const bb = geom.boundingBox;
+    worldCenter.set(
+      (bb.min.x + bb.max.x) * 0.5,
+      (bb.min.y + bb.max.y) * 0.5,
+      (bb.min.z + bb.max.z) * 0.5
+    ).applyMatrix4(obj.matrixWorld);
+  } else {
+    obj.getWorldPosition(worldCenter);
   }
+  proj.copy(worldCenter).project(camera);
+  const cx = (proj.x * 0.5 + 0.5) * canvas.width;
+  const cy = (-proj.y * 0.5 + 0.5) * canvas.height;
+
+  // check camera-inside quickly (optional, cheap)
+  let cameraInside = false;
+  if (geom.boundingBox) {
+    const inv = new THREE.Matrix4().copy(obj.matrixWorld).invert();
+    const camLocal = camera.position.clone().applyMatrix4(inv);
+    const min = geom.boundingBox.min, max = geom.boundingBox.max;
+    cameraInside = (camLocal.x >= min.x && camLocal.x <= max.x &&
+                    camLocal.y >= min.y && camLocal.y <= max.y &&
+                    camLocal.z >= min.z && camLocal.z <= max.z);
+  }
+  if (!cameraInside && dist > MAX_DIST_FOR_HULL) return false;
+
+  // prepare bins
+  const bins = new Array(RADIAL_BINS).fill(null);
+  // previous bins for smoothing
+  const prevBins = lastBinMap.get(obj) || new Array(RADIAL_BINS).fill(null);
+
+  // project vertices & bin
+  for (let i = 0; i < posAttr.count; i++) {
+    tmpVec.fromBufferAttribute(posAttr, i).applyMatrix4(obj.matrixWorld);
+    proj.copy(tmpVec).project(camera);
+    const z = proj.z;
+    if (z > 1) continue;
+    const sx = (proj.x * 0.5 + 0.5) * canvas.width;
+    const sy = (-proj.y * 0.5 + 0.5) * canvas.height;
+
+    const ang = Math.atan2(sy - cy, sx - cx);
+    const angNorm = ang < 0 ? ang + Math.PI * 2 : ang;
+    const binIdx = Math.floor((angNorm / (Math.PI * 2)) * RADIAL_BINS) % RADIAL_BINS;
+
+    const worldDist = camera.position.distanceTo(tmpVec);
+
+    const cur = bins[binIdx];
+    if (!cur || worldDist > cur.worldDist) {
+      bins[binIdx] = { x: sx, y: sy, z, worldDist, ang: angNorm };
+    }
+  }
+
+  // smoothing: bias toward previous selection to avoid flip-flop
+  for (let b = 0; b < RADIAL_BINS; b++) {
+    const cur = bins[b];
+    const prev = prevBins[b];
+    if (cur && prev) {
+      // compute smoothed worldDist (weighted)
+      const smoothedDist = cur.worldDist * (1 - SMOOTH_ALPHA) + prev.worldDist * SMOOTH_ALPHA;
+      // if prev was still nearly as far (within 5%), prefer prev position to avoid popping
+      if (Math.abs(prev.worldDist - cur.worldDist) / Math.max(cur.worldDist, 1) < 0.05) {
+        // lerp screen positions toward previous
+        cur.x = prev.x * SMOOTH_ALPHA + cur.x * (1 - SMOOTH_ALPHA);
+        cur.y = prev.y * SMOOTH_ALPHA + cur.y * (1 - SMOOTH_ALPHA);
+        cur.worldDist = smoothedDist;
+      } else {
+        // keep the farther one but still softly lerp a bit for visual smoothing
+        cur.x = prev.x * LERP_POS + cur.x * (1 - LERP_POS);
+        cur.y = prev.y * LERP_POS + cur.y * (1 - LERP_POS);
+        cur.worldDist = smoothedDist;
+      }
+    } else if (!cur && prev) {
+      // keep small faded ghost of previous to reduce popping from temporary occlusion
+      // but only if prev was recent (we don't track time here—cheap heuristic)
+      bins[b] = { x: prev.x, y: prev.y, z: prev.z, worldDist: prev.worldDist * 0.98 };
+    }
+    // else keep cur as is or null
+  }
+
+  // commit current bins for next frame
+  // deep-copy minimal fields to avoid retaining huge arrays
+  const committed = new Array(RADIAL_BINS);
+  for (let i = 0; i < RADIAL_BINS; i++) {
+    const v = bins[i];
+    committed[i] = v ? { x: v.x, y: v.y, z: v.z, worldDist: v.worldDist } : null;
+  }
+  lastBinMap.set(obj, committed);
+
+  // collect ordered points and skip truly empty bins (gaps allowed)
+  const pts = [];
+  for (let i = 0; i < RADIAL_BINS; i++) {
+    const b = bins[i];
+    if (b) pts.push({ x: b.x, y: b.y, z: b.z });
+  }
+  if (pts.length === 0) return false;
+
+  // draw closed polyline
+  drawPolyline(pts, color, dist, true);
+  return true;
+}
 
   // --- the rest of the renderer (clear, traverse, bounding box fallback) ---
   const api = {
@@ -3126,6 +3143,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
