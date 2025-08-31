@@ -2356,7 +2356,7 @@ export function animate(timestamp) {
         }
 
         // Render the scene using safeRender()
-        safeRender();
+          window.renderer.render(scene, camera);
     } catch (err) {
         console.error("Error in animate:", err);
     } finally {
@@ -2368,7 +2368,8 @@ window.THREE = THREE;
 
 async function tryLoadLegacyCanvasRenderer() {
   const legacyUrl =
-    "https://rawcdn.githack.com/mrdoob/three.js/r110/examples/js/renderers/CanvasRenderer.js"; // r110 example file
+    "https://cdn.jsdelivr.net/gh/mrdoob/three.js@r110/examples/js/renderers/CanvasRenderer.js"; // r110 example file
+
   try {
     const resp = await fetch(legacyUrl);
     if (!resp.ok) throw new Error("Failed to fetch CanvasRenderer.js: " + resp.status);
@@ -3013,6 +3014,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
