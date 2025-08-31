@@ -810,351 +810,465 @@ function setupDetailToggle() {
 }
 
 
-export async function initSceneCrocodilosConstruction() { // Make initSceneCrocodilosConstruction async
-sceneNum = 1;
-console.log("Initializing CrocodilosConstruction scene...");
+export async function initSceneCrocodilosConstruction() {
+  sceneNum = 1;
+  console.log("Initializing CrocodilosConstruction scene...");
 
+  // 1. Scene
+  scene = new THREE.Scene();
+  const skyGeo = new THREE.SphereGeometry(200, 32, 32).scale(-1, 1, 1);
+  const skyMat = new THREE.MeshBasicMaterial({
+    color: 0x000022,
+    side: THREE.BackSide,
+    fog: false
+  });
+  const skyColor = new THREE.Color(0x111122);
+  scene.background = skyColor;
+  skyMesh = new THREE.Mesh(skyGeo, skyMat);
+  scene.add(skyMesh);
+  window.scene = scene;
 
+  // ensure camera exists
+  if (!window.camera) {
+    console.error("initSceneCrocodilosConstruction: window.camera is not defined.");
+    return;
+  }
 
+  window.camera.rotation.order = "YXZ";
+  scene.add(window.camera);
 
+  // 3. Renderer
+  await tryLoadLegacyCanvasRenderer();
+  renderer = window.renderer;
 
-// 1. Scene
-scene = new THREE.Scene();
-const skyGeo = new THREE.SphereGeometry(200, 32, 32).scale(-1, 1, 1);
-const skyMat = new THREE.MeshBasicMaterial({
-color: 0x000022,
-side: THREE.BackSide,
-fog: false
-});
-const skyColor = new THREE.Color(0x111122);
-scene.background = skyColor;
-skyMesh = new THREE.Mesh(skyGeo, skyMat);
-scene.add(skyMesh);
-window.scene = scene;
+  // Safety: ensure renderer exists
+  if (!renderer) {
+    console.error("initSceneCrocodilosConstruction: renderer was not created by tryLoadLegacyCanvasRenderer().");
+    return;
+  }
 
+  // DOM element styling
+  if (renderer.domElement) {
+    renderer.domElement.style.position = "relative";
+    renderer.domElement.style.zIndex = "0";
+  }
 
-window.camera.rotation.order = "YXZ";
-scene.add( window.camera );
+  // Ensure a shadowMap object exists before assigning type (SimpleCanvasRenderer won't have it)
+  if (!renderer.shadowMap) renderer.shadowMap = {};
+  if (typeof THREE.PCFSoftShadowMap !== "undefined") {
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  } else {
+    // fallback numeric constant or leave as-is
+    renderer.shadowMap.type = renderer.shadowMap.type || 0;
+  }
 
+  // set clear color safely (only call setClearColor if available)
+  if (typeof renderer.setClearColor === "function") {
+    try {
+      renderer.setClearColor(0x000000, 1);
+    } catch (e) {
+      console.warn("renderer.setClearColor failed:", e);
+    }
+  } else if ('clearColor' in renderer) {
+    // SimpleCanvasRenderer uses string hex; convert number -> string
+    renderer.clearColor = '#000000';
+  }
 
-// 3. Renderer
-await tryLoadLegacyCanvasRenderer();
-renderer = window.renderer;
-renderer.domElement.style.position = "relative";
-renderer.domElement.style.zIndex = "0";
-renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-renderer.setClearColor(0x000000, 1);
-document.getElementById("game-container").appendChild(renderer.domElement);
-window.renderer = renderer;
+  // Append DOM element once
+  const container = document.getElementById("game-container");
+  if (renderer.domElement && container && !container.contains(renderer.domElement)) {
+    container.appendChild(renderer.domElement);
+  }
+  window.renderer = renderer;
 
-// 4. Hemisphere Light
-hemi = new THREE.HemisphereLight(0xffffff, 0x444444, 0.05);
-scene.add(hemi);
-window.hemi = hemi;
+  // 4. Hemisphere Light
+  hemi = new THREE.HemisphereLight(0xffffff, 0x444444, 0.05);
+  scene.add(hemi);
+  window.hemi = hemi;
 
-// 5. Post-processing Composer
-// Note: EffectComposer also needs to know the renderer's *display* size
-composer = new EffectComposer(renderer);
-renderPass = new RenderPass(scene, window.camera);
-composer.addPass(renderPass);
-window.composer = composer;
-window.renderPass = renderPass;
+  // 5. Post-processing Composer
+  // Only create EffectComposer if we have a WebGLRenderer (composer requires WebGL)
+  const isWebGLRenderer = (typeof THREE.WebGLRenderer !== "undefined") && (renderer instanceof THREE.WebGLRenderer);
+  if (isWebGLRenderer) {
+    composer = new EffectComposer(renderer);
+    renderPass = new RenderPass(scene, window.camera);
+    composer.addPass(renderPass);
+    window.composer = composer;
+    window.renderPass = renderPass;
+  } else {
+    composer = null;
+    renderPass = null;
+    window.composer = null;
+    window.renderPass = null;
+    console.warn("EffectComposer disabled: renderer is not WebGL (CPU canvas fallback).");
+  }
 
-// --- Initial Detail Setup for CrocodilosConstruction ---
-toggleSceneDetails(detailsEnabled);
+  // --- Initial Detail Setup for CrocodilosConstruction ---
+  toggleSceneDetails(detailsEnabled);
 
-// --- Map and Physics Initialization ---
-// AWAIT the creation of the map and spawn points
-spawnPoints = await createCrocodilosConstruction(scene, physicsController);
-window.spawnPoints = spawnPoints; // Now window.spawnPoints will be the actual array
+  // --- Map and Physics Initialization ---
+  spawnPoints = await createCrocodilosConstruction(scene, physicsController);
+  window.spawnPoints = spawnPoints;
 
-const initialSpawnPoint = findFurthestSpawn(); // Call your function to get a spawn point
-physicsController.setPlayerPosition(initialSpawnPoint);
+  const initialSpawnPoint = findFurthestSpawn();
+  physicsController.setPlayerPosition(initialSpawnPoint);
 
-// --- Audio Initialization ---
-if (typeof windSound !== 'undefined') {
-windSound.play().catch(err => console.warn("Failed to play wind sound:", err));
-window.windSound = windSound;
-} else {
-console.warn("windSound is not defined. Audio might not play for CrocodilosConstruction.");
-}
+  // --- Audio Initialization ---
+  if (typeof windSound !== 'undefined') {
+    windSound.play().catch(err => console.warn("Failed to play wind sound:", err));
+    window.windSound = windSound;
+  } else {
+    console.warn("windSound is not defined. Audio might not play for CrocodilosConstruction.");
+  }
 
-// --- Window Resize Handling ---
-function onWindowResize() {
-const container = document.getElementById("game-container");
-const displayWidth  = container.clientWidth;
-const displayHeight = container.clientHeight;
+  // --- Window Resize Handling ---
+  function onWindowResize() {
+    const container = document.getElementById("game-container");
+    const displayWidth  = container.clientWidth;
+    const displayHeight = container.clientHeight;
 
-// 1) Render & post‑process at fixed 1280×720
-renderer.setSize(FIXED_WIDTH, FIXED_HEIGHT, false);
-if (composer) composer.setSize(FIXED_WIDTH, FIXED_HEIGHT);
+    // 1) Render & post-process at fixed 1280×720
+    if (typeof renderer.setSize === 'function') {
+      renderer.setSize(FIXED_WIDTH, FIXED_HEIGHT, false);
+    }
+    if (composer) composer.setSize(FIXED_WIDTH, FIXED_HEIGHT);
 
-// 2) Stretch the canvas via CSS to fill the container
-renderer.domElement.style.width  = `${displayWidth}px`;
-renderer.domElement.style.height = `${displayHeight}px`;
+    // 2) Stretch the canvas via CSS to fill the container
+    if (renderer.domElement) {
+      renderer.domElement.style.width  = `${displayWidth}px`;
+      renderer.domElement.style.height = `${displayHeight}px`;
+    }
 
-// 3) Update camera to match the display aspect ratio
-window.camera.aspect = displayWidth / displayHeight;
-window.camera.updateProjectionMatrix();
+    // 3) Update camera to match the display aspect ratio
+    window.camera.aspect = displayWidth / displayHeight;
+    window.camera.updateProjectionMatrix();
 
-// 4) Re‑attach weapon to local player (if needed)
-if (window.weaponController && window.localPlayer && typeof getWeaponModel === 'function' && typeof attachWeaponToPlayer === 'function') {
-const key = window.localPlayer.weapon.replace(/-/g, "").toLowerCase();
-const proto = getWeaponModel(key);
-if (proto) attachWeaponToPlayer(window.localPlayer.id, key);
-}
+    // 4) Re-attach weapon to local player (if needed)
+    if (window.weaponController && window.localPlayer && typeof getWeaponModel === 'function' && typeof attachWeaponToPlayer === 'function') {
+      const key = window.localPlayer.weapon.replace(/-/g, "").toLowerCase();
+      const proto = getWeaponModel(key);
+      if (proto) attachWeaponToPlayer(window.localPlayer.id, key);
+    }
 
-// 5) Re‑attach weapons for remote players
-if (window.remotePlayers) {
-Object.values(window.remotePlayers).forEach(({ currentWeapon, weaponRoot }) => {
-if (currentWeapon && weaponRoot && typeof attachWeaponToPlayer === 'function') {
-attachWeaponToPlayer(weaponRoot.userData.playerId, currentWeapon);
-}
-});
-}
+    // 5) Re-attach weapons for remote players
+    if (window.remotePlayers) {
+      Object.values(window.remotePlayers).forEach(({ currentWeapon, weaponRoot }) => {
+        if (currentWeapon && weaponRoot && typeof attachWeaponToPlayer === 'function') {
+          attachWeaponToPlayer(weaponRoot.userData.playerId, currentWeapon);
+        }
+      });
+    }
 
-// 6) Resize HUD overlay
-const hud = document.getElementById("hud");
-if (hud) {
-hud.style.width  = `${displayWidth}px`;
-hud.style.height = `${displayHeight}px`;
-}
-}
+    // 6) Resize HUD overlay
+    const hud = document.getElementById("hud");
+    if (hud) {
+      hud.style.width  = `${displayWidth}px`;
+      hud.style.height = `${displayHeight}px`;
+    }
+  }
 
-window.addEventListener("resize", onWindowResize, false);
-onWindowResize(); // Call once initially to set the correct sizes
-}
-
-export async function initSceneSigmaCity() { // Make initSceneCrocodilosConstruction async
-sceneNum = 2;
-console.log("Initializing SigmaCity scene...");
-
-scene = new THREE.Scene();
-const skyColor = new THREE.Color(0x87CEEB);
-scene.background = skyColor;
-window.scene = scene;
-
-
-const skyGeo = new THREE.SphereGeometry(200, 32, 32).scale(-1, 1, 1);
-const skyMat = new THREE.MeshBasicMaterial({
-color: 0x000022,
-side: THREE.BackSide,
-fog: false
-});
-skyMesh = new THREE.Mesh(skyGeo, skyMat);
-scene.add(skyMesh);
-window.scene = scene;
-
-
-window.camera.rotation.order = "YXZ";
-scene.add( window.camera );
-
-
-// 3. Renderer
-await tryLoadLegacyCanvasRenderer();
-renderer = window.renderer;
-renderer.domElement.style.position = "relative";
-renderer.domElement.style.zIndex = "0";
-renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-renderer.setClearColor(0x000000, 1);
-document.getElementById("game-container").appendChild(renderer.domElement);
-window.renderer = renderer;
-
-// 4. Hemisphere Light
-hemi = new THREE.HemisphereLight(0xffffff, 0x444444, 0.05);
-scene.add(hemi);
-window.hemi = hemi;
-
-// 5. Post-processing Composer
-// Note: EffectComposer also needs to know the renderer's *display* size
-composer = new EffectComposer(renderer);
-renderPass = new RenderPass(scene, window.camera);
-composer.addPass(renderPass);
-window.composer = composer;
-window.renderPass = renderPass;
-
-// --- Initial Detail Setup for SigmaCity ---
-toggleSceneDetails(detailsEnabled);
-
-// --- Map and Physics Initialization ---
-// AWAIT the creation of the map and spawn points
-spawnPoints = await createSigmaCity(scene, physicsController);
-window.spawnPoints = spawnPoints; // Now window.spawnPoints will be the actual array
-
-const initialSpawnPoint = findFurthestSpawn(); // Call your function to get a spawn point
-physicsController.setPlayerPosition(initialSpawnPoint);
-
-// --- Audio Initialization ---
-if (typeof forestNoise !== 'undefined') {
-forestNoise.volume = 0.05;
-forestNoise.play().catch(err => console.warn("Failed to play forest noise:", err));
-window.windSound = forestNoise; // Renamed to windSound for consistency if only one wind sound
-} else {
-console.warn("forestNoise is not defined. Audio might not play for SigmaCity.");
-}
-
-// --- Window Resize Handling ---
-function onWindowResize() {
-const container = document.getElementById("game-container");
-const displayWidth  = container.clientWidth;
-const displayHeight = container.clientHeight;
-
-// 1) Render & post‑process at fixed 1280×720
-renderer.setSize(FIXED_WIDTH, FIXED_HEIGHT, false);
-if (composer) composer.setSize(FIXED_WIDTH, FIXED_HEIGHT);
-
-// 2) Stretch the canvas via CSS to fill the container
-renderer.domElement.style.width  = `${displayWidth}px`;
-renderer.domElement.style.height = `${displayHeight}px`;
-
-// 3) Update camera to match the display aspect ratio
-window.camera.aspect = displayWidth / displayHeight;
-window.camera.updateProjectionMatrix();
-
-// 4) Re‑attach weapon to local player (if needed)
-if (window.weaponController && window.localPlayer && typeof getWeaponModel === 'function' && typeof attachWeaponToPlayer === 'function') {
-const key = window.localPlayer.weapon.replace(/-/g, "").toLowerCase();
-const proto = getWeaponModel(key);
-if (proto) attachWeaponToPlayer(window.localPlayer.id, key);
-}
-
-// 5) Re‑attach weapons for remote players
-if (window.remotePlayers) {
-Object.values(window.remotePlayers).forEach(({ currentWeapon, weaponRoot }) => {
-if (currentWeapon && weaponRoot && typeof attachWeaponToPlayer === 'function') {
-attachWeaponToPlayer(weaponRoot.userData.playerId, currentWeapon);
-}
-});
-}
-
-// 6) Resize HUD overlay
-const hud = document.getElementById("hud");
-if (hud) {
-hud.style.width  = `${displayWidth}px`;
-hud.style.height = `${displayHeight}px`;
-}
-}
-
-window.addEventListener("resize", onWindowResize, false);
-onWindowResize(); // Call once initially to set the correct sizes
+  window.addEventListener("resize", onWindowResize, false);
+  onWindowResize();
 }
 
 
-export async function initSceneDiddyDunes() { // Make initSceneCrocodilosConstruction async
-sceneNum = 3;
-console.log("Initializing DiddyDunes scene...");
+export async function initSceneSigmaCity() {
+  sceneNum = 2;
+  console.log("Initializing SigmaCity scene...");
 
-scene = new THREE.Scene();
-const skyColor = new THREE.Color(0x87CEEB);
-scene.background = skyColor;
-window.scene = scene;
+  scene = new THREE.Scene();
+  const skyColor = new THREE.Color(0x87CEEB);
+  scene.background = skyColor;
+  window.scene = scene;
 
+  const skyGeo = new THREE.SphereGeometry(200, 32, 32).scale(-1, 1, 1);
+  const skyMat = new THREE.MeshBasicMaterial({
+    color: 0x000022,
+    side: THREE.BackSide,
+    fog: false
+  });
+  skyMesh = new THREE.Mesh(skyGeo, skyMat);
+  scene.add(skyMesh);
+  window.scene = scene;
 
-const skyGeo = new THREE.SphereGeometry(200, 32, 32).scale(-1, 1, 1);
-const skyMat = new THREE.MeshBasicMaterial({
-color: 0x000022,
-side: THREE.BackSide,
-fog: false
-});
-skyMesh = new THREE.Mesh(skyGeo, skyMat);
-scene.add(skyMesh);
-window.scene = scene;
+  if (!window.camera) {
+    console.error("initSceneSigmaCity: window.camera is not defined.");
+    return;
+  }
 
+  window.camera.rotation.order = "YXZ";
+  scene.add(window.camera);
 
-window.camera.rotation.order = "YXZ";
-scene.add( window.camera );
+  // 3. Renderer
+  await tryLoadLegacyCanvasRenderer();
+  renderer = window.renderer;
 
+  if (!renderer) {
+    console.error("initSceneSigmaCity: renderer was not created by tryLoadLegacyCanvasRenderer().");
+    return;
+  }
 
-// 3. Renderer
-await tryLoadLegacyCanvasRenderer();
-renderer = window.renderer;
-renderer.domElement.style.position = "relative";
-renderer.domElement.style.zIndex = "0";
-renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-renderer.setClearColor(0x000000, 1);
-document.getElementById("game-container").appendChild(renderer.domElement);
-window.renderer = renderer;
+  if (renderer.domElement) {
+    renderer.domElement.style.position = "relative";
+    renderer.domElement.style.zIndex = "0";
+  }
 
-// 4. Hemisphere Light
-hemi = new THREE.HemisphereLight(0xffffff, 0x444444, 0.05);
-scene.add(hemi);
-window.hemi = hemi;
+  if (!renderer.shadowMap) renderer.shadowMap = {};
+  if (typeof THREE.PCFSoftShadowMap !== "undefined") {
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  } else {
+    renderer.shadowMap.type = renderer.shadowMap.type || 0;
+  }
 
-// 5. Post-processing Composer
-// Note: EffectComposer also needs to know the renderer's *display* size
-composer = new EffectComposer(renderer);
-renderPass = new RenderPass(scene, window.camera);
-composer.addPass(renderPass);
-window.composer = composer;
-window.renderPass = renderPass;
+  if (typeof renderer.setClearColor === "function") {
+    try {
+      renderer.setClearColor(0x000000, 1);
+    } catch (e) {
+      console.warn("renderer.setClearColor failed:", e);
+    }
+  } else if ('clearColor' in renderer) {
+    renderer.clearColor = '#000000';
+  }
 
-// --- Initial Detail Setup for DiddyDunes ---
-toggleSceneDetails(detailsEnabled);
+  const container = document.getElementById("game-container");
+  if (renderer.domElement && container && !container.contains(renderer.domElement)) {
+    container.appendChild(renderer.domElement);
+  }
+  window.renderer = renderer;
 
-// --- Map and Physics Initialization ---
-// AWAIT the creation of the map and spawn points
-spawnPoints = await createDiddyDunes(scene, physicsController);
-window.spawnPoints = spawnPoints; // Now window.spawnPoints will be the actual array
+  // 4. Hemisphere Light
+  hemi = new THREE.HemisphereLight(0xffffff, 0x444444, 0.05);
+  scene.add(hemi);
+  window.hemi = hemi;
 
-const initialSpawnPoint = findFurthestSpawn(); // Call your function to get a spawn point
-physicsController.setPlayerPosition(initialSpawnPoint);
+  // 5. Post-processing Composer
+  const isWebGLRenderer = (typeof THREE.WebGLRenderer !== "undefined") && (renderer instanceof THREE.WebGLRenderer);
+  if (isWebGLRenderer) {
+    composer = new EffectComposer(renderer);
+    renderPass = new RenderPass(scene, window.camera);
+    composer.addPass(renderPass);
+    window.composer = composer;
+    window.renderPass = renderPass;
+  } else {
+    composer = null;
+    renderPass = null;
+    window.composer = null;
+    window.renderPass = null;
+    console.warn("EffectComposer disabled: renderer is not WebGL (CPU canvas fallback).");
+  }
 
+  // --- Initial Detail Setup for SigmaCity ---
+  toggleSceneDetails(detailsEnabled);
 
-    
-// --- Audio Initialization ---
-if (typeof dessertWindSound !== 'undefined') {
-dessertWindSound.volume = 0.25;
-dessertWindSound.play().catch(err => console.warn("Failed to play forest noise:", err));
-window.windSound = dessertWindSound; // Renamed to windSound for consistency if only one wind sound
-} else {
-console.warn("dessertWindSound is not defined. Audio might not play for DiddyDunes.");
+  // --- Map and Physics Initialization ---
+  spawnPoints = await createSigmaCity(scene, physicsController);
+  window.spawnPoints = spawnPoints;
+
+  const initialSpawnPoint = findFurthestSpawn();
+  physicsController.setPlayerPosition(initialSpawnPoint);
+
+  // --- Audio Initialization ---
+  if (typeof forestNoise !== 'undefined') {
+    forestNoise.volume = 0.05;
+    forestNoise.play().catch(err => console.warn("Failed to play forest noise:", err));
+    window.windSound = forestNoise;
+  } else {
+    console.warn("forestNoise is not defined. Audio might not play for SigmaCity.");
+  }
+
+  // --- Window Resize Handling ---
+  function onWindowResize() {
+    const container = document.getElementById("game-container");
+    const displayWidth  = container.clientWidth;
+    const displayHeight = container.clientHeight;
+
+    if (typeof renderer.setSize === 'function') {
+      renderer.setSize(FIXED_WIDTH, FIXED_HEIGHT, false);
+    }
+    if (composer) composer.setSize(FIXED_WIDTH, FIXED_HEIGHT);
+
+    if (renderer.domElement) {
+      renderer.domElement.style.width  = `${displayWidth}px`;
+      renderer.domElement.style.height = `${displayHeight}px`;
+    }
+
+    window.camera.aspect = displayWidth / displayHeight;
+    window.camera.updateProjectionMatrix();
+
+    if (window.weaponController && window.localPlayer && typeof getWeaponModel === 'function' && typeof attachWeaponToPlayer === 'function') {
+      const key = window.localPlayer.weapon.replace(/-/g, "").toLowerCase();
+      const proto = getWeaponModel(key);
+      if (proto) attachWeaponToPlayer(window.localPlayer.id, key);
+    }
+
+    if (window.remotePlayers) {
+      Object.values(window.remotePlayers).forEach(({ currentWeapon, weaponRoot }) => {
+        if (currentWeapon && weaponRoot && typeof attachWeaponToPlayer === 'function') {
+          attachWeaponToPlayer(weaponRoot.userData.playerId, currentWeapon);
+        }
+      });
+    }
+
+    const hud = document.getElementById("hud");
+    if (hud) {
+      hud.style.width  = `${displayWidth}px`;
+      hud.style.height = `${displayHeight}px`;
+    }
+  }
+
+  window.addEventListener("resize", onWindowResize, false);
+  onWindowResize();
 }
 
-// --- Window Resize Handling ---
-function onWindowResize() {
-const container = document.getElementById("game-container");
-const displayWidth  = container.clientWidth;
-const displayHeight = container.clientHeight;
 
-// 1) Render & post‑process at fixed 1280×720
-renderer.setSize(FIXED_WIDTH, FIXED_HEIGHT, false);
-if (composer) composer.setSize(FIXED_WIDTH, FIXED_HEIGHT);
+export async function initSceneDiddyDunes() {
+  sceneNum = 3;
+  console.log("Initializing DiddyDunes scene...");
 
-// 2) Stretch the canvas via CSS to fill the container
-renderer.domElement.style.width  = `${displayWidth}px`;
-renderer.domElement.style.height = `${displayHeight}px`;
+  scene = new THREE.Scene();
+  const skyColor = new THREE.Color(0x87CEEB);
+  scene.background = skyColor;
+  window.scene = scene;
 
-// 3) Update camera to match the display aspect ratio
-window.camera.aspect = displayWidth / displayHeight;
-window.camera.updateProjectionMatrix();
+  const skyGeo = new THREE.SphereGeometry(200, 32, 32).scale(-1, 1, 1);
+  const skyMat = new THREE.MeshBasicMaterial({
+    color: 0x000022,
+    side: THREE.BackSide,
+    fog: false
+  });
+  skyMesh = new THREE.Mesh(skyGeo, skyMat);
+  scene.add(skyMesh);
+  window.scene = scene;
 
-// 4) Re‑attach weapon to local player (if needed)
-if (window.weaponController && window.localPlayer && typeof getWeaponModel === 'function' && typeof attachWeaponToPlayer === 'function') {
-const key = window.localPlayer.weapon.replace(/-/g, "").toLowerCase();
-const proto = getWeaponModel(key);
-if (proto) attachWeaponToPlayer(window.localPlayer.id, key);
+  if (!window.camera) {
+    console.error("initSceneDiddyDunes: window.camera is not defined.");
+    return;
+  }
+
+  window.camera.rotation.order = "YXZ";
+  scene.add(window.camera);
+
+  // 3. Renderer
+  await tryLoadLegacyCanvasRenderer();
+  renderer = window.renderer;
+
+  if (!renderer) {
+    console.error("initSceneDiddyDunes: renderer was not created by tryLoadLegacyCanvasRenderer().");
+    return;
+  }
+
+  if (renderer.domElement) {
+    renderer.domElement.style.position = "relative";
+    renderer.domElement.style.zIndex = "0";
+  }
+
+  if (!renderer.shadowMap) renderer.shadowMap = {};
+  if (typeof THREE.PCFSoftShadowMap !== "undefined") {
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  } else {
+    renderer.shadowMap.type = renderer.shadowMap.type || 0;
+  }
+
+  if (typeof renderer.setClearColor === "function") {
+    try {
+      renderer.setClearColor(0x000000, 1);
+    } catch (e) {
+      console.warn("renderer.setClearColor failed:", e);
+    }
+  } else if ('clearColor' in renderer) {
+    renderer.clearColor = '#000000';
+  }
+
+  const container = document.getElementById("game-container");
+  if (renderer.domElement && container && !container.contains(renderer.domElement)) {
+    container.appendChild(renderer.domElement);
+  }
+  window.renderer = renderer;
+
+  // 4. Hemisphere Light
+  hemi = new THREE.HemisphereLight(0xffffff, 0x444444, 0.05);
+  scene.add(hemi);
+  window.hemi = hemi;
+
+  // 5. Post-processing Composer
+  const isWebGLRenderer = (typeof THREE.WebGLRenderer !== "undefined") && (renderer instanceof THREE.WebGLRenderer);
+  if (isWebGLRenderer) {
+    composer = new EffectComposer(renderer);
+    renderPass = new RenderPass(scene, window.camera);
+    composer.addPass(renderPass);
+    window.composer = composer;
+    window.renderPass = renderPass;
+  } else {
+    composer = null;
+    renderPass = null;
+    window.composer = null;
+    window.renderPass = null;
+    console.warn("EffectComposer disabled: renderer is not WebGL (CPU canvas fallback).");
+  }
+
+  // --- Initial Detail Setup for DiddyDunes ---
+  toggleSceneDetails(detailsEnabled);
+
+  // --- Map and Physics Initialization ---
+  spawnPoints = await createDiddyDunes(scene, physicsController);
+  window.spawnPoints = spawnPoints;
+
+  const initialSpawnPoint = findFurthestSpawn();
+  physicsController.setPlayerPosition(initialSpawnPoint);
+
+  // --- Audio Initialization ---
+  if (typeof dessertWindSound !== 'undefined') {
+    dessertWindSound.volume = 0.25;
+    dessertWindSound.play().catch(err => console.warn("Failed to play desert wind:", err));
+    window.windSound = dessertWindSound;
+  } else {
+    console.warn("dessertWindSound is not defined. Audio might not play for DiddyDunes.");
+  }
+
+  // --- Window Resize Handling ---
+  function onWindowResize() {
+    const container = document.getElementById("game-container");
+    const displayWidth  = container.clientWidth;
+    const displayHeight = container.clientHeight;
+
+    if (typeof renderer.setSize === 'function') {
+      renderer.setSize(FIXED_WIDTH, FIXED_HEIGHT, false);
+    }
+    if (composer) composer.setSize(FIXED_WIDTH, FIXED_HEIGHT);
+
+    if (renderer.domElement) {
+      renderer.domElement.style.width  = `${displayWidth}px`;
+      renderer.domElement.style.height = `${displayHeight}px`;
+    }
+
+    window.camera.aspect = displayWidth / displayHeight;
+    window.camera.updateProjectionMatrix();
+
+    if (window.weaponController && window.localPlayer && typeof getWeaponModel === 'function' && typeof attachWeaponToPlayer === 'function') {
+      const key = window.localPlayer.weapon.replace(/-/g, "").toLowerCase();
+      const proto = getWeaponModel(key);
+      if (proto) attachWeaponToPlayer(window.localPlayer.id, key);
+    }
+
+    if (window.remotePlayers) {
+      Object.values(window.remotePlayers).forEach(({ currentWeapon, weaponRoot }) => {
+        if (currentWeapon && weaponRoot && typeof attachWeaponToPlayer === 'function') {
+          attachWeaponToPlayer(weaponRoot.userData.playerId, currentWeapon);
+        }
+      });
+    }
+
+    const hud = document.getElementById("hud");
+    if (hud) {
+      hud.style.width  = `${displayWidth}px`;
+      hud.style.height = `${displayHeight}px`;
+    }
+  }
+
+  window.addEventListener("resize", onWindowResize, false);
+  onWindowResize();
 }
 
-// 5) Re‑attach weapons for remote players
-if (window.remotePlayers) {
-Object.values(window.remotePlayers).forEach(({ currentWeapon, weaponRoot }) => {
-if (currentWeapon && weaponRoot && typeof attachWeaponToPlayer === 'function') {
-attachWeaponToPlayer(weaponRoot.userData.playerId, currentWeapon);
-}
-});
-}
-
-// 6) Resize HUD overlay
-const hud = document.getElementById("hud");
-if (hud) {
-hud.style.width  = `${displayWidth}px`;
-hud.style.height = `${displayHeight}px`;
-}
-}
-
-window.addEventListener("resize", onWindowResize, false);
-onWindowResize(); // Call once initially to set the correct sizes
-}
 
 
 
