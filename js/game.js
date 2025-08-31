@@ -838,7 +838,7 @@ scene.add( window.camera );
 
 
 // 3. Renderer
-window.renderer = new THREE.CanvasRenderer();
+window.renderer = new CanvasRenderer();
 renderer = window.renderer;
 renderer.domElement.style.position = "relative";
 renderer.domElement.style.zIndex = "0";
@@ -951,7 +951,7 @@ scene.add( window.camera );
 
 
 // 3. Renderer
-window.renderer = new THREE.CanvasRenderer();
+window.renderer = new CanvasRenderer();
 renderer = window.renderer;
 renderer.domElement.style.position = "relative";
 renderer.domElement.style.zIndex = "0";
@@ -1066,7 +1066,7 @@ scene.add( window.camera );
 
 
 // 3. Renderer
-window.renderer = new THREE.CanvasRenderer();
+window.renderer = new CanvasRenderer();
 renderer = window.renderer;
 renderer.domElement.style.position = "relative";
 renderer.domElement.style.zIndex = "0";
@@ -2970,6 +2970,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
