@@ -2125,281 +2125,530 @@ function round2(n) {
 
 
 
+// -----------------------------
+// animate() (unchanged game logic, with better guards)
+// -----------------------------
 export function animate(timestamp) {
-    // Schedule the next frame *first*. This ensures the loop continues
-    // even if an error occurs later in this frame.
-    requestAnimationFrame(animate);
+  // Schedule the next frame *first*. This ensures the loop continues
+  // even if an error occurs later in this frame.
+  requestAnimationFrame(animate);
 
-    // --- Disconnection/Pause Logic ---
-    if (localPlayerId === null || window.isGamePaused) {
-        return;
-    }
+  // --- Disconnection/Pause Logic ---
+  if (localPlayerId === null || window.isGamePaused) {
+    return;
+  }
 
-    // --- Frame Throttling (60fps) ---
-    const FRAME_INTERVAL = 1000 / 60; // ≈16.67ms
-    if (!animate.lastTime) {
-        animate.lastTime = timestamp; // Initialize for the first frame
-    }
-    const deltaMs = timestamp - animate.lastTime;
+  // --- Frame Throttling (60fps) ---
+  const FRAME_INTERVAL = 1000 / 60; // ≈16.67ms
+  if (!animate.lastTime) {
+    animate.lastTime = timestamp; // Initialize for the first frame
+  }
+  const deltaMs = timestamp - animate.lastTime;
 
-    if (deltaMs < FRAME_INTERVAL) {
-        return; // Too early, skip this frame
-    }
-    // Carry over any "extra" time for smoother timing
-    animate.lastTime = timestamp - (deltaMs % FRAME_INTERVAL);
+  if (deltaMs < FRAME_INTERVAL) {
+    return; // Too early, skip this frame
+  }
+  // Carry over any "extra" time for smoother timing
+  animate.lastTime = timestamp - (deltaMs % FRAME_INTERVAL);
 
-    // Convert to seconds for game logic
-    const delta = deltaMs / 1000;
+  // Convert to seconds for game logic
+  const delta = deltaMs / 1000;
 
-    // --- Pre-animation checks ---
-    if (!physicsController || !weaponController) {
-        console.warn("Skipping animate(): controllers not yet initialized");
-        postFrameCleanup(); // Clean up even if controllers aren't ready
-        return;
-    }
-    if (!window.mapReady) {
-        postFrameCleanup();
-        return;
-    }
-    if (!window.localPlayer) {
-        console.warn("Skipping animate(): window.localPlayer is not initialized.");
-        postFrameCleanup();
-        return;
-    }
-
-    try {
-        // --- Death Screen Logic ---
-        if (window.localPlayer.isDead) {
-            const cross = document.getElementById("crosshair");
-            if (cross) cross.style.display = "none";
-
-            // Ensure death-related sounds are playing and others are paused
-            if (windSound && !windSound.paused) windSound.pause();
-            if (forestNoise && !forestNoise.paused) forestNoise.pause();
-            if (dessertWindSound && !dessertWindSound.paused) dessertWindSound.pause();
-            if (deathTheme && deathTheme.paused) {
-                deathTheme.currentTime = 0;
-                deathTheme.play().catch(e => console.error("Error playing death theme:", e));
-            }
-
-            // Show death overlays
-            if (fadeOverlay) {
-                fadeOverlay.style.pointerEvents = "auto";
-                fadeOverlay.style.opacity = "1";
-            }
-            if (respawnOverlay) respawnOverlay.style.display = "flex";
-
-            // use safeRender instead of composer.render()
-            safeRender();
-            postFrameCleanup();
-            return; // Exit early if player is dead
-        } else {
-
-            if (fadeOverlay && fadeOverlay.style.opacity !== "0") {
-                hideFadeOverlay();
-            }
-            if (respawnOverlay && respawnOverlay.style.display !== "none") {
-                hideRespawn();
-            }
-
-            const cross = document.getElementById("crosshair");
-            if (cross) cross.style.display = "block";
-        }
-
-        // --- Normal Game Updates ---
-        checkForDamagePulse();
-
-        if (weaponController.stats.speedModifier != null) {
-            physicsController.setSpeedModifier(weaponController.stats.speedModifier);
-        }
-
-        const GRAVITY = 9.8;
-        Object.values(window.remotePlayers).forEach(rp => {
-            const g = rp.group;
-            if (g?.userData.isFalling) {
-                g.userData.velocityY = (g.userData.velocityY || 0) + GRAVITY * delta;
-                g.position.y -= g.userData.velocityY * delta;
-                if (g.position.y < -20) {
-                    g.userData.isFalling = false;
-                    g.userData.velocityY = 0;
-                    g.visible = false;
-                }
-            }
-        });
-
-        if (skyMesh) skyMesh.rotation.x += 0.0001 * deltaMs;
-        if (starField) starField.rotation.x += 0.00008 * deltaMs;
-
-        if (window.worldFog) {
-            window.worldFog.rotation.y += delta * 0.005;
-            const nowMs = performance.now();
-            window.worldFog.position.x += Math.sin(nowMs * 0.0001) * delta * 2;
-            window.worldFog.position.z += Math.cos(nowMs * 0.0001) * delta * 2;
-        }
-
-        // Physics & Input Update
-        const physState = physicsController.update(delta, inputState, window.collidables);
-
-        // Weapon Update
-        weaponController.update(
-            inputState,
-            delta, {
-                velocity: physState.velocity,
-                isCrouched: inputState.crouch,
-                physicsController,
-                collidables: window.collidables,
-                stats: weaponController.stats
-            }
-        );
-
-        // Active Tracers Update
-        for (let i = activeTracers.length - 1; i >= 0; i--) {
-            const tracer = activeTracers[i];
-            tracer.update(delta);
-
-            if (tracer.remove) {
-                tracer.dispose();
-                activeTracers.splice(i, 1);
-            }
-        }
-
-        // Network Sync
-        if (dbRefs && dbRefs.playersRef && localPlayerId) {
-            sendPlayerUpdate({
-                x: physState.x,
-                y: physState.y,
-                z: physState.z,
-                rotY: round2(physState.rotY),
-                rotX: round2(window.camera.rotation.x),
-                rotZ: round2(window.camera.rotation.z),
-                weapon: window.localPlayer.weapon,
-                knifeSwing: window.localPlayer.knifeSwing || false,
-                knifeHeavy: window.localPlayer.knifeHeavy || false
-            });
-            window.localPlayer.knifeSwing = false;
-            window.localPlayer.knifeHeavy = false;
-        } else {
-            console.warn("Skipping sendPlayerUpdate: dbRefs, dbRefs.playersRef or localPlayerId is null.");
-        }
-
-        for (const id in window.remotePlayers) {
-            const rp = window.remotePlayers[id];
-            if (rp.data) updateRemotePlayer(rp.data);
-        }
-
-        // Weapon Switching
-        if (inputState.weaponSwitch) {
-            const oldW = window.localPlayer.weapon;
-            weaponAmmo[oldW] = weaponController.getCurrentAmmo();
-            const newW = inputState.weaponSwitch;
-            window.localPlayer.weapon = newW;
-
-            if (dbRefs && dbRefs.playersRef && localPlayerId) {
-                try {
-                    dbRefs.playersRef.child(localPlayerId).update({
-                        weapon: newW
-                    });
-                } catch (error) {
-                    console.error("Failed to update local player weapon in Firebase:", error);
-                }
-            } else {
-                console.warn("Cannot update local player weapon in Firebase: dbRefs or localPlayerId is null.");
-            }
-
-            weaponController.equipWeapon(newW);
-            weaponController.ammoInMagazine = weaponAmmo[newW] ?? weaponController.stats.magazineSize;
-            updateInventory(newW);
-            updateAmmoDisplay(weaponController.ammoInMagazine, weaponController.stats.magazineSize);
-            inputState.weaponSwitch = null;
-            if (newW === "knife") activeRecoils.length = 0;
-        }
-
-        // Mouse Look + Recoil
-        const baseSens = parseFloat(localStorage.getItem("sensitivity") || "5.00");
-        const aimMul = inputState.aim ? (window.localPlayer.weapon === "marshal" ? 0.15 : 0.5) : 1;
-        const finalSens = baseSens * aimMul;
-
-        window.camera.rotation.y -= inputState.mouseDX * finalSens * 0.002;
-        let newPitch = window.camera.rotation.x - inputState.mouseDY * finalSens * 0.002;
-        window.camera.rotation.x = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, newPitch));
-
-        // Recoil processing
-        {
-            const now = performance.now() / 1000;
-            let totalOffset = 0;
-            for (let i = activeRecoils.length - 1; i >= 0; i--) {
-                const r = activeRecoils[i];
-                const t = (now - r.start) / r.duration;
-                if (t >= 1) {
-                    activeRecoils.splice(i, 1);
-                    continue;
-                }
-                totalOffset += r.angle * (1 - t);
-            }
-            window.camera.rotation.x += totalOffset;
-        }
-
-        // Rebuild collidables
-        if (window.mapReady) {
-            window.collidables = [...window.envMeshes];
-            for (const otherId in window.remotePlayers) {
-                if (otherId === window.localPlayer.id) continue;
-                const other = window.remotePlayers[otherId];
-                if (other.group?.visible) {
-                    other.group.traverse(child => {
-                        if (child.isMesh && child.userData?.isPlayerBodyPart) {
-                            window.collidables.push(child);
-                        }
-                    });
-                }
-            }
-        }
-
-        // Render the scene using safeRender()
-          safeRender();
-    } catch (err) {
-        console.error("Error in animate:", err);
-    } finally {
-        postFrameCleanup(); // Ensure cleanup runs even if an error occurs
-    }
-}
-
-window.THREE = THREE;
-
-async function tryLoadLegacyCanvasRenderer() {
-  const legacyUrl =
-    "https://cdn.jsdelivr.net/gh/mrdoob/three.js@r110/examples/js/renderers/CanvasRenderer.js"; // r110 example file
+  // --- Pre-animation checks ---
+  if (!physicsController || !weaponController) {
+    console.warn("Skipping animate(): controllers not yet initialized");
+    postFrameCleanup(); // Clean up even if controllers aren't ready
+    return;
+  }
+  if (!window.mapReady) {
+    postFrameCleanup();
+    return;
+  }
+  if (!window.localPlayer) {
+    console.warn("Skipping animate(): window.localPlayer is not initialized.");
+    postFrameCleanup();
+    return;
+  }
 
   try {
-    const resp = await fetch(legacyUrl);
-    if (!resp.ok) throw new Error("Failed to fetch CanvasRenderer.js: " + resp.status);
-    const code = await resp.text();
+    // --- Death Screen Logic ---
+    if (window.localPlayer.isDead) {
+      const cross = document.getElementById("crosshair");
+      if (cross) cross.style.display = "none";
 
-    // Evaluate legacy code in global scope so it can patch window.THREE
-    (0, eval)(code);
+      // Ensure death-related sounds are playing and others are paused
+      if (windSound && !windSound.paused) windSound.pause();
+      if (forestNoise && !forestNoise.paused) forestNoise.pause();
+      if (dessertWindSound && !dessertWindSound.paused) dessertWindSound.pause();
+      if (deathTheme && deathTheme.paused) {
+        deathTheme.currentTime = 0;
+        deathTheme.play().catch(e => console.error("Error playing death theme:", e));
+      }
 
-    if (typeof window.THREE.CanvasRenderer === "function") {
-      console.log("CanvasRenderer loaded (legacy). Using CPU renderer.");
-      window.renderer = new window.THREE.CanvasRenderer();
+      // Show death overlays
+      if (fadeOverlay) {
+        fadeOverlay.style.pointerEvents = "auto";
+        fadeOverlay.style.opacity = "1";
+      }
+      if (respawnOverlay) respawnOverlay.style.display = "flex";
+
+      // use safeRender instead of composer.render()
+      safeRender();
+      postFrameCleanup();
+      return; // Exit early if player is dead
     } else {
-      throw new Error("CanvasRenderer not defined after eval.");
+
+      if (fadeOverlay && fadeOverlay.style.opacity !== "0") {
+        hideFadeOverlay();
+      }
+      if (respawnOverlay && respawnOverlay.style.display !== "none") {
+        hideRespawn();
+      }
+
+      const cross = document.getElementById("crosshair");
+      if (cross) cross.style.display = "block";
+    }
+
+    // --- Normal Game Updates ---
+    checkForDamagePulse();
+
+    if (weaponController.stats.speedModifier != null) {
+      physicsController.setSpeedModifier(weaponController.stats.speedModifier);
+    }
+
+    const GRAVITY = 9.8;
+    Object.values(window.remotePlayers).forEach(rp => {
+      const g = rp.group;
+      if (g?.userData.isFalling) {
+        g.userData.velocityY = (g.userData.velocityY || 0) + GRAVITY * delta;
+        g.position.y -= g.userData.velocityY * delta;
+        if (g.position.y < -20) {
+          g.userData.isFalling = false;
+          g.userData.velocityY = 0;
+          g.visible = false;
+        }
+      }
+    });
+
+    if (skyMesh) skyMesh.rotation.x += 0.0001 * deltaMs;
+    if (starField) starField.rotation.x += 0.00008 * deltaMs;
+
+    if (window.worldFog) {
+      window.worldFog.rotation.y += delta * 0.005;
+      const nowMs = performance.now();
+      window.worldFog.position.x += Math.sin(nowMs * 0.0001) * delta * 2;
+      window.worldFog.position.z += Math.cos(nowMs * 0.0001) * delta * 2;
+    }
+
+    // Physics & Input Update
+    const physState = physicsController.update(delta, inputState, window.collidables);
+
+    // Weapon Update
+    weaponController.update(
+      inputState,
+      delta, {
+        velocity: physState.velocity,
+        isCrouched: inputState.crouch,
+        physicsController,
+        collidables: window.collidables,
+        stats: weaponController.stats
+      }
+    );
+
+    // Active Tracers Update
+    for (let i = activeTracers.length - 1; i >= 0; i--) {
+      const tracer = activeTracers[i];
+      tracer.update(delta);
+
+      if (tracer.remove) {
+        tracer.dispose();
+        activeTracers.splice(i, 1);
+      }
+    }
+
+    // Network Sync
+    if (dbRefs && dbRefs.playersRef && localPlayerId) {
+      sendPlayerUpdate({
+        x: physState.x,
+        y: physState.y,
+        z: physState.z,
+        rotY: round2(physState.rotY),
+        rotX: round2(window.camera.rotation.x),
+        rotZ: round2(window.camera.rotation.z),
+        weapon: window.localPlayer.weapon,
+        knifeSwing: window.localPlayer.knifeSwing || false,
+        knifeHeavy: window.localPlayer.knifeHeavy || false
+      });
+      window.localPlayer.knifeSwing = false;
+      window.localPlayer.knifeHeavy = false;
+    } else {
+      console.warn("Skipping sendPlayerUpdate: dbRefs, dbRefs.playersRef or localPlayerId is null.");
+    }
+
+    for (const id in window.remotePlayers) {
+      const rp = window.remotePlayers[id];
+      if (rp.data) updateRemotePlayer(rp.data);
+    }
+
+    // Weapon Switching
+    if (inputState.weaponSwitch) {
+      const oldW = window.localPlayer.weapon;
+      weaponAmmo[oldW] = weaponController.getCurrentAmmo();
+      const newW = inputState.weaponSwitch;
+      window.localPlayer.weapon = newW;
+
+      if (dbRefs && dbRefs.playersRef && localPlayerId) {
+        try {
+          dbRefs.playersRef.child(localPlayerId).update({
+            weapon: newW
+          });
+        } catch (error) {
+          console.error("Failed to update local player weapon in Firebase:", error);
+        }
+      } else {
+        console.warn("Cannot update local player weapon in Firebase: dbRefs or localPlayerId is null.");
+      }
+
+      weaponController.equipWeapon(newW);
+      weaponController.ammoInMagazine = weaponAmmo[newW] ?? weaponController.stats.magazineSize;
+      updateInventory(newW);
+      updateAmmoDisplay(weaponController.ammoInMagazine, weaponController.stats.magazineSize);
+      inputState.weaponSwitch = null;
+      if (newW === "knife") activeRecoils.length = 0;
+    }
+
+    // Mouse Look + Recoil
+    const baseSens = parseFloat(localStorage.getItem("sensitivity") || "5.00");
+    const aimMul = inputState.aim ? (window.localPlayer.weapon === "marshal" ? 0.15 : 0.5) : 1;
+    const finalSens = baseSens * aimMul;
+
+    window.camera.rotation.y -= inputState.mouseDX * finalSens * 0.002;
+    let newPitch = window.camera.rotation.x - inputState.mouseDY * finalSens * 0.002;
+    window.camera.rotation.x = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, newPitch));
+
+    // Recoil processing
+    {
+      const now = performance.now() / 1000;
+      let totalOffset = 0;
+      for (let i = activeRecoils.length - 1; i >= 0; i--) {
+        const r = activeRecoils[i];
+        const t = (now - r.start) / r.duration;
+        if (t >= 1) {
+          activeRecoils.splice(i, 1);
+          continue;
+        }
+        totalOffset += r.angle * (1 - t);
+      }
+      window.camera.rotation.x += totalOffset;
+    }
+
+    // Rebuild collidables
+    if (window.mapReady) {
+      window.collidables = [...window.envMeshes];
+      for (const otherId in window.remotePlayers) {
+        if (otherId === window.localPlayer.id) continue;
+        const other = window.remotePlayers[otherId];
+        if (other.group?.visible) {
+          other.group.traverse(child => {
+            if (child.isMesh && child.userData?.isPlayerBodyPart) {
+              window.collidables.push(child);
+            }
+          });
+        }
+      }
+    }
+
+    // Render the scene using safeRender()
+    safeRender();
+  } catch (err) {
+    console.error("Error in animate:", err);
+  } finally {
+    postFrameCleanup(); // Ensure cleanup runs even if an error occurs
+  }
+}
+
+// keep THREE reference on window (your code relied on this)
+window.THREE = THREE;
+
+// -----------------------------
+// SimpleCanvasRenderer (local CPU fallback)
+// -----------------------------
+class SimpleCanvasRenderer {
+  constructor(opts = {}) {
+    if (typeof THREE === 'undefined') {
+      throw new Error('SimpleCanvasRenderer requires THREE to be loaded first.');
+    }
+    this.canvas = opts.canvas || document.createElement('canvas');
+    this.ctx = this.canvas.getContext('2d');
+    this.domElement = this.canvas;
+    this.clearColor = opts.clearColor || '#000000';
+    this.autoClear = opts.autoClear !== undefined ? opts.autoClear : true;
+    this.setSize(opts.width || window.innerWidth, opts.height || window.innerHeight);
+
+    // Reusable temporaries to reduce GC
+    this._vA = new THREE.Vector3();
+    this._vB = new THREE.Vector3();
+    this._vC = new THREE.Vector3();
+    this._v4 = new THREE.Vector4();
+    this._viewMatrix = new THREE.Matrix4();
+    this._viewProj = new THREE.Matrix4();
+    this._worldMatrix = new THREE.Matrix4();
+  }
+
+  setSize(w, h) {
+    this.width = Math.max(1, Math.floor(w));
+    this.height = Math.max(1, Math.floor(h));
+    this.canvas.width = this.width;
+    this.canvas.height = this.height;
+    this.canvas.style.width = this.width + 'px';
+    this.canvas.style.height = this.height + 'px';
+    this.halfWidth = this.width / 2;
+    this.halfHeight = this.height / 2;
+  }
+
+  clear() {
+    this.ctx.fillStyle = this.clearColor;
+    this.ctx.fillRect(0, 0, this.width, this.height);
+  }
+
+  // Basic render supporting Mesh + BufferGeometry (positions) + MeshBasicMaterial color
+  render(scene, camera) {
+    try {
+      if (!scene || !camera) return;
+
+      if (this.autoClear) this.clear();
+
+      // prepare matrices
+      camera.updateMatrixWorld(true);
+      this._viewMatrix.copy(camera.matrixWorld).invert();
+      this._viewProj.multiplyMatrices(camera.projectionMatrix, this._viewMatrix);
+
+      const triangles = [];
+
+      // traverse and collect triangles
+      scene.traverse(obj => {
+        if (!obj.visible || !obj.isMesh) return;
+        const mesh = obj;
+        const geometry = mesh.geometry;
+        if (!geometry) return;
+
+        mesh.updateMatrixWorld(true);
+        this._worldMatrix.copy(mesh.matrixWorld);
+
+        // positions
+        let positions = null;
+        let indices = null;
+        if (geometry.isBufferGeometry) {
+          const posAttr = geometry.attributes.position;
+          if (!posAttr) return;
+          positions = posAttr.array;
+          if (geometry.index) indices = geometry.index.array;
+        } else if (geometry.isGeometry) {
+          // legacy geometry -> convert to positions/indices
+          positions = new Float32Array(geometry.vertices.length * 3);
+          for (let i = 0; i < geometry.vertices.length; i++) {
+            positions[i * 3] = geometry.vertices[i].x;
+            positions[i * 3 + 1] = geometry.vertices[i].y;
+            positions[i * 3 + 2] = geometry.vertices[i].z;
+          }
+          indices = new Uint32Array(geometry.faces.length * 3);
+          for (let i = 0; i < geometry.faces.length; i++) {
+            indices[i * 3] = geometry.faces[i].a;
+            indices[i * 3 + 1] = geometry.faces[i].b;
+            indices[i * 3 + 2] = geometry.faces[i].c;
+          }
+        } else {
+          return;
+        }
+
+        const getVertex = (idx, outVec3) => {
+          const i3 = idx * 3;
+          outVec3.set(positions[i3], positions[i3 + 1], positions[i3 + 2]);
+        };
+
+        const triCount = indices ? (indices.length / 3) : (positions.length / 9);
+
+        for (let t = 0; t < triCount; t++) {
+          let aIdx, bIdx, cIdx;
+          if (indices) {
+            aIdx = indices[t * 3];
+            bIdx = indices[t * 3 + 1];
+            cIdx = indices[t * 3 + 2];
+          } else {
+            aIdx = t * 3;
+            bIdx = t * 3 + 1;
+            cIdx = t * 3 + 2;
+          }
+
+          getVertex(aIdx, this._vA);
+          getVertex(bIdx, this._vB);
+          getVertex(cIdx, this._vC);
+
+          // world transform
+          this._vA.applyMatrix4(this._worldMatrix);
+          this._vB.applyMatrix4(this._worldMatrix);
+          this._vC.applyMatrix4(this._worldMatrix);
+
+          // project using viewProj (Vector4 for w)
+          const clipA = this._v4.set(this._vA.x, this._vA.y, this._vA.z, 1).applyMatrix4(this._viewProj);
+          const clipB = this._v4.set(this._vB.x, this._vB.y, this._vB.z, 1).applyMatrix4(this._viewProj);
+          const clipC = this._v4.set(this._vC.x, this._vC.y, this._vC.z, 1).applyMatrix4(this._viewProj);
+
+          // discard degenerate / w ~ 0
+          if (Math.abs(clipA.w) < 1e-9 || Math.abs(clipB.w) < 1e-9 || Math.abs(clipC.w) < 1e-9) continue;
+
+          const ndcA = { x: clipA.x / clipA.w, y: clipA.y / clipA.w, z: clipA.z / clipA.w };
+          const ndcB = { x: clipB.x / clipB.w, y: clipB.y / clipB.w, z: clipB.z / clipB.w };
+          const ndcC = { x: clipC.x / clipC.w, y: clipC.y / clipC.w, z: clipC.z / clipC.w };
+
+          // quick frustum reject (all verts outside same side)
+          const outside =
+            (ndcA.x < -1 && ndcB.x < -1 && ndcC.x < -1) ||
+            (ndcA.x > 1 && ndcB.x > 1 && ndcC.x > 1) ||
+            (ndcA.y < -1 && ndcB.y < -1 && ndcC.y < -1) ||
+            (ndcA.y > 1 && ndcB.y > 1 && ndcC.y > 1) ||
+            (ndcA.z < -1 && ndcB.z < -1 && ndcC.z < -1) ||
+            (ndcA.z > 1 && ndcB.z > 1 && ndcC.z > 1);
+          if (outside) continue;
+
+          // screen coords
+          const sA = { x: ndcA.x * this.halfWidth + this.halfWidth, y: -ndcA.y * this.halfHeight + this.halfHeight, z: ndcA.z };
+          const sB = { x: ndcB.x * this.halfWidth + this.halfWidth, y: -ndcB.y * this.halfHeight + this.halfHeight, z: ndcB.z };
+          const sC = { x: ndcC.x * this.halfWidth + this.halfWidth, y: -ndcC.y * this.halfHeight + this.halfHeight, z: ndcC.z };
+
+          const zAvg = (sA.z + sB.z + sC.z) / 3;
+
+          // color lookup (MeshBasicMaterial.color supported)
+          let color = '#888';
+          const mat = mesh.material;
+          if (Array.isArray(mat)) {
+            if (mat[0] && mat[0].color) color = mat[0].color.getStyle();
+          } else if (mat && mat.color) {
+            color = mat.color.getStyle();
+          }
+
+          triangles.push({
+            points: [sA, sB, sC],
+            color,
+            zAvg,
+            visible: mesh.visible
+          });
+        }
+      }); // traverse
+
+      // painter's algorithm: far -> near
+      triangles.sort((A, B) => B.zAvg - A.zAvg);
+
+      const ctx = this.ctx;
+      ctx.save();
+      for (const tri of triangles) {
+        const p0 = tri.points[0], p1 = tri.points[1], p2 = tri.points[2];
+        // backface cull (screen-space signed area)
+        const area = (p1.x - p0.x) * (p2.y - p0.y) - (p2.x - p0.x) * (p1.y - p0.y);
+        if (area >= 0) continue;
+
+        ctx.beginPath();
+        ctx.moveTo(p0.x, p0.y);
+        ctx.lineTo(p1.x, p1.y);
+        ctx.lineTo(p2.x, p2.y);
+        ctx.closePath();
+
+        ctx.fillStyle = tri.color;
+        ctx.fill();
+      }
+      ctx.restore();
+    } catch (e) {
+      console.error('SimpleCanvasRenderer.render error:', e);
+    }
+  }
+}
+
+// Expose local renderer class so tryLoadLegacyCanvasRenderer can use it
+window.SimpleCanvasRenderer = SimpleCanvasRenderer;
+
+// -----------------------------
+// tryLoadLegacyCanvasRenderer() -> now uses local CPU fallback instead of fetching r110
+// -----------------------------
+async function tryLoadLegacyCanvasRenderer() {
+  try {
+    // If you have packed SimpleCanvasRenderer locally (above) use it.
+    if (typeof window.SimpleCanvasRenderer === 'function') {
+      window.renderer = new window.SimpleCanvasRenderer({ width: window.innerWidth, height: window.innerHeight });
+      console.log("SimpleCanvasRenderer (local CPU fallback) created.");
+    } else {
+      // Fallback: create WebGLRenderer as last resort
+      console.warn("SimpleCanvasRenderer not found, using WebGLRenderer fallback.");
+      window.renderer = new THREE.WebGLRenderer({ antialias: false });
     }
   } catch (err) {
-    console.warn("Could not load CanvasRenderer (falling back to WebGL):", err);
+    console.error("Failed to create SimpleCanvasRenderer, falling back to WebGLRenderer", err);
     window.renderer = new THREE.WebGLRenderer({ antialias: false });
   }
 
-  window.renderer.setSize(window.innerWidth, window.innerHeight);
-  document.body.appendChild(window.renderer.domElement);
+  // ensure size / domElement appended
+  try {
+    if (typeof window.renderer.setSize === 'function') {
+      window.renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+    if (window.renderer && window.renderer.domElement) {
+      // avoid multiple appends
+      if (!document.body.contains(window.renderer.domElement)) {
+        document.body.appendChild(window.renderer.domElement);
+      }
+    } else {
+      console.warn("Renderer created but no domElement found.");
+    }
+  } catch (e) {
+    console.error("Error while finalizing renderer setup:", e);
+  }
+}
+
+// -----------------------------
+// safeRender() with diagnostics and composer/direct fallback toggle
+// -----------------------------
+function isThreeScene(o) { return !!(o && o.isScene); }
+function isThreeCamera(o) { return !!(o && (o.isCamera || o.isPerspectiveCamera || o.isOrthographicCamera)); }
+
+function inspectObject(name, obj) {
+  try {
+    console.log(`${name}:`, {
+      exists: !!obj,
+      constructor: obj ? obj.constructor?.name : undefined,
+      isScene: !!(obj && obj.isScene),
+      isCamera: !!(obj && (obj.isCamera || obj.isPerspectiveCamera || obj.isOrthographicCamera)),
+      keys: obj && typeof obj === 'object' ? Object.keys(obj).slice(0,10) : undefined,
+    });
+  } catch (e) {
+    console.log(`inspectObject(${name}) failed:`, e);
+  }
 }
 
 function safeRender() {
   try {
     if (!window.scene || !window.camera) {
       console.warn("safeRender: missing scene or camera, skipping render", {
-        scene: !!window.scene,
-        camera: !!window.camera
+        scenePresent: !!window.scene,
+        cameraPresent: !!window.camera
       });
+      return;
+    }
+
+    // Detailed sanity checks
+    inspectObject('window.scene', window.scene);
+    inspectObject('window.camera', window.camera);
+    inspectObject('window.renderer', window.renderer);
+    if (window.composer) console.log('window.composer detected:', {
+      hasRender: typeof window.composer.render === 'function',
+      constructor: window.composer.constructor?.name
+    });
+
+    // If scene/camera aren't correct three.js types, bail and print a helpful error:
+    if (!isThreeScene(window.scene)) {
+      console.error("safeRender: window.scene is not a THREE.Scene. Aborting render to avoid crash. Investigate where window.scene is set.");
+      return;
+    }
+    if (!isThreeCamera(window.camera)) {
+      console.error("safeRender: window.camera is not a THREE.Camera. Aborting render to avoid crash. Investigate where window.camera is set.");
       return;
     }
 
@@ -2408,24 +2657,59 @@ function safeRender() {
       typeof window.THREE.CanvasRenderer === "function" &&
       window.renderer instanceof window.THREE.CanvasRenderer;
 
+    // Debugging flag: set true temporarily if you want to bypass composer and test direct renderer.render
+    const forceDirectRenderer = false;
+
     if (isCanvasRenderer) {
       // CanvasRenderer doesn't support EffectComposer / shader passes.
-      window.renderer.render(window.scene, window.camera);
+      try {
+        window.renderer.render(window.scene, window.camera);
+      } catch (e) {
+        console.error("CanvasRenderer render threw:", e);
+      }
       return;
     }
 
-    // Prefer composer when available (postprocessing) otherwise renderer
-    if (window.composer && typeof window.composer.render === "function") {
-      window.composer.render();
-    } else if (window.renderer && typeof window.renderer.render === "function") {
-      window.renderer.render(window.scene, window.camera);
+    if (window.composer && typeof window.composer.render === "function" && !forceDirectRenderer) {
+      // composer may internally call renderer.render with different camera/scene
+      try {
+        window.composer.render();
+      } catch (e) {
+        console.error("composer.render() threw — falling back to direct renderer.render. Composer details:", e);
+        if (window.renderer && typeof window.renderer.render === "function") {
+          try {
+            window.renderer.render(window.scene, window.camera);
+          } catch (err) {
+            console.error("Fallback renderer.render threw:", err);
+          }
+        }
+      }
+      return;
+    }
+
+    if (window.renderer && typeof window.renderer.render === "function") {
+      try {
+        window.renderer.render(window.scene, window.camera);
+      } catch (e) {
+        console.error("Renderer.render threw:", e);
+      }
     } else {
       console.warn("safeRender: no composer or renderer available to render");
     }
   } catch (e) {
     console.error("safeRender error:", e);
+    try {
+      console.log("Final diagnostics before aborting render:");
+      inspectObject('window.scene', window.scene);
+      inspectObject('window.camera', window.camera);
+      inspectObject('window.renderer', window.renderer);
+      if (window.composer) console.log('window.composer present:', window.composer.constructor?.name, 'render fn?', typeof window.composer.render);
+    } catch (ee) {
+      console.error("Diagnostics logging failed:", ee);
+    }
   }
 }
+
 
 
 
@@ -3014,6 +3298,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
