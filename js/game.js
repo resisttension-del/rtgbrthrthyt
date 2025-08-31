@@ -922,50 +922,61 @@ export async function initSceneCrocodilosConstruction() {
   }
 
   // --- Window Resize Handling ---
-  function onWindowResize() {
-    const container = document.getElementById("game-container");
-    const displayWidth  = container.clientWidth;
-    const displayHeight = container.clientHeight;
+function onWindowResize() {
+  const container = document.getElementById("game-container") || document.body;
+  const displayWidth  = Math.max(1, Math.floor(container.clientWidth || window.innerWidth));
+  const displayHeight = Math.max(1, Math.floor(container.clientHeight || window.innerHeight));
 
-    // 1) Render & post-process at fixed 1280×720
-    if (typeof renderer.setSize === 'function') {
-      renderer.setSize(FIXED_WIDTH, FIXED_HEIGHT, false);
+  // 1) Make the renderer's internal buffer match the display size.
+  if (window.renderer && typeof window.renderer.setSize === 'function') {
+    window.renderer.setSize(displayWidth, displayHeight, false);
+  } else if (window.renderer && window.renderer.domElement) {
+    window.renderer.domElement.width = displayWidth;
+    window.renderer.domElement.height = displayHeight;
+  }
+
+  // 2) Stretch the canvas via CSS to fill the container
+  if (window.renderer && window.renderer.domElement) {
+    window.renderer.domElement.style.width  = `${displayWidth}px`;
+    window.renderer.domElement.style.height = `${displayHeight}px`;
+  }
+
+  // 3) Update camera
+  if (window.camera) {
+    if (typeof window.camera.aspect === "number") {
+      window.camera.aspect = displayWidth / displayHeight;
     }
-    if (composer) composer.setSize(FIXED_WIDTH, FIXED_HEIGHT);
-
-    // 2) Stretch the canvas via CSS to fill the container
-    if (renderer.domElement) {
-      renderer.domElement.style.width  = `${displayWidth}px`;
-      renderer.domElement.style.height = `${displayHeight}px`;
-    }
-
-    // 3) Update camera to match the display aspect ratio
-    window.camera.aspect = displayWidth / displayHeight;
-    window.camera.updateProjectionMatrix();
-
-    // 4) Re-attach weapon to local player (if needed)
-    if (window.weaponController && window.localPlayer && typeof getWeaponModel === 'function' && typeof attachWeaponToPlayer === 'function') {
-      const key = window.localPlayer.weapon.replace(/-/g, "").toLowerCase();
-      const proto = getWeaponModel(key);
-      if (proto) attachWeaponToPlayer(window.localPlayer.id, key);
-    }
-
-    // 5) Re-attach weapons for remote players
-    if (window.remotePlayers) {
-      Object.values(window.remotePlayers).forEach(({ currentWeapon, weaponRoot }) => {
-        if (currentWeapon && weaponRoot && typeof attachWeaponToPlayer === 'function') {
-          attachWeaponToPlayer(weaponRoot.userData.playerId, currentWeapon);
-        }
-      });
-    }
-
-    // 6) Resize HUD overlay
-    const hud = document.getElementById("hud");
-    if (hud) {
-      hud.style.width  = `${displayWidth}px`;
-      hud.style.height = `${displayHeight}px`;
+    if (typeof window.camera.updateProjectionMatrix === "function") {
+      window.camera.updateProjectionMatrix();
     }
   }
+
+  // 4) Composer
+  if (window.composer && typeof window.composer.setSize === 'function') {
+    window.composer.setSize(displayWidth, displayHeight);
+  }
+
+  // 5) HUD overlay
+  const hud = document.getElementById("hud");
+  if (hud) {
+    hud.style.width  = `${displayWidth}px`;
+    hud.style.height = `${displayHeight}px`;
+  }
+
+  // Reattach weapons if necessary (keep your existing code here)
+  if (window.weaponController && window.localPlayer && typeof getWeaponModel === 'function' && typeof attachWeaponToPlayer === 'function') {
+    const key = (window.localPlayer.weapon || "").replace(/-/g, "").toLowerCase();
+    const proto = getWeaponModel(key);
+    if (proto) attachWeaponToPlayer(window.localPlayer.id, key);
+  }
+  if (window.remotePlayers) {
+    Object.values(window.remotePlayers).forEach(({ currentWeapon, weaponRoot }) => {
+      if (currentWeapon && weaponRoot && typeof attachWeaponToPlayer === 'function') {
+        attachWeaponToPlayer(weaponRoot.userData.playerId, currentWeapon);
+      }
+    });
+  }
+}
 
   window.addEventListener("resize", onWindowResize, false);
   onWindowResize();
@@ -1077,44 +1088,61 @@ export async function initSceneSigmaCity() {
   }
 
   // --- Window Resize Handling ---
-  function onWindowResize() {
-    const container = document.getElementById("game-container");
-    const displayWidth  = container.clientWidth;
-    const displayHeight = container.clientHeight;
+function onWindowResize() {
+  const container = document.getElementById("game-container") || document.body;
+  const displayWidth  = Math.max(1, Math.floor(container.clientWidth || window.innerWidth));
+  const displayHeight = Math.max(1, Math.floor(container.clientHeight || window.innerHeight));
 
-    if (typeof renderer.setSize === 'function') {
-      renderer.setSize(FIXED_WIDTH, FIXED_HEIGHT, false);
+  // 1) Make the renderer's internal buffer match the display size.
+  if (window.renderer && typeof window.renderer.setSize === 'function') {
+    window.renderer.setSize(displayWidth, displayHeight, false);
+  } else if (window.renderer && window.renderer.domElement) {
+    window.renderer.domElement.width = displayWidth;
+    window.renderer.domElement.height = displayHeight;
+  }
+
+  // 2) Stretch the canvas via CSS to fill the container
+  if (window.renderer && window.renderer.domElement) {
+    window.renderer.domElement.style.width  = `${displayWidth}px`;
+    window.renderer.domElement.style.height = `${displayHeight}px`;
+  }
+
+  // 3) Update camera
+  if (window.camera) {
+    if (typeof window.camera.aspect === "number") {
+      window.camera.aspect = displayWidth / displayHeight;
     }
-    if (composer) composer.setSize(FIXED_WIDTH, FIXED_HEIGHT);
-
-    if (renderer.domElement) {
-      renderer.domElement.style.width  = `${displayWidth}px`;
-      renderer.domElement.style.height = `${displayHeight}px`;
-    }
-
-    window.camera.aspect = displayWidth / displayHeight;
-    window.camera.updateProjectionMatrix();
-
-    if (window.weaponController && window.localPlayer && typeof getWeaponModel === 'function' && typeof attachWeaponToPlayer === 'function') {
-      const key = window.localPlayer.weapon.replace(/-/g, "").toLowerCase();
-      const proto = getWeaponModel(key);
-      if (proto) attachWeaponToPlayer(window.localPlayer.id, key);
-    }
-
-    if (window.remotePlayers) {
-      Object.values(window.remotePlayers).forEach(({ currentWeapon, weaponRoot }) => {
-        if (currentWeapon && weaponRoot && typeof attachWeaponToPlayer === 'function') {
-          attachWeaponToPlayer(weaponRoot.userData.playerId, currentWeapon);
-        }
-      });
-    }
-
-    const hud = document.getElementById("hud");
-    if (hud) {
-      hud.style.width  = `${displayWidth}px`;
-      hud.style.height = `${displayHeight}px`;
+    if (typeof window.camera.updateProjectionMatrix === "function") {
+      window.camera.updateProjectionMatrix();
     }
   }
+
+  // 4) Composer
+  if (window.composer && typeof window.composer.setSize === 'function') {
+    window.composer.setSize(displayWidth, displayHeight);
+  }
+
+  // 5) HUD overlay
+  const hud = document.getElementById("hud");
+  if (hud) {
+    hud.style.width  = `${displayWidth}px`;
+    hud.style.height = `${displayHeight}px`;
+  }
+
+  // Reattach weapons if necessary (keep your existing code here)
+  if (window.weaponController && window.localPlayer && typeof getWeaponModel === 'function' && typeof attachWeaponToPlayer === 'function') {
+    const key = (window.localPlayer.weapon || "").replace(/-/g, "").toLowerCase();
+    const proto = getWeaponModel(key);
+    if (proto) attachWeaponToPlayer(window.localPlayer.id, key);
+  }
+  if (window.remotePlayers) {
+    Object.values(window.remotePlayers).forEach(({ currentWeapon, weaponRoot }) => {
+      if (currentWeapon && weaponRoot && typeof attachWeaponToPlayer === 'function') {
+        attachWeaponToPlayer(weaponRoot.userData.playerId, currentWeapon);
+      }
+    });
+  }
+}
 
   window.addEventListener("resize", onWindowResize, false);
   onWindowResize();
@@ -1226,44 +1254,61 @@ export async function initSceneDiddyDunes() {
   }
 
   // --- Window Resize Handling ---
-  function onWindowResize() {
-    const container = document.getElementById("game-container");
-    const displayWidth  = container.clientWidth;
-    const displayHeight = container.clientHeight;
+function onWindowResize() {
+  const container = document.getElementById("game-container") || document.body;
+  const displayWidth  = Math.max(1, Math.floor(container.clientWidth || window.innerWidth));
+  const displayHeight = Math.max(1, Math.floor(container.clientHeight || window.innerHeight));
 
-    if (typeof renderer.setSize === 'function') {
-      renderer.setSize(FIXED_WIDTH, FIXED_HEIGHT, false);
+  // 1) Make the renderer's internal buffer match the display size.
+  if (window.renderer && typeof window.renderer.setSize === 'function') {
+    window.renderer.setSize(displayWidth, displayHeight, false);
+  } else if (window.renderer && window.renderer.domElement) {
+    window.renderer.domElement.width = displayWidth;
+    window.renderer.domElement.height = displayHeight;
+  }
+
+  // 2) Stretch the canvas via CSS to fill the container
+  if (window.renderer && window.renderer.domElement) {
+    window.renderer.domElement.style.width  = `${displayWidth}px`;
+    window.renderer.domElement.style.height = `${displayHeight}px`;
+  }
+
+  // 3) Update camera
+  if (window.camera) {
+    if (typeof window.camera.aspect === "number") {
+      window.camera.aspect = displayWidth / displayHeight;
     }
-    if (composer) composer.setSize(FIXED_WIDTH, FIXED_HEIGHT);
-
-    if (renderer.domElement) {
-      renderer.domElement.style.width  = `${displayWidth}px`;
-      renderer.domElement.style.height = `${displayHeight}px`;
-    }
-
-    window.camera.aspect = displayWidth / displayHeight;
-    window.camera.updateProjectionMatrix();
-
-    if (window.weaponController && window.localPlayer && typeof getWeaponModel === 'function' && typeof attachWeaponToPlayer === 'function') {
-      const key = window.localPlayer.weapon.replace(/-/g, "").toLowerCase();
-      const proto = getWeaponModel(key);
-      if (proto) attachWeaponToPlayer(window.localPlayer.id, key);
-    }
-
-    if (window.remotePlayers) {
-      Object.values(window.remotePlayers).forEach(({ currentWeapon, weaponRoot }) => {
-        if (currentWeapon && weaponRoot && typeof attachWeaponToPlayer === 'function') {
-          attachWeaponToPlayer(weaponRoot.userData.playerId, currentWeapon);
-        }
-      });
-    }
-
-    const hud = document.getElementById("hud");
-    if (hud) {
-      hud.style.width  = `${displayWidth}px`;
-      hud.style.height = `${displayHeight}px`;
+    if (typeof window.camera.updateProjectionMatrix === "function") {
+      window.camera.updateProjectionMatrix();
     }
   }
+
+  // 4) Composer
+  if (window.composer && typeof window.composer.setSize === 'function') {
+    window.composer.setSize(displayWidth, displayHeight);
+  }
+
+  // 5) HUD overlay
+  const hud = document.getElementById("hud");
+  if (hud) {
+    hud.style.width  = `${displayWidth}px`;
+    hud.style.height = `${displayHeight}px`;
+  }
+
+  // Reattach weapons if necessary (keep your existing code here)
+  if (window.weaponController && window.localPlayer && typeof getWeaponModel === 'function' && typeof attachWeaponToPlayer === 'function') {
+    const key = (window.localPlayer.weapon || "").replace(/-/g, "").toLowerCase();
+    const proto = getWeaponModel(key);
+    if (proto) attachWeaponToPlayer(window.localPlayer.id, key);
+  }
+  if (window.remotePlayers) {
+    Object.values(window.remotePlayers).forEach(({ currentWeapon, weaponRoot }) => {
+      if (currentWeapon && weaponRoot && typeof attachWeaponToPlayer === 'function') {
+        attachWeaponToPlayer(weaponRoot.userData.playerId, currentWeapon);
+      }
+    });
+  }
+}
 
   window.addEventListener("resize", onWindowResize, false);
   onWindowResize();
@@ -2243,43 +2288,41 @@ function round2(n) {
 // animate() (unchanged game logic, with better guards)
 // -----------------------------
 export function animate(timestamp) {
-  // Schedule the next frame *first*. This ensures the loop continues
-  // even if an error occurs later in this frame.
+  // request next frame first
   requestAnimationFrame(animate);
 
+  // guard: make timestamp robust
+  if (typeof timestamp !== "number") timestamp = performance.now();
+
   // --- Disconnection/Pause Logic ---
-  if (localPlayerId === null || window.isGamePaused) {
-    return;
-  }
+  // If we don't yet have a player or the game is paused we still want to render
+  const shouldSkipUpdates = (localPlayerId === null) || !!window.isGamePaused;
 
   // --- Frame Throttling (60fps) ---
   const FRAME_INTERVAL = 1000 / 60; // ≈16.67ms
-  if (!animate.lastTime) {
-    animate.lastTime = timestamp; // Initialize for the first frame
-  }
-  const deltaMs = timestamp - animate.lastTime;
-
+  if (!animate.lastTime) animate.lastTime = timestamp;
+  let deltaMs = timestamp - animate.lastTime;
   if (deltaMs < FRAME_INTERVAL) {
-    return; // Too early, skip this frame
-  }
-  // Carry over any "extra" time for smoother timing
-  animate.lastTime = timestamp - (deltaMs % FRAME_INTERVAL);
-
-  // Convert to seconds for game logic
-  const delta = deltaMs / 1000;
-
-  // --- Pre-animation checks ---
-  if (!physicsController || !weaponController) {
-    console.warn("Skipping animate(): controllers not yet initialized");
-    postFrameCleanup(); // Clean up even if controllers aren't ready
+    // too early; still keep the loop alive but draw nothing new
+    // do not advance lastTime so timing stays stable
     return;
   }
-  if (!window.mapReady) {
+  // carry over remainder to keep timing stable
+  animate.lastTime = timestamp - (deltaMs % FRAME_INTERVAL);
+  // convert to seconds
+  const delta = deltaMs / 1000;
+
+  // If controllers or map/player not ready we still should render scene so the user sees the environment / loading UI
+  if (!physicsController || !weaponController || !window.mapReady || !window.localPlayer) {
+    // small diagnostic log (throttled in safeRender)
+    safeRender();
     postFrameCleanup();
     return;
   }
-  if (!window.localPlayer) {
-    console.warn("Skipping animate(): window.localPlayer is not initialized.");
+
+  // If disconnected or paused, render but skip game update logic
+  if (shouldSkipUpdates) {
+    safeRender();
     postFrameCleanup();
     return;
   }
@@ -2290,7 +2333,6 @@ export function animate(timestamp) {
       const cross = document.getElementById("crosshair");
       if (cross) cross.style.display = "none";
 
-      // Ensure death-related sounds are playing and others are paused
       if (windSound && !windSound.paused) windSound.pause();
       if (forestNoise && !forestNoise.paused) forestNoise.pause();
       if (dessertWindSound && !dessertWindSound.paused) dessertWindSound.pause();
@@ -2299,26 +2341,18 @@ export function animate(timestamp) {
         deathTheme.play().catch(e => console.error("Error playing death theme:", e));
       }
 
-      // Show death overlays
       if (fadeOverlay) {
         fadeOverlay.style.pointerEvents = "auto";
         fadeOverlay.style.opacity = "1";
       }
       if (respawnOverlay) respawnOverlay.style.display = "flex";
 
-      // use safeRender instead of composer.render()
       safeRender();
       postFrameCleanup();
-      return; // Exit early if player is dead
+      return;
     } else {
-
-      if (fadeOverlay && fadeOverlay.style.opacity !== "0") {
-        hideFadeOverlay();
-      }
-      if (respawnOverlay && respawnOverlay.style.display !== "none") {
-        hideRespawn();
-      }
-
+      if (fadeOverlay && fadeOverlay.style.opacity !== "0") hideFadeOverlay();
+      if (respawnOverlay && respawnOverlay.style.display !== "none") hideRespawn();
       const cross = document.getElementById("crosshair");
       if (cross) cross.style.display = "block";
     }
@@ -2373,7 +2407,6 @@ export function animate(timestamp) {
     for (let i = activeTracers.length - 1; i >= 0; i--) {
       const tracer = activeTracers[i];
       tracer.update(delta);
-
       if (tracer.remove) {
         tracer.dispose();
         activeTracers.splice(i, 1);
@@ -2829,12 +2862,13 @@ window.SimpleCanvasRenderer = SimpleCanvasRenderer;
 // -----------------------------
 async function tryLoadLegacyCanvasRenderer() {
   try {
-    // If you have packed SimpleCanvasRenderer locally (above) use it.
     if (typeof window.SimpleCanvasRenderer === 'function') {
-      window.renderer = new window.SimpleCanvasRenderer({ width: window.innerWidth, height: window.innerHeight });
+      // create using display size first; internal buffer will be set to same values
+      const w = window.innerWidth || 1280;
+      const h = window.innerHeight || 720;
+      window.renderer = new window.SimpleCanvasRenderer({ width: w, height: h });
       console.log("SimpleCanvasRenderer (local CPU fallback) created.");
     } else {
-      // Fallback: create WebGLRenderer as last resort
       console.warn("SimpleCanvasRenderer not found, using WebGLRenderer fallback.");
       window.renderer = new THREE.WebGLRenderer({ antialias: false });
     }
@@ -2843,16 +2877,34 @@ async function tryLoadLegacyCanvasRenderer() {
     window.renderer = new THREE.WebGLRenderer({ antialias: false });
   }
 
-  // ensure size / domElement appended
+  // ensure size / domElement appended - append only to #game-container if present
   try {
     if (typeof window.renderer.setSize === 'function') {
-      window.renderer.setSize(window.innerWidth, window.innerHeight);
+      // set internal buffer to initial window size
+      window.renderer.setSize(window.innerWidth || 1280, window.innerHeight || 720);
+    } else if (window.renderer && 'canvas' in window.renderer && window.renderer.canvas.setAttribute) {
+      // fallback for weird renderer shapes
+      window.renderer.canvas.width = window.innerWidth || 1280;
+      window.renderer.canvas.height = window.innerHeight || 720;
     }
+
+    const container = document.getElementById("game-container") || document.body;
     if (window.renderer && window.renderer.domElement) {
       // avoid multiple appends
-      if (!document.body.contains(window.renderer.domElement)) {
-        document.body.appendChild(window.renderer.domElement);
+      if (!container.contains(window.renderer.domElement)) {
+        container.appendChild(window.renderer.domElement);
+      } else {
+        // ensure correct parent: if it's in body but a #game-container exists, move it
+        if (container !== document.body && document.body.contains(window.renderer.domElement) && !container.contains(window.renderer.domElement)) {
+          document.body.removeChild(window.renderer.domElement);
+          container.appendChild(window.renderer.domElement);
+        }
       }
+      // make sure canvas fills CSS area
+      window.renderer.domElement.style.display = 'block';
+      window.renderer.domElement.style.position = 'relative';
+      window.renderer.domElement.style.width = '100%';
+      window.renderer.domElement.style.height = '100%';
     } else {
       console.warn("Renderer created but no domElement found.");
     }
@@ -2887,6 +2939,27 @@ function inspectObjectOncePerSecond(name, obj) {
   }
 }
 
+function ensureRendererSizeMatchesDisplay(renderer) {
+  // Try to keep internal canvas buffer in sync with visual size. Only touch if renderer exposes setSize.
+  try {
+    const container = document.getElementById("game-container") || document.body;
+    const displayWidth = Math.max(1, Math.floor(container.clientWidth || window.innerWidth));
+    const displayHeight = Math.max(1, Math.floor(container.clientHeight || window.innerHeight));
+    if (renderer && typeof renderer.setSize === "function") {
+      // Use same pixel buffer as display for crisp CPU rendering
+      renderer.setSize(displayWidth, displayHeight, false);
+      // If composer exists, it will need resizing by callers (we keep composer resizing where it exists)
+    } else if (renderer && renderer.domElement && renderer.domElement.width !== displayWidth) {
+      renderer.domElement.width = displayWidth;
+      renderer.domElement.height = displayHeight;
+      renderer.domElement.style.width = displayWidth + "px";
+      renderer.domElement.style.height = displayHeight + "px";
+    }
+  } catch (e) {
+    // ignore sizing errors
+  }
+}
+
 function safeRender() {
   try {
     if (!window.scene || !window.camera) {
@@ -2904,13 +2977,6 @@ function safeRender() {
     inspectObjectOncePerSecond('window.scene', window.scene);
     inspectObjectOncePerSecond('window.camera', window.camera);
     inspectObjectOncePerSecond('window.renderer', window.renderer);
-    if (window.composer && performance.now() - __lastSafeRenderDiag > 1000) {
-      console.log('window.composer detected:', {
-        hasRender: typeof window.composer.render === 'function',
-        constructor: window.composer.constructor?.name
-      });
-      __lastSafeRenderDiag = performance.now();
-    }
 
     if (!isThreeScene(window.scene)) {
       console.error("safeRender: window.scene is not a THREE.Scene. Aborting render to avoid crash.");
@@ -2921,33 +2987,28 @@ function safeRender() {
       return;
     }
 
-    const isCanvasRenderer =
-      typeof window.THREE !== "undefined" &&
-      typeof window.THREE.CanvasRenderer === "function" &&
-      window.renderer instanceof window.THREE.CanvasRenderer;
-
-    // Debugging flag: set true temporarily if you want to bypass composer and test direct renderer.render
-    const forceDirectRenderer = false;
-
-    if (isCanvasRenderer) {
-      try { window.renderer.render(window.scene, window.camera); } catch (e) { console.error("CanvasRenderer render threw:", e); }
-      return;
+    // if we have the CPU fallback, ensure buffer size matches CSS display size
+    if (window.renderer && window.renderer.domElement && window.SimpleCanvasRenderer && window.renderer instanceof window.SimpleCanvasRenderer) {
+      ensureRendererSizeMatchesDisplay(window.renderer);
     }
 
-    if (window.composer && typeof window.composer.render === "function" && !forceDirectRenderer) {
+    // prefer composer if available and configured
+    if (window.composer && typeof window.composer.render === "function") {
       try {
         window.composer.render();
+        return;
       } catch (e) {
-        console.error("composer.render() threw — falling back to direct renderer.render. Composer details:", e);
-        if (window.renderer && typeof window.renderer.render === "function") {
-          try { window.renderer.render(window.scene, window.camera); } catch (err) { console.error("Fallback renderer.render threw:", err); }
-        }
+        console.error("composer.render() threw — falling back to direct renderer.render.", e);
+        // fall through to direct render
       }
-      return;
     }
 
     if (window.renderer && typeof window.renderer.render === "function") {
-      try { window.renderer.render(window.scene, window.camera); } catch (e) { console.error("Renderer.render threw:", e); }
+      try {
+        window.renderer.render(window.scene, window.camera);
+      } catch (e) {
+        console.error("Renderer.render threw:", e);
+      }
     } else {
       if (performance.now() - __lastSafeRenderDiag > 1000) {
         console.warn("safeRender: no composer or renderer available to render");
@@ -3559,6 +3620,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
