@@ -1002,6 +1002,51 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
             }
           }
 
+          // --- NEW: detect if camera is inside this object's bounds and fallback ---
+          let cameraInside = false;
+          try {
+            if (geom.boundingSphere) {
+              const bs = geom.boundingSphere;
+              const centerWorld = bs.center.clone().applyMatrix4(obj.matrixWorld);
+              const maxScale =
+                obj.matrixWorld.getMaxScaleOnAxis ? obj.matrixWorld.getMaxScaleOnAxis() : 1;
+              const radiusWorld = bs.radius * maxScale;
+              const camDist = camera.position.distanceTo(centerWorld);
+              // use slight tolerance to avoid flicker
+              cameraInside = camDist < radiusWorld * 0.95;
+            } else if (geom.boundingBox) {
+              // transform bbox corners to world and check if camera is inside the AABB
+              const bb = geom.boundingBox;
+              const minWorld = bb.min.clone().applyMatrix4(obj.matrixWorld);
+              const maxWorld = bb.max.clone().applyMatrix4(obj.matrixWorld);
+              if (
+                camera.position.x >= Math.min(minWorld.x, maxWorld.x) &&
+                camera.position.x <= Math.max(minWorld.x, maxWorld.x) &&
+                camera.position.y >= Math.min(minWorld.y, maxWorld.y) &&
+                camera.position.y <= Math.max(minWorld.y, maxWorld.y) &&
+                camera.position.z >= Math.min(minWorld.z, maxWorld.z) &&
+                camera.position.z <= Math.max(minWorld.z, maxWorld.z)
+              ) {
+                cameraInside = true;
+              }
+            }
+          } catch (e) {
+            cameraInside = false;
+          }
+
+          if (cameraInside) {
+            // push a special drawable that we'll render as a safe fallback
+            drawables.push({
+              type: 'inside',
+              obj,
+              dist,
+              alpha: obj.userData?.insideAlpha ?? 0.35,
+              style: obj.userData?.insideStyle ?? 'full', // future: 'radial'|'border' etc.
+            });
+            return; // skip normal pts2d/hull logic for this object
+          }
+          // --- END NEW camera-inside handling ---
+
           // project worldPoints to screen-space 2D points
           const pts2d = [];
           for (let wp of worldPoints) {
@@ -1078,6 +1123,45 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
           }
         }
         color = color || obj.userData?.color || 'white';
+
+        // handle inside fallback first
+        if (d.type === 'inside') {
+          ctx.save();
+
+          const fillAlpha = Math.max(0.05, Math.min(0.95, d.alpha ?? 0.35));
+          // style: 'full' fills entire canvas with translucent color
+          if (d.style === 'full') {
+            ctx.globalAlpha = fillAlpha;
+            ctx.fillStyle = color;
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // subtle border to emphasize silhouette
+            ctx.globalAlpha = Math.min(1, fillAlpha + 0.25);
+            ctx.lineWidth = obj.userData?.insideBorderWidth ?? 6;
+            ctx.strokeStyle = obj.userData?.insideBorderColor ?? 'rgba(0,0,0,0.6)';
+            ctx.strokeRect(2, 2, canvas.width - 4, canvas.height - 4);
+          } else if (d.style === 'centeredCircle') {
+            // optional: radial circle at camera center
+            const cx = canvas.width / 2;
+            const cy = canvas.height / 2;
+            const radius = Math.max(canvas.width, canvas.height) * 0.6;
+            ctx.beginPath();
+            ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+            ctx.closePath();
+            ctx.globalAlpha = fillAlpha;
+            ctx.fillStyle = color;
+            ctx.fill();
+          } else {
+            // fallback to small marker in center
+            ctx.globalAlpha = fillAlpha;
+            ctx.fillStyle = color;
+            const size = obj.userData?.insideMarkerSize ?? 32;
+            ctx.fillRect(canvas.width / 2 - size / 2, canvas.height / 2 - size / 2, size, size);
+          }
+
+          ctx.restore();
+          continue;
+        }
 
         if (d.type === 'image' && d.mapImage && d.mapImage.width) {
           let size;
@@ -3251,6 +3335,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
