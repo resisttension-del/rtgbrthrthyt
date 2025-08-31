@@ -811,237 +811,345 @@ function setupDetailToggle() {
 }
 
 
-function createCanvasRenderer({ width = 1280, height = 720, opts = {} } = {}) {
+function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
   const canvas = document.createElement('canvas');
   canvas.style.position = 'relative';
   canvas.style.zIndex = '0';
-  canvas.width = width; canvas.height = height;
+  canvas.width = width;
+  canvas.height = height;
   const ctx = canvas.getContext('2d');
 
-  // Tunables
-  const MAX_VERTS_FOR_HULL = opts.maxVertsForHull ?? 800;
-  const MAX_TRIS_FOR_HULL  = opts.maxTrisForHull ?? 1000;
-  const MAX_DIST_FOR_HULL  = opts.maxDistForHull ?? 100;
-  const RADIAL_BINS = opts.radialBins ?? 64; // buckets for angle sweep
-  const BRIDGE_GAP_BINS = opts.bridgeGapBins ?? 3; // if gap <= this, bridge it
-
-  const tmpVec = new THREE.Vector3();
+  // Scratch vars for projections & temp math
   const proj = new THREE.Vector3();
   const tmpPos = new THREE.Vector3();
-  const tmpInv = new THREE.Matrix4();
+  const tmpVec = new THREE.Vector3();
+  const tmpVec2 = new THREE.Vector3();
 
-  function drawPolyline(points, color, dist, close = true) {
-    if (!points || points.length === 0) return;
-    const centerZ = points.reduce((s, p) => s + p.z, 0) / points.length;
-    if (centerZ > 1) return;
-    ctx.save();
-    ctx.globalAlpha = Math.max(0.2, Math.min(1, 1 - (dist / 600)));
-    ctx.strokeStyle = color;
-    ctx.lineWidth = Math.max(1, 2 - (dist * 0.002));
-    ctx.beginPath();
-    ctx.moveTo(points[0].x, points[0].y);
-    for (let i = 1; i < points.length; i++) ctx.lineTo(points[i].x, points[i].y);
-    if (close) ctx.closePath();
-    ctx.stroke();
-    ctx.restore();
-  }
+  // helper: build convex hull (Andrew monotone chain) of 2D points
+  function convexHull(points) {
+    if (points.length <= 1) return points.slice();
+    const pts = points
+      .slice()
+      .sort((a, b) => (a.x === b.x ? a.y - b.y : a.x - b.x));
 
-  // radial silhouette: cheap and handles camera-inside nicely
-// put this near top-level of renderer (to persist across frames)
-const lastBinMap = new WeakMap();
-const SMOOTH_ALPHA = 0.6; // how much previous frame influences selection (0..1)
-const LERP_POS = 0.35;    // how much to lerp screen position toward previous (0..1)
+    const cross = (o, a, b) =>
+      (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
 
-function drawRadialSilhouette(obj, geom, color, dist, camera) {
-  const posAttr = geom.attributes && geom.attributes.position;
-  if (!posAttr) return false;
-  const vertCount = posAttr.count;
-  const indexAttr = geom.index;
-  const triCount = indexAttr ? indexAttr.count / 3 : vertCount / 3;
-  if (vertCount > MAX_VERTS_FOR_HULL || triCount > MAX_TRIS_FOR_HULL) return false;
-
-  // compute object's projected centroid (use bbox center if available, else world position)
-  let worldCenter = new THREE.Vector3();
-  if (geom.boundingBox) {
-    const bb = geom.boundingBox;
-    worldCenter.set(
-      (bb.min.x + bb.max.x) * 0.5,
-      (bb.min.y + bb.max.y) * 0.5,
-      (bb.min.z + bb.max.z) * 0.5
-    ).applyMatrix4(obj.matrixWorld);
-  } else {
-    obj.getWorldPosition(worldCenter);
-  }
-  proj.copy(worldCenter).project(camera);
-  const cx = (proj.x * 0.5 + 0.5) * canvas.width;
-  const cy = (-proj.y * 0.5 + 0.5) * canvas.height;
-
-  // check camera-inside quickly (optional, cheap)
-  let cameraInside = false;
-  if (geom.boundingBox) {
-    const inv = new THREE.Matrix4().copy(obj.matrixWorld).invert();
-    const camLocal = camera.position.clone().applyMatrix4(inv);
-    const min = geom.boundingBox.min, max = geom.boundingBox.max;
-    cameraInside = (camLocal.x >= min.x && camLocal.x <= max.x &&
-                    camLocal.y >= min.y && camLocal.y <= max.y &&
-                    camLocal.z >= min.z && camLocal.z <= max.z);
-  }
-  if (!cameraInside && dist > MAX_DIST_FOR_HULL) return false;
-
-  // prepare bins
-  const bins = new Array(RADIAL_BINS).fill(null);
-  // previous bins for smoothing
-  const prevBins = lastBinMap.get(obj) || new Array(RADIAL_BINS).fill(null);
-
-  // project vertices & bin
-  for (let i = 0; i < posAttr.count; i++) {
-    tmpVec.fromBufferAttribute(posAttr, i).applyMatrix4(obj.matrixWorld);
-    proj.copy(tmpVec).project(camera);
-    const z = proj.z;
-    if (z > 1) continue;
-    const sx = (proj.x * 0.5 + 0.5) * canvas.width;
-    const sy = (-proj.y * 0.5 + 0.5) * canvas.height;
-
-    const ang = Math.atan2(sy - cy, sx - cx);
-    const angNorm = ang < 0 ? ang + Math.PI * 2 : ang;
-    const binIdx = Math.floor((angNorm / (Math.PI * 2)) * RADIAL_BINS) % RADIAL_BINS;
-
-    const worldDist = camera.position.distanceTo(tmpVec);
-
-    const cur = bins[binIdx];
-    if (!cur || worldDist > cur.worldDist) {
-      bins[binIdx] = { x: sx, y: sy, z, worldDist, ang: angNorm };
+    const lower = [];
+    for (let p of pts) {
+      while (
+        lower.length >= 2 &&
+        cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0
+      )
+        lower.pop();
+      lower.push(p);
     }
-  }
 
-  // smoothing: bias toward previous selection to avoid flip-flop
-  for (let b = 0; b < RADIAL_BINS; b++) {
-    const cur = bins[b];
-    const prev = prevBins[b];
-    if (cur && prev) {
-      // compute smoothed worldDist (weighted)
-      const smoothedDist = cur.worldDist * (1 - SMOOTH_ALPHA) + prev.worldDist * SMOOTH_ALPHA;
-      // if prev was still nearly as far (within 5%), prefer prev position to avoid popping
-      if (Math.abs(prev.worldDist - cur.worldDist) / Math.max(cur.worldDist, 1) < 0.05) {
-        // lerp screen positions toward previous
-        cur.x = prev.x * SMOOTH_ALPHA + cur.x * (1 - SMOOTH_ALPHA);
-        cur.y = prev.y * SMOOTH_ALPHA + cur.y * (1 - SMOOTH_ALPHA);
-        cur.worldDist = smoothedDist;
-      } else {
-        // keep the farther one but still softly lerp a bit for visual smoothing
-        cur.x = prev.x * LERP_POS + cur.x * (1 - LERP_POS);
-        cur.y = prev.y * LERP_POS + cur.y * (1 - LERP_POS);
-        cur.worldDist = smoothedDist;
-      }
-    } else if (!cur && prev) {
-      // keep small faded ghost of previous to reduce popping from temporary occlusion
-      // but only if prev was recent (we don't track time here—cheap heuristic)
-      bins[b] = { x: prev.x, y: prev.y, z: prev.z, worldDist: prev.worldDist * 0.98 };
+    const upper = [];
+    for (let i = pts.length - 1; i >= 0; i--) {
+      const p = pts[i];
+      while (
+        upper.length >= 2 &&
+        cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0
+      )
+        upper.pop();
+      upper.push(p);
     }
-    // else keep cur as is or null
+
+    lower.pop();
+    upper.pop();
+    return lower.concat(upper);
   }
 
-  // commit current bins for next frame
-  // deep-copy minimal fields to avoid retaining huge arrays
-  const committed = new Array(RADIAL_BINS);
-  for (let i = 0; i < RADIAL_BINS; i++) {
-    const v = bins[i];
-    committed[i] = v ? { x: v.x, y: v.y, z: v.z, worldDist: v.worldDist } : null;
-  }
-  lastBinMap.set(obj, committed);
-
-  // collect ordered points and skip truly empty bins (gaps allowed)
-  const pts = [];
-  for (let i = 0; i < RADIAL_BINS; i++) {
-    const b = bins[i];
-    if (b) pts.push({ x: b.x, y: b.y, z: b.z });
-  }
-  if (pts.length === 0) return false;
-
-  // draw closed polyline
-  drawPolyline(pts, color, dist, true);
-  return true;
-}
-
-  // --- the rest of the renderer (clear, traverse, bounding box fallback) ---
   const api = {
     domElement: canvas,
-    setSize(w, h, updateStyle = true) { canvas.width = w; canvas.height = h; if (updateStyle) { canvas.style.width = `${w}px`; canvas.style.height = `${h}px`; } },
-    setClearColor(hex, alpha = 1) { api._clearColor = { hex, alpha }; },
+
+    setSize(w, h, updateStyle = true) {
+      canvas.width = w;
+      canvas.height = h;
+      if (updateStyle) {
+        canvas.style.width = `${w}px`;
+        canvas.style.height = `${h}px`;
+      }
+    },
+
+    // Minimal clear color support
+    setClearColor(hex, alpha = 1) {
+      api._clearColor = { hex, alpha };
+    },
+
     _clearColor: { hex: 0x000000, alpha: 1 },
 
+    // Basic render: draw sprites (material.map.image) and approximated shapes for meshes
     render(scene, camera) {
+      // Clear with the clear color (converted to CSS)
       const c = api._clearColor;
-      const r = (c.hex >> 16) & 0xff, g = (c.hex >> 8) & 0xff, b = c.hex & 0xff;
-      ctx.save(); ctx.setTransform(1,0,0,1,0,0); ctx.fillStyle = `rgba(${r},${g},${b},${c.alpha})`; ctx.fillRect(0,0,canvas.width,canvas.height); ctx.restore();
+      const r = (c.hex >> 16) & 0xff;
+      const g = (c.hex >> 8) & 0xff;
+      const b = c.hex & 0xff;
+      ctx.save();
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.fillStyle = `rgba(${r},${g},${b},${c.alpha})`;
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.restore();
 
+      // collect drawables (so we can sort by depth)
       const drawables = [];
       scene.traverse((obj) => {
         if (!obj.visible) return;
         if (obj.isCamera || obj.isLight) return;
-        if (!obj.isMesh || !obj.geometry) return;
+
+        // World position (center)
         obj.getWorldPosition(tmpPos);
+        proj.copy(tmpPos).project(camera); // NDC -1..1
+
+        // quick NDC cull (if center far off-screen, skip)
+        if (
+          proj.z > 1 ||
+          proj.z < -1 ||
+          proj.x < -2 ||
+          proj.x > 2 ||
+          proj.y < -2 ||
+          proj.y > 2
+        ) {
+          if (!obj.userData?.alwaysRender) return;
+        }
+
+        // screen coords
+        const sx = (proj.x * 0.5 + 0.5) * canvas.width;
+        const sy = (-proj.y * 0.5 + 0.5) * canvas.height;
+
+        // distance for depth sorting
         const dist = camera.position.distanceTo(tmpPos);
 
+        // check for texture
+        const mapImage =
+          obj.material && obj.material.map && obj.material.map.image
+            ? obj.material.map.image
+            : null;
+
+        // categorize drawable
+        if (mapImage) {
+          drawables.push({
+            type: 'image',
+            obj,
+            sx,
+            sy,
+            dist,
+            projZ: proj.z,
+            mapImage,
+          });
+        } else if (obj.isMesh && obj.geometry) {
+          const geom = obj.geometry;
+          if (!geom.boundingBox)
+            geom.computeBoundingBox && geom.computeBoundingBox();
+          if (!geom.boundingSphere)
+            geom.computeBoundingSphere && geom.computeBoundingSphere();
+
+          const worldPoints = [];
+          if (geom.boundingBox) {
+            const bb = geom.boundingBox;
+            const min = bb.min;
+            const max = bb.max;
+            const corners = [
+              [min.x, min.y, min.z],
+              [min.x, min.y, max.z],
+              [min.x, max.y, min.z],
+              [min.x, max.y, max.z],
+              [max.x, min.y, min.z],
+              [max.x, min.y, max.z],
+              [max.x, max.y, min.z],
+              [max.x, max.y, max.z],
+            ];
+            for (let c of corners) {
+              tmpVec.set(c[0], c[1], c[2]).applyMatrix4(obj.matrixWorld);
+              worldPoints.push(tmpVec.clone());
+            }
+          } else if (geom.boundingSphere) {
+            const bs = geom.boundingSphere;
+            const center = bs.center.clone().applyMatrix4(obj.matrixWorld);
+            const r =
+              bs.radius *
+              (obj.matrixWorld.getMaxScaleOnAxis
+                ? obj.matrixWorld.getMaxScaleOnAxis()
+                : 1);
+            worldPoints.push(center.clone());
+            worldPoints.push(center.clone().add(new THREE.Vector3(r, 0, 0)));
+            worldPoints.push(center.clone().add(new THREE.Vector3(-r, 0, 0)));
+            worldPoints.push(center.clone().add(new THREE.Vector3(0, r, 0)));
+            worldPoints.push(center.clone().add(new THREE.Vector3(0, -r, 0)));
+            worldPoints.push(center.clone().add(new THREE.Vector3(0, 0, r)));
+            worldPoints.push(center.clone().add(new THREE.Vector3(0, 0, -r)));
+          } else {
+            const posAttr = geom.attributes && geom.attributes.position;
+            if (posAttr && posAttr.count > 0) {
+              for (
+                let i = 0;
+                i < Math.min(12, posAttr.count);
+                i += Math.max(1, Math.floor(posAttr.count / 12))
+              ) {
+                tmpVec
+                  .set(
+                    posAttr.getX(i),
+                    posAttr.getY(i),
+                    posAttr.getZ(i)
+                  )
+                  .applyMatrix4(obj.matrixWorld);
+                worldPoints.push(tmpVec.clone());
+              }
+            } else {
+              worldPoints.push(tmpPos.clone());
+            }
+          }
+
+          // project worldPoints to screen-space 2D points
+          const pts2d = [];
+          for (let wp of worldPoints) {
+            proj.copy(wp).project(camera);
+            if (proj.z > 1 || proj.z < -1) continue;
+            const px = (proj.x * 0.5 + 0.5) * canvas.width;
+            const py = (-proj.y * 0.5 + 0.5) * canvas.height;
+            pts2d.push({ x: px, y: py });
+          }
+
+          if (pts2d.length === 0) {
+            if (obj.userData?.forceMarker) {
+              drawables.push({
+                type: 'rect',
+                obj,
+                sx,
+                sy,
+                dist,
+                sizePx: obj.userData?.markerSizePx ?? 6,
+              });
+            }
+            return;
+          } else {
+            const hull = convexHull(pts2d);
+            if (hull.length >= 3) {
+              drawables.push({ type: 'poly', obj, pts: hull, dist, projZ: proj.z });
+            } else if (hull.length === 2) {
+              drawables.push({ type: 'line', obj, pts: hull, dist });
+            } else {
+              if (obj.userData?.forceMarker) {
+                drawables.push({
+                  type: 'rect',
+                  obj,
+                  sx: pts2d[0].x,
+                  sy: pts2d[0].y,
+                  dist,
+                  sizePx: obj.userData?.markerSizePx ?? 6,
+                });
+              }
+            }
+            return;
+          }
+        } else {
+          if (obj.userData?.forceMarker) {
+            drawables.push({
+              type: 'rect',
+              obj,
+              sx,
+              sy,
+              dist,
+              sizePx: obj.userData?.markerSizePx ?? 6,
+            });
+          }
+        }
+      });
+
+      // Painter's order: furthest first (larger distance)
+      drawables.sort((a, b) => b.dist - a.dist);
+
+      // draw
+      for (let i = 0; i < drawables.length; i++) {
+        const d = drawables[i];
+        const { obj, dist } = d;
+
+        // common color selection
         let color = obj.userData?.color;
         if (!color && obj.material && obj.material.color) {
-          try { color = obj.material.color.getStyle ? obj.material.color.getStyle() : `#${obj.material.color.getHexString()}`; } catch(e) { color = obj.userData?.color || 'white'; }
+          try {
+            color = obj.material.color.getStyle
+              ? obj.material.color.getStyle()
+              : `#${obj.material.color.getHexString()}`;
+          } catch (e) {
+            color = obj.userData?.color || 'white';
+          }
         }
         color = color || obj.userData?.color || 'white';
 
-        const geom = obj.geometry;
-        if (!geom.boundingBox && geom.computeBoundingBox) geom.computeBoundingBox();
-        drawables.push({ obj, geom, dist, color, tmpPos: tmpPos.clone() });
-      });
-
-      drawables.sort((a,b) => b.dist - a.dist);
-
-      for (const d of drawables) {
-        const { obj, geom, dist, color } = d;
-        const posAttr = geom.attributes && geom.attributes.position;
-        const vertCount = posAttr ? posAttr.count : 0;
-        const triCount = geom.index ? geom.index.count / 3 : vertCount / 3;
-        const tryRadial = (vertCount <= MAX_VERTS_FOR_HULL && triCount <= MAX_TRIS_FOR_HULL);
-
-        if (tryRadial) {
-          const ok = drawRadialSilhouette(obj, geom, color, dist, scene.camera || scene.userData.camera || (window.camera || null) || (typeof camera !== 'undefined' ? camera : null));
-          // note: above camera lookup is defensive; in your usage just pass camera to render()
-          // if radial method failed, or returned false, we fall back to bounding box below
-          if (ok) continue;
-        }
-
-        // bounding box fallback (very cheap)
-        if (geom.boundingBox) {
-          const bb = geom.boundingBox; const min = bb.min, max = bb.max;
-          const corners = [
-            new THREE.Vector3(min.x, min.y, min.z),
-            new THREE.Vector3(min.x, min.y, max.z),
-            new THREE.Vector3(min.x, max.y, min.z),
-            new THREE.Vector3(min.x, max.y, max.z),
-            new THREE.Vector3(max.x, min.y, min.z),
-            new THREE.Vector3(max.x, min.y, max.z),
-            new THREE.Vector3(max.x, max.y, min.z),
-            new THREE.Vector3(max.x, max.y, max.z),
-          ];
-          const pts2d = [];
-          for (let c of corners) {
-            tmpVec.copy(c).applyMatrix4(obj.matrixWorld);
-            proj.copy(tmpVec).project(camera);
-            const px = (proj.x * 0.5 + 0.5) * canvas.width;
-            const py = (-proj.y * 0.5 + 0.5) * canvas.height;
-            pts2d.push({ x: px, y: py, z: proj.z });
+        if (d.type === 'image' && d.mapImage && d.mapImage.width) {
+          let size;
+          if (obj.geometry && obj.geometry.boundingBox) {
+            const bb = obj.geometry.boundingBox;
+            const corners = [
+              [bb.min.x, bb.min.y, bb.min.z],
+              [bb.max.x, bb.max.y, bb.max.z],
+            ];
+            const screenPts = [];
+            for (let c of corners) {
+              tmpVec.set(c[0], c[1], c[2]).applyMatrix4(obj.matrixWorld);
+              const p = tmpVec.project(camera);
+              screenPts.push({
+                x: (p.x * 0.5 + 0.5) * canvas.width,
+                y: (-p.y * 0.5 + 0.5) * canvas.height,
+              });
+            }
+            const wPx = Math.abs(screenPts[0].x - screenPts[1].x);
+            const hPx = Math.abs(screenPts[0].y - screenPts[1].y);
+            size = Math.max(8, obj.userData?.sizePx ?? Math.max(wPx, hPx, 32));
+          } else {
+            const baseSize = obj.userData?.sizePx ?? 300;
+            size = Math.max(8, baseSize * (1 / Math.max(0.1, dist * 0.05)));
           }
-          // draw a simple polyline of bbox corners (keeps it cheap)
-          drawPolyline(pts2d, color, dist, true);
+
+          ctx.save();
+          ctx.translate(d.sx, d.sy);
+          const rot = obj.userData?.rotation ?? (obj.rotation?.z ?? 0);
+          if (rot) ctx.rotate(rot);
+          ctx.globalAlpha = obj.userData?.opacity ?? (obj.material?.opacity ?? 1);
+          ctx.drawImage(d.mapImage, -size / 2, -size / 2, size, size);
+          ctx.restore();
+        } else if (d.type === 'poly' && d.pts) {
+          ctx.save();
+          ctx.beginPath();
+          ctx.moveTo(d.pts[0].x, d.pts[0].y);
+          for (let j = 1; j < d.pts.length; j++) ctx.lineTo(d.pts[j].x, d.pts[j].y);
+          ctx.closePath();
+          ctx.globalAlpha = Math.max(0.2, Math.min(1, 1 - dist * 0.002));
+          ctx.fillStyle = color;
+          ctx.fill();
+          ctx.globalAlpha = 0.6;
+          ctx.lineWidth = Math.max(1, 2 - dist * 0.001);
+          ctx.strokeStyle = 'rgba(0,0,0,0.6)';
+          ctx.stroke();
+          ctx.restore();
+        } else if (d.type === 'line' && d.pts && d.pts.length === 2) {
+          ctx.beginPath();
+          ctx.moveTo(d.pts[0].x, d.pts[0].y);
+          ctx.lineTo(d.pts[1].x, d.pts[1].y);
+          ctx.strokeStyle = color;
+          ctx.lineWidth = obj.userData?.lineWidth ?? 3;
+          ctx.globalAlpha = 1 - Math.min(0.9, dist * 0.002);
+          ctx.stroke();
+        } else if (d.type === 'rect') {
+          const size =
+            d.sizePx ?? Math.max(2, Math.round(12 * (1 / Math.max(0.1, dist * 0.05))));
+          const x = d.sx ?? 0;
+          const y = d.sy ?? 0;
+          ctx.save();
+          ctx.globalAlpha = Math.max(0.5, Math.min(1, 1 - dist * 0.002));
+          ctx.fillStyle = color;
+          ctx.fillRect(x - size / 2, y - size / 2, size, size);
+          ctx.restore();
         }
       }
-    }
+    },
   };
 
   return api;
 }
-
-
 
 /* ---------- Updated scene initializers (CPU renderer) ---------- */
 
@@ -3143,6 +3251,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
