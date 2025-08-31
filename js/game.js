@@ -865,35 +865,47 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
     // Projects a world Vector3 onto screen but avoids NaN/inf results by clamping points
     // that are behind the camera or too close to a minimum distance in front of the camera.
     // Returns {x,y,z} or null if projection cannot be produced.
+// NEW safe projection: clamp in camera-space instead of teleporting in front of camera
 _safeProjectToScreen(worldVec, camera) {
   // ensure camera matrices are up to date
   camera.updateMatrixWorld && camera.updateMatrixWorld();
-  camera.matrixWorldInverse && camera.matrixWorldInverse.copy(new THREE.Matrix4().getInverse(camera.matrixWorld));
 
-  // copy so we don't mutate original
-  const camSpace = worldVec.clone().applyMatrix4(camera.matrixWorldInverse); // world -> camera space
+  // ensure camera.matrixWorldInverse exists
+  if (!camera.matrixWorldInverse) camera.matrixWorldInverse = new THREE.Matrix4();
 
-  // In three.js camera-space: camera looks down -Z, so "in front" has camSpace.z < 0.
-  // Ensure z is at least -minD (i.e., not too close or behind)
-  const minD = api.options.minProjectionDistance || 0.1;
-  if (!Number.isFinite(camSpace.x) || !Number.isFinite(camSpace.y) || !Number.isFinite(camSpace.z)) return null;
-
-  // If point is too close or behind (z >= -minD), clamp z to -minD
-  if (camSpace.z >= -minD) {
-    camSpace.z = -minD;
+  // compute matrixWorldInverse in a way compatible with old/new three.js
+  if (typeof camera.matrixWorldInverse.invert === 'function') {
+    // modern three.js: invert() exists
+    camera.matrixWorldInverse.copy(camera.matrixWorld).invert();
+  } else if (typeof camera.matrixWorldInverse.getInverse === 'function') {
+    // older three.js fallback
+    camera.matrixWorldInverse.getInverse(camera.matrixWorld);
+  } else {
+    // paranoid fallback: create tmp, invert if possible, copy result
+    const tmp = new THREE.Matrix4().copy(camera.matrixWorld);
+    if (typeof tmp.invert === 'function') tmp.invert();
+    camera.matrixWorldInverse.copy(tmp);
   }
 
-  // Convert back to world space
-  const safeWorld = camSpace.applyMatrix4(camera.matrixWorld);
+  // world -> camera space
+  const camSpace = worldVec.clone().applyMatrix4(camera.matrixWorldInverse);
 
-  // Now project safely
+  // If values are bad, bail
+  if (!Number.isFinite(camSpace.x) || !Number.isFinite(camSpace.y) || !Number.isFinite(camSpace.z)) return null;
+
+  // In camera space camera looks down -Z; clamp Z so it's at least -minD (in front of near plane)
+  const minD = api.options.minProjectionDistance || 0.1;
+  if (camSpace.z >= -minD) camSpace.z = -minD;
+
+  // Convert back to world and project
+  const safeWorld = camSpace.applyMatrix4(camera.matrixWorld);
   const p = safeWorld.clone().project(camera);
   if (!Number.isFinite(p.x) || !Number.isFinite(p.y) || !Number.isFinite(p.z)) return null;
 
   let sx = (p.x * 0.5 + 0.5) * canvas.width;
   let sy = (-p.y * 0.5 + 0.5) * canvas.height;
 
-  // clamp to padded screen rect to avoid extreme values
+  // clamp to avoid extreme offscreen coordinates
   const pad = 200;
   sx = Math.max(-pad, Math.min(canvas.width + pad, sx));
   sy = Math.max(-pad, Math.min(canvas.height + pad, sy));
@@ -3519,6 +3531,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
