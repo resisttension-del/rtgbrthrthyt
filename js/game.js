@@ -2485,7 +2485,7 @@ export function animate(timestamp) {
 window.THREE = THREE;
 
 // -----------------------------
-// SimpleCanvasRenderer (local CPU fallback)
+// Updated SimpleCanvasRenderer (local CPU fallback)
 // -----------------------------
 class SimpleCanvasRenderer {
   constructor(opts = {}) {
@@ -2503,7 +2503,9 @@ class SimpleCanvasRenderer {
     this._vA = new THREE.Vector3();
     this._vB = new THREE.Vector3();
     this._vC = new THREE.Vector3();
-    this._v4 = new THREE.Vector4();
+    this._v4A = new THREE.Vector4();
+    this._v4B = new THREE.Vector4();
+    this._v4C = new THREE.Vector4();
     this._viewMatrix = new THREE.Matrix4();
     this._viewProj = new THREE.Matrix4();
     this._worldMatrix = new THREE.Matrix4();
@@ -2520,17 +2522,24 @@ class SimpleCanvasRenderer {
     this.halfHeight = this.height / 2;
   }
 
-  clear() {
-    this.ctx.fillStyle = this.clearColor;
+  // Use scene.background (if available) otherwise fallback to this.clearColor
+  clear(scene) {
+    let clearStyle = this.clearColor;
+    if (scene && scene.background) {
+      const b = scene.background;
+      if (b.isColor) clearStyle = b.getStyle();
+      // ignore texture/cube backgrounds for now
+    }
+    this.ctx.fillStyle = clearStyle;
     this.ctx.fillRect(0, 0, this.width, this.height);
   }
 
-  // Basic render supporting Mesh + BufferGeometry (positions) + MeshBasicMaterial color
+  // Basic render supporting Mesh + BufferGeometry (positions) + simple material colors
   render(scene, camera) {
     try {
       if (!scene || !camera) return;
 
-      if (this.autoClear) this.clear();
+      if (this.autoClear) this.clear(scene);
 
       // prepare matrices
       camera.updateMatrixWorld(true);
@@ -2549,7 +2558,7 @@ class SimpleCanvasRenderer {
         mesh.updateMatrixWorld(true);
         this._worldMatrix.copy(mesh.matrixWorld);
 
-        // positions
+        // positions & indices
         let positions = null;
         let indices = null;
         if (geometry.isBufferGeometry) {
@@ -2604,9 +2613,9 @@ class SimpleCanvasRenderer {
           this._vC.applyMatrix4(this._worldMatrix);
 
           // project using viewProj (Vector4 for w)
-          const clipA = this._v4.set(this._vA.x, this._vA.y, this._vA.z, 1).applyMatrix4(this._viewProj);
-          const clipB = this._v4.set(this._vB.x, this._vB.y, this._vB.z, 1).applyMatrix4(this._viewProj);
-          const clipC = this._v4.set(this._vC.x, this._vC.y, this._vC.z, 1).applyMatrix4(this._viewProj);
+          const clipA = this._v4A.set(this._vA.x, this._vA.y, this._vA.z, 1).applyMatrix4(this._viewProj);
+          const clipB = this._v4B.set(this._vB.x, this._vB.y, this._vB.z, 1).applyMatrix4(this._viewProj);
+          const clipC = this._v4C.set(this._vC.x, this._vC.y, this._vC.z, 1).applyMatrix4(this._viewProj);
 
           // discard degenerate / w ~ 0
           if (Math.abs(clipA.w) < 1e-9 || Math.abs(clipB.w) < 1e-9 || Math.abs(clipC.w) < 1e-9) continue;
@@ -2632,13 +2641,21 @@ class SimpleCanvasRenderer {
 
           const zAvg = (sA.z + sB.z + sC.z) / 3;
 
-          // color lookup (MeshBasicMaterial.color supported)
+          // material color fallback: try material.color -> material.emissive -> white
           let color = '#888';
           const mat = mesh.material;
           if (Array.isArray(mat)) {
             if (mat[0] && mat[0].color) color = mat[0].color.getStyle();
-          } else if (mat && mat.color) {
-            color = mat.color.getStyle();
+            else if (mat[0] && mat[0].emissive) color = mat[0].emissive.getStyle();
+          } else if (mat) {
+            if (mat.color) color = mat.color.getStyle();
+            else if (mat.emissive) color = mat.emissive.getStyle();
+            else if (mat.map && mat.map.image) {
+              // Textures not sampled here — fallback to white
+              color = '#ffffff';
+            } else if (mat instanceof THREE.MeshBasicMaterial && !mat.color) {
+              color = '#cccccc';
+            }
           }
 
           triangles.push({
@@ -2655,11 +2672,13 @@ class SimpleCanvasRenderer {
 
       const ctx = this.ctx;
       ctx.save();
+      let drawn = 0;
       for (const tri of triangles) {
         const p0 = tri.points[0], p1 = tri.points[1], p2 = tri.points[2];
-        // backface cull (screen-space signed area)
-        const area = (p1.x - p0.x) * (p2.y - p0.y) - (p2.x - p0.x) * (p1.y - p0.y);
-        if (area >= 0) continue;
+
+        // skip tiny/degenerate triangles
+        const area = Math.abs((p1.x - p0.x) * (p2.y - p0.y) - (p2.x - p0.x) * (p1.y - p0.y));
+        if (area < 0.5) continue;
 
         ctx.beginPath();
         ctx.moveTo(p0.x, p0.y);
@@ -2669,8 +2688,20 @@ class SimpleCanvasRenderer {
 
         ctx.fillStyle = tri.color;
         ctx.fill();
+        drawn++;
       }
       ctx.restore();
+
+      // If nothing was drawn, paint a faint overlay + debug text so screen isn't pure black
+      if (drawn === 0) {
+        ctx.save();
+        ctx.fillStyle = 'rgba(255,255,255,0.03)';
+        ctx.fillRect(0, 0, this.width, this.height);
+        ctx.fillStyle = 'rgba(255,0,0,0.6)';
+        ctx.font = '14px sans-serif';
+        ctx.fillText('SimpleCanvasRenderer: no triangles drawn (debug)', 12, 22);
+        ctx.restore();
+      }
     } catch (e) {
       console.error('SimpleCanvasRenderer.render error:', e);
     }
@@ -2718,51 +2749,62 @@ async function tryLoadLegacyCanvasRenderer() {
 }
 
 // -----------------------------
-// safeRender() with diagnostics and composer/direct fallback toggle
+// Updated safeRender() with reduced diagnostics spam (throttled)
 // -----------------------------
+let __lastSafeRenderDiag = 0;
+
 function isThreeScene(o) { return !!(o && o.isScene); }
 function isThreeCamera(o) { return !!(o && (o.isCamera || o.isPerspectiveCamera || o.isOrthographicCamera)); }
 
-function inspectObject(name, obj) {
+function inspectObjectOncePerSecond(name, obj) {
   try {
-    console.log(`${name}:`, {
-      exists: !!obj,
-      constructor: obj ? obj.constructor?.name : undefined,
-      isScene: !!(obj && obj.isScene),
-      isCamera: !!(obj && (obj.isCamera || obj.isPerspectiveCamera || obj.isOrthographicCamera)),
-      keys: obj && typeof obj === 'object' ? Object.keys(obj).slice(0,10) : undefined,
-    });
+    const now = performance.now();
+    if (now - __lastSafeRenderDiag > 1000) {
+      console.log(`${name}:`, {
+        exists: !!obj,
+        constructor: obj ? obj.constructor?.name : undefined,
+        isScene: !!(obj && obj.isScene),
+        isCamera: !!(obj && (obj.isCamera || obj.isPerspectiveCamera || obj.isOrthographicCamera)),
+        keys: obj && typeof obj === 'object' ? Object.keys(obj).slice(0,10) : undefined,
+      });
+      __lastSafeRenderDiag = now;
+    }
   } catch (e) {
-    console.log(`inspectObject(${name}) failed:`, e);
+    /* ignore diagnostics error */
   }
 }
 
 function safeRender() {
   try {
     if (!window.scene || !window.camera) {
-      console.warn("safeRender: missing scene or camera, skipping render", {
-        scenePresent: !!window.scene,
-        cameraPresent: !!window.camera
-      });
+      if (performance.now() - __lastSafeRenderDiag > 1000) {
+        console.warn("safeRender: missing scene or camera, skipping render", {
+          scenePresent: !!window.scene,
+          cameraPresent: !!window.camera
+        });
+        __lastSafeRenderDiag = performance.now();
+      }
       return;
     }
 
-    // Detailed sanity checks
-    inspectObject('window.scene', window.scene);
-    inspectObject('window.camera', window.camera);
-    inspectObject('window.renderer', window.renderer);
-    if (window.composer) console.log('window.composer detected:', {
-      hasRender: typeof window.composer.render === 'function',
-      constructor: window.composer.constructor?.name
-    });
+    // Light diagnostics (throttled)
+    inspectObjectOncePerSecond('window.scene', window.scene);
+    inspectObjectOncePerSecond('window.camera', window.camera);
+    inspectObjectOncePerSecond('window.renderer', window.renderer);
+    if (window.composer && performance.now() - __lastSafeRenderDiag > 1000) {
+      console.log('window.composer detected:', {
+        hasRender: typeof window.composer.render === 'function',
+        constructor: window.composer.constructor?.name
+      });
+      __lastSafeRenderDiag = performance.now();
+    }
 
-    // If scene/camera aren't correct three.js types, bail and print a helpful error:
     if (!isThreeScene(window.scene)) {
-      console.error("safeRender: window.scene is not a THREE.Scene. Aborting render to avoid crash. Investigate where window.scene is set.");
+      console.error("safeRender: window.scene is not a THREE.Scene. Aborting render to avoid crash.");
       return;
     }
     if (!isThreeCamera(window.camera)) {
-      console.error("safeRender: window.camera is not a THREE.Camera. Aborting render to avoid crash. Investigate where window.camera is set.");
+      console.error("safeRender: window.camera is not a THREE.Camera. Aborting render to avoid crash.");
       return;
     }
 
@@ -2775,49 +2817,41 @@ function safeRender() {
     const forceDirectRenderer = false;
 
     if (isCanvasRenderer) {
-      // CanvasRenderer doesn't support EffectComposer / shader passes.
-      try {
-        window.renderer.render(window.scene, window.camera);
-      } catch (e) {
-        console.error("CanvasRenderer render threw:", e);
-      }
+      try { window.renderer.render(window.scene, window.camera); } catch (e) { console.error("CanvasRenderer render threw:", e); }
       return;
     }
 
     if (window.composer && typeof window.composer.render === "function" && !forceDirectRenderer) {
-      // composer may internally call renderer.render with different camera/scene
       try {
         window.composer.render();
       } catch (e) {
         console.error("composer.render() threw — falling back to direct renderer.render. Composer details:", e);
         if (window.renderer && typeof window.renderer.render === "function") {
-          try {
-            window.renderer.render(window.scene, window.camera);
-          } catch (err) {
-            console.error("Fallback renderer.render threw:", err);
-          }
+          try { window.renderer.render(window.scene, window.camera); } catch (err) { console.error("Fallback renderer.render threw:", err); }
         }
       }
       return;
     }
 
     if (window.renderer && typeof window.renderer.render === "function") {
-      try {
-        window.renderer.render(window.scene, window.camera);
-      } catch (e) {
-        console.error("Renderer.render threw:", e);
-      }
+      try { window.renderer.render(window.scene, window.camera); } catch (e) { console.error("Renderer.render threw:", e); }
     } else {
-      console.warn("safeRender: no composer or renderer available to render");
+      if (performance.now() - __lastSafeRenderDiag > 1000) {
+        console.warn("safeRender: no composer or renderer available to render");
+        __lastSafeRenderDiag = performance.now();
+      }
     }
   } catch (e) {
     console.error("safeRender error:", e);
     try {
-      console.log("Final diagnostics before aborting render:");
-      inspectObject('window.scene', window.scene);
-      inspectObject('window.camera', window.camera);
-      inspectObject('window.renderer', window.renderer);
-      if (window.composer) console.log('window.composer present:', window.composer.constructor?.name, 'render fn?', typeof window.composer.render);
+      if (performance.now() - __lastSafeRenderDiag > 1000) {
+        console.log("Final diagnostics before aborting render:");
+        inspectObjectOncePerSecond('window.scene', window.scene);
+        inspectObjectOncePerSecond('window.camera', window.camera);
+        inspectObjectOncePerSecond('window.renderer', window.renderer);
+        if (window.composer) console.log('window.composer present:', window.composer.constructor?.name, 'render fn?', typeof window.composer.render);
+        __lastSafeRenderDiag = performance.now();
+      }
     } catch (ee) {
       console.error("Diagnostics logging failed:", ee);
     }
@@ -3412,6 +3446,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
