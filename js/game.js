@@ -819,16 +819,15 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
   canvas.height = height;
   const ctx = canvas.getContext('2d');
 
-  // Scratch vars for projections & temp math
+  // scratch vectors/mats
   const proj = new THREE.Vector3();
   const tmpPos = new THREE.Vector3();
   const tmpVec = new THREE.Vector3();
   const tmpVec2 = new THREE.Vector3();
   const tmpMat = new THREE.Matrix4();
-  const tmpBoxCorner = new THREE.Vector3();
-  const identityMat = new THREE.Matrix4();
+  const tmpMat2 = new THREE.Matrix4();
 
-  // helper: build convex hull (Andrew monotone chain) of 2D points
+  // helpers
   function convexHull(points) {
     if (points.length <= 1) return points.slice();
     const pts = points.slice().sort((a, b) => (a.x === b.x ? a.y - b.y : a.x - b.x));
@@ -859,400 +858,363 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
         canvas.style.height = `${h}px`;
       }
     },
-    // Minimal clear color support
-    setClearColor(hex, alpha = 1) {
-      api._clearColor = { hex, alpha };
-    },
+    setClearColor(hex, alpha = 1) { api._clearColor = { hex, alpha }; },
     _clearColor: { hex: 0x000000, alpha: 1 },
+
+    // quality / perf toggles
+    options: {
+      useTriangles: true,         // global default: use triangles when available
+      maxTrianglesPerObject: 2000 // cap triangles sampled per object (tweak for perf)
+    },
+    setOptions(opts = {}) { Object.assign(api.options, opts); },
 
     // max render distance (meters/world units). Default: Infinity
     setMaxRenderDistance(d) { api._maxRenderDistance = Number.isFinite(d) ? d : Infinity; },
     _maxRenderDistance: Infinity,
 
-    // Basic render: draw sprites (material.map.image) and approximated shapes for meshes
     render(scene, camera) {
-      // update matrices
       camera.updateMatrixWorld && camera.updateMatrixWorld();
       const projScreenMatrix = new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
       const frustum = new THREE.Frustum();
       frustum.setFromProjectionMatrix(projScreenMatrix);
 
-      // Clear with the clear color (converted to CSS)
+      // clear
       const c = api._clearColor;
-      const r = (c.hex >> 16) & 0xff;
-      const g = (c.hex >> 8) & 0xff;
-      const b = c.hex & 0xff;
+      const r = (c.hex >> 16) & 0xff, g = (c.hex >> 8) & 0xff, b = c.hex & 0xff;
       ctx.save();
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.fillStyle = `rgba(${r},${g},${b},${c.alpha})`;
       ctx.fillRect(0, 0, canvas.width, canvas.height);
       ctx.restore();
 
-      // collect drawables (so we can sort by depth)
-      const drawables = [];
-
-      // utility: test object visibility using boundingSphere/box and frustum
-      function isLikelyVisible(obj, worldPoints, center, radius) {
-        // 1) if user forced alwaysRender, treat as visible
-        if (obj.userData?.alwaysRender) return true;
-
-        // 2) boundingSphere test if available
-        if (center && typeof radius === 'number') {
-          const sphere = new THREE.Sphere(center, radius);
-          if (frustum.intersectsSphere(sphere)) return true;
-        }
-
-        // 3) boundingBox points test (some sample points projected on-screen)
-        for (let pt of worldPoints) {
-          if (frustum.containsPoint(pt)) return true;
-        }
-        return false;
-      }
-
-      function projectAllAndComputeRect(worldPoints) {
+      // utility: project world points to screen-space, return array of {x,y,z}
+      function projectPoints(worldPoints) {
         const pts2d = [];
-        let anyBehind = false;
         for (let wp of worldPoints) {
           proj.copy(wp).project(camera);
-          if (proj.z > 1 || proj.z < -1) {
-            anyBehind = true;
-            continue;
-          }
+          // skip behind camera/clipped points (they won't help form a visible triangle on-screen)
+          if (proj.z > 1 || proj.z < -1) continue;
           const px = (proj.x * 0.5 + 0.5) * canvas.width;
           const py = (-proj.y * 0.5 + 0.5) * canvas.height;
           pts2d.push({ x: px, y: py, z: proj.z });
         }
-        if (pts2d.length === 0) return null;
-        let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, avgZ = 0;
-        for (let p of pts2d) {
-          if (p.x < minX) minX = p.x;
-          if (p.x > maxX) maxX = p.x;
-          if (p.y < minY) minY = p.y;
-          if (p.y > maxY) maxY = p.y;
-          avgZ += p.z;
-        }
-        avgZ /= pts2d.length;
-        return { minX, maxX, minY, maxY, width: maxX - minX, height: maxY - minY, avgZ, pts2d };
+        return pts2d;
       }
 
-      // traverse scene and build drawables
+      const drawables = [];
+
+      // draw triangle helper (collect triangles for back-to-front painter order)
+      function collectTrianglesFromGeometry(obj, geom, worldMatrix, maxTriangles) {
+        const posAttr = geom.attributes && geom.attributes.position;
+        if (!posAttr || posAttr.count === 0) return;
+
+        // prepare index array if available
+        const hasIndex = !!geom.index;
+        const icount = hasIndex ? geom.index.count : Math.floor(posAttr.count / 3) * 3;
+        const indexArray = hasIndex ? geom.index.array : null;
+
+        // compute triangle count and sampling step if necessary
+        const triCount = Math.floor(icount / 3);
+        const step = Math.max(1, Math.floor(triCount / Math.min(triCount, maxTriangles)));
+
+        // iterate triangles (possibly sampled by step)
+        let processed = 0;
+        for (let t = 0; t < triCount && processed < maxTriangles; t += step) {
+          const baseIdx = t * 3;
+          let ai, bi, ci;
+          if (hasIndex) {
+            ai = indexArray[baseIdx];
+            bi = indexArray[baseIdx + 1];
+            ci = indexArray[baseIdx + 2];
+          } else {
+            ai = baseIdx;
+            bi = baseIdx + 1;
+            ci = baseIdx + 2;
+          }
+
+          // get vertex positions
+          tmpVec.set(posAttr.getX(ai), posAttr.getY(ai), posAttr.getZ(ai)).applyMatrix4(worldMatrix);
+          tmpVec2.set(posAttr.getX(bi), posAttr.getY(bi), posAttr.getZ(bi)).applyMatrix4(worldMatrix);
+          const vC = new THREE.Vector3(posAttr.getX(ci), posAttr.getY(ci), posAttr.getZ(ci)).applyMatrix4(worldMatrix);
+
+          // quickly cull tiny/degenerate triangles in world-space
+          const areaApprox = tmpVec.distanceTo(tmpVec2) + tmpVec2.distanceTo(vC) + vC.distanceTo(tmpVec);
+          if (areaApprox < 1e-6) { processed++; continue; }
+
+          // project tri
+          const p0 = proj.copy(tmpVec).project(camera);
+          const p1 = proj.copy(tmpVec2).project(camera);
+          const p2 = proj.copy(vC).project(camera);
+          // if all three behind clip, skip
+          if ((p0.z > 1 || p0.z < -1) && (p1.z > 1 || p1.z < -1) && (p2.z > 1 || p2.z < -1)) {
+            processed++; continue;
+          }
+
+          // convert to screen space points (we still accept tris with 1-2 points clipped; clipping triangles is expensive)
+          const sx0 = (p0.x * 0.5 + 0.5) * canvas.width, sy0 = (-p0.y * 0.5 + 0.5) * canvas.height;
+          const sx1 = (p1.x * 0.5 + 0.5) * canvas.width, sy1 = (-p1.y * 0.5 + 0.5) * canvas.height;
+          const sx2 = (p2.x * 0.5 + 0.5) * canvas.width, sy2 = (-p2.y * 0.5 + 0.5) * canvas.height;
+
+          // depth for sorting: average projected z
+          const avgZ = (p0.z + p1.z + p2.z) / 3;
+
+          drawables.push({
+            type: 'tri',
+            obj,
+            pts: [{ x: sx0, y: sy0 }, { x: sx1, y: sy1 }, { x: sx2, y: sy2 }],
+            avgZ,
+            // color/alpha will be read during draw stage
+          });
+          processed++;
+        }
+      }
+
+      // traverse scene and collect drawables (triangles OR polys/images)
       scene.traverse((obj) => {
         if (!obj.visible) return;
         if (obj.isCamera || obj.isLight) return;
 
-        // handle InstancedMesh
-        if (obj.isInstancedMesh) {
+        // distance cutoff
+        obj.getWorldPosition(tmpPos);
+        const center = tmpPos.clone();
+        const dist = camera.position.distanceTo(center);
+        if (dist > (obj.userData?.maxRenderDistance ?? api._maxRenderDistance) && !obj.userData?.alwaysRender) return;
+
+        // Instanced meshes: sample per-instance triangles if triangles enabled
+        if (obj.isInstancedMesh && obj.geometry) {
+          const useTriangles = (obj.userData?.useTriangles !== undefined) ? obj.userData.useTriangles : api.options.useTriangles;
+          const maxT = obj.userData?.triangleMax ?? api.options.maxTrianglesPerObject;
           const geom = obj.geometry;
-          if (!geom) return;
-          if (!geom.boundingBox) geom.computeBoundingBox && geom.computeBoundingBox();
-          if (!geom.boundingSphere) geom.computeBoundingSphere && geom.computeBoundingSphere();
-
-          const localCorners = [];
-          if (geom.boundingBox) {
-            const bb = geom.boundingBox;
-            const min = bb.min, max = bb.max;
-            const corners = [
-              [min.x, min.y, min.z],
-              [min.x, min.y, max.z],
-              [min.x, max.y, min.z],
-              [min.x, max.y, max.z],
-              [max.x, min.y, min.z],
-              [max.x, min.y, max.z],
-              [max.x, max.y, min.z],
-              [max.x, max.y, max.z],
-            ];
-            for (let c of corners) localCorners.push(new THREE.Vector3(c[0], c[1], c[2]));
-          } else if (geom.boundingSphere) {
-            const bs = geom.boundingSphere;
-            localCorners.push(bs.center.clone());
-            localCorners.push(bs.center.clone().add(new THREE.Vector3(bs.radius,0,0)));
-            localCorners.push(bs.center.clone().add(new THREE.Vector3(0,bs.radius,0)));
-            localCorners.push(bs.center.clone().add(new THREE.Vector3(0,0,bs.radius)));
-          } else {
-            localCorners.push(new THREE.Vector3(0,0,0));
-          }
-
+          const localMaxPerInstance = Math.floor(maxT / Math.max(1, Math.min(obj.count, obj.userData?.instanceLimit || obj.count)));
           const instanceLimit = Math.min(obj.count, obj.userData?.instanceLimit || obj.count);
-          const mat = new THREE.Matrix4();
-          for (let i = 0; i < instanceLimit; i++) {
-            obj.getMatrixAt(i, mat);
-            // world transform for the instance:
-            tmpMat.copy(obj.matrixWorld).multiply(mat); // obj.matrixWorld * instanceMatrix
-            // compute worldPoints for the instance
-            const worldPoints = localCorners.map(c => c.clone().applyMatrix4(tmpMat));
-            // bounding sphere center & radius (approx)
-            let center = null, radius = null;
-            if (geom.boundingSphere) {
-              center = geom.boundingSphere.center.clone().applyMatrix4(tmpMat);
-              const scale = tmpMat.getMaxScaleOnAxis ? tmpMat.getMaxScaleOnAxis() : 1;
-              radius = geom.boundingSphere.radius * scale;
-            } else {
-              // center fallback = average
-              center = new THREE.Vector3();
-              for (let p of worldPoints) center.add(p);
-              center.multiplyScalar(1 / worldPoints.length);
-              let maxd = 0;
-              for (let p of worldPoints) maxd = Math.max(maxd, center.distanceTo(p));
-              radius = maxd;
+
+          if (useTriangles && geom.attributes && geom.attributes.position) {
+            const mat = new THREE.Matrix4();
+            for (let i = 0; i < instanceLimit; i++) {
+              obj.getMatrixAt(i, mat);
+              tmpMat.copy(obj.matrixWorld).multiply(mat); // world transform for instance
+              collectTrianglesFromGeometry(obj, geom, tmpMat, localMaxPerInstance);
             }
-
-            // distance check
-            const dist = camera.position.distanceTo(center);
-            if (dist > (obj.userData?.maxRenderDistance ?? api._maxRenderDistance) && !obj.userData?.alwaysRender) continue;
-
-            // frustum/visibility test
-            if (!isLikelyVisible(obj, worldPoints, center, radius)) {
-              if (!obj.userData?.forceMarker) continue;
-            }
-
-            // compute projected rect
-            const rect = projectAllAndComputeRect(worldPoints);
-            if (!rect) {
-              if (obj.userData?.forceMarker) {
-                drawables.push({ type: 'rect', obj, sx: (tmpPos.x || 0), sy: (tmpPos.y || 0), dist, sizePx: obj.userData?.markerSizePx ?? 6, projZ: 1 });
+            // done with instanced-triangle collects; don't fall through to other drawing methods for instanced
+            // if no triangles collected, will fall back below to rect/marker
+            if (drawables.some(d => d.type === 'tri' && d.obj === obj)) return;
+          } else {
+            // fallback: sample bounding box corners per instance to create rect-like drawables (existing behavior)
+            const geomBB = geom.boundingBox || (geom.computeBoundingBox && geom.computeBoundingBox(), geom.boundingBox);
+            const corners = [];
+            if (geomBB) {
+              const min = geomBB.min, max = geomBB.max;
+              const localCorners = [
+                [min.x, min.y, min.z], [min.x, min.y, max.z], [min.x, max.y, min.z], [min.x, max.y, max.z],
+                [max.x, min.y, min.z], [max.x, min.y, max.z], [max.x, max.y, min.z], [max.x, max.y, max.z]
+              ];
+              for (let i = 0; i < Math.min(instanceLimit, obj.userData?.instanceLimit || instanceLimit); i++) {
+                obj.getMatrixAt(i, tmpMat);
+                const wp = localCorners.map(c => new THREE.Vector3(c[0], c[1], c[2]).applyMatrix4(tmpMat.copy(obj.matrixWorld)));
+                const projPts = projectPoints(wp);
+                if (projPts.length === 0) continue;
+                let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, avgZ = 0;
+                for (let p of projPts) { minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x); minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y); avgZ += p.z; }
+                avgZ /= projPts.length;
+                drawables.push({ type: 'imageRect', obj, rect: { minX, minY, width: maxX - minX, height: maxY - minY, avgZ } });
               }
-              continue;
             }
-
-            // pick texture if present
-            const mapImage = (obj.material && obj.material.map && obj.material.map.image) ? obj.material.map.image : null;
-            drawables.push({
-              type: 'inst',
-              obj,
-              instanceId: i,
-              rect,
-              dist,
-              projZ: rect.avgZ,
-              mapImage,
-              instanceMatrix: tmpMat.clone()
-            });
+            return;
           }
-          return;
         }
 
-        // non-instanced path:
-        obj.getWorldPosition(tmpPos);
-        const centerPos = tmpPos.clone();
-        const distToCenter = camera.position.distanceTo(centerPos);
-        if (distToCenter > (obj.userData?.maxRenderDistance ?? api._maxRenderDistance) && !obj.userData?.alwaysRender) return;
-
-        // try to produce a set of world sample points for the object
-        let worldPoints = [centerPos.clone()];
-        let boundingRadius = null;
-        if (obj.geometry) {
+        // Non-instanced meshes: try triangle-mode if requested and geometry available
+        if (obj.isMesh && obj.geometry) {
           const geom = obj.geometry;
+          if (!geom) {
+            return;
+          }
+
+          const useTriangles = (obj.userData?.useTriangles !== undefined) ? obj.userData.useTriangles : api.options.useTriangles;
+          const maxTriangles = obj.userData?.triangleMax ?? api.options.maxTrianglesPerObject;
+
+          if (useTriangles && geom.attributes && geom.attributes.position) {
+            // collect triangles from this mesh (transformed by obj.matrixWorld)
+            collectTrianglesFromGeometry(obj, geom, obj.matrixWorld, maxTriangles);
+            // if triangles were collected, skip the polygon fallback
+            if (drawables.some(d => d.type === 'tri' && d.obj === obj)) return;
+            // else fallthrough to hull/rect fallback
+          }
+
+          // If there is a texture on the material, compute projected bounding rect and push imageRect
+          const mapImage = obj.material && obj.material.map && obj.material.map.image ? obj.material.map.image : null;
+          // compute sample worldPoints (corners or samples) to create a rect/hull
+          let worldPoints = [];
           if (!geom.boundingBox) geom.computeBoundingBox && geom.computeBoundingBox();
           if (!geom.boundingSphere) geom.computeBoundingSphere && geom.computeBoundingSphere();
 
           if (geom.boundingBox) {
             const bb = geom.boundingBox;
-            const min = bb.min, max = bb.max;
             const corners = [
-              [min.x, min.y, min.z],
-              [min.x, min.y, max.z],
-              [min.x, max.y, min.z],
-              [min.x, max.y, max.z],
-              [max.x, min.y, min.z],
-              [max.x, min.y, max.z],
-              [max.x, max.y, min.z],
-              [max.x, max.y, max.z],
+              [bb.min.x, bb.min.y, bb.min.z],
+              [bb.min.x, bb.min.y, bb.max.z],
+              [bb.min.x, bb.max.y, bb.min.z],
+              [bb.min.x, bb.max.y, bb.max.z],
+              [bb.max.x, bb.min.y, bb.min.z],
+              [bb.max.x, bb.min.y, bb.max.z],
+              [bb.max.x, bb.max.y, bb.min.z],
+              [bb.max.x, bb.max.y, bb.max.z],
             ];
-            worldPoints = [];
             for (let c of corners) worldPoints.push(tmpVec.set(c[0], c[1], c[2]).applyMatrix4(obj.matrixWorld).clone());
-          } else if (geom.boundingSphere) {
-            const bs = geom.boundingSphere;
-            const center = bs.center.clone().applyMatrix4(obj.matrixWorld);
-            const scale = obj.matrixWorld.getMaxScaleOnAxis ? obj.matrixWorld.getMaxScaleOnAxis() : 1;
-            const r = bs.radius * scale;
-            worldPoints = [
-              center.clone(),
-              center.clone().add(new THREE.Vector3(r,0,0)),
-              center.clone().add(new THREE.Vector3(-r,0,0)),
-              center.clone().add(new THREE.Vector3(0,r,0)),
-              center.clone().add(new THREE.Vector3(0,-r,0)),
-              center.clone().add(new THREE.Vector3(0,0,r)),
-              center.clone().add(new THREE.Vector3(0,0,-r)),
-            ];
-            boundingRadius = r;
           } else {
             const posAttr = geom.attributes && geom.attributes.position;
             if (posAttr && posAttr.count > 0) {
-              worldPoints = [];
+              // sample up to 16 vertex positions
               const step = Math.max(1, Math.floor(posAttr.count / 16));
               for (let i = 0; i < posAttr.count; i += step) {
-                const p = tmpVec.set(posAttr.getX(i), posAttr.getY(i), posAttr.getZ(i)).applyMatrix4(obj.matrixWorld).clone();
-                worldPoints.push(p);
+                worldPoints.push(tmpVec.set(posAttr.getX(i), posAttr.getY(i), posAttr.getZ(i)).applyMatrix4(obj.matrixWorld).clone());
                 if (worldPoints.length >= 16) break;
               }
+            } else {
+              obj.getWorldPosition(tmpPos);
+              worldPoints.push(tmpPos.clone());
             }
           }
-          if (!boundingRadius && geom.boundingSphere) {
-            boundingRadius = geom.boundingSphere.radius * (obj.matrixWorld.getMaxScaleOnAxis ? obj.matrixWorld.getMaxScaleOnAxis() : 1);
+
+          // project points to rect
+          const projected = projectPoints(worldPoints);
+          if (projected.length === 0) return;
+
+          let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, avgZ = 0;
+          for (let p of projected) { minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x); minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y); avgZ += p.z; }
+          avgZ /= projected.length;
+
+          if (mapImage) {
+            drawables.push({ type: 'imageRect', obj, rect: { minX, minY, width: maxX - minX, height: maxY - minY, avgZ } });
+            return;
           }
-        }
 
-        // visibility test
-        if (!isLikelyVisible(obj, worldPoints, centerPos, boundingRadius)) {
-          if (!obj.userData?.forceMarker) return;
-        }
-
-        // project points and compute rect
-        const rect = projectAllAndComputeRect(worldPoints);
-        // if we couldn't compute rect (e.g., all points behind camera), fallback to center projection
-        let sx, sy;
-        if (!rect) {
-          proj.copy(centerPos).project(camera);
-          sx = (proj.x * 0.5 + 0.5) * canvas.width;
-          sy = (-proj.y * 0.5 + 0.5) * canvas.height;
-        }
-
-        // texture handling
-        const mapImage = (obj.material && obj.material.map && obj.material.map.image) ? obj.material.map.image : null;
-        if (mapImage) {
-          if (rect) {
-            drawables.push({ type: 'imageRect', obj, rect, dist: distToCenter, projZ: rect.avgZ, mapImage });
+          // produce polygon from hull of projected points to capture silhouette (non-triangle fallback)
+          const hull = convexHull(projected.map(p => ({ x: p.x, y: p.y })));
+          if (hull.length >= 3) {
+            drawables.push({ type: 'poly', obj, pts: hull, dist: dist, projZ: avgZ });
+          } else if (hull.length === 2) {
+            drawables.push({ type: 'line', obj, pts: hull, dist: dist, projZ: avgZ });
           } else {
-            drawables.push({ type: 'image', obj, sx, sy, dist: distToCenter, projZ: proj.z, mapImage });
+            drawables.push({ type: 'rect', obj, sx: minX + (maxX - minX) / 2, sy: minY + (maxY - minY) / 2, dist: dist, sizePx: Math.max(3, Math.min(64, Math.max(maxX - minX, maxY - minY))), projZ: avgZ });
           }
           return;
         }
 
-        // if we have a polygon hull, push poly/line/rect drawables (use hull of rect pts)
-        if (rect) {
-          // compute hull from projected pts if available (pts2d)
-          const hull = convexHull(rect.pts2d.map(p => ({ x: p.x, y: p.y })));
-          if (hull.length >= 3) {
-            drawables.push({ type: 'poly', obj, pts: hull, dist: distToCenter, projZ: rect.avgZ });
-          } else if (hull.length === 2) {
-            drawables.push({ type: 'line', obj, pts: hull, dist: distToCenter, projZ: rect.avgZ });
-          } else {
-            drawables.push({ type: 'rect', obj, sx: rect.minX + rect.width / 2, sy: rect.minY + rect.height / 2, dist: distToCenter, sizePx: Math.max(3, Math.min(64, Math.max(rect.width, rect.height))), projZ: rect.avgZ });
-          }
+        // Sprites / textured objects without geometry
+        const mapImage = obj.material && obj.material.map && obj.material.map.image ? obj.material.map.image : null;
+        if (obj.isSprite && mapImage) {
+          // project center
+          obj.getWorldPosition(tmpPos);
+          const p = proj.copy(tmpPos).project(camera);
+          if (p.z > 1 || p.z < -1) return;
+          const sx = (p.x * 0.5 + 0.5) * canvas.width;
+          const sy = (-p.y * 0.5 + 0.5) * canvas.height;
+          // prefer sprite.scale if available to determine size
+          const scaleFactor = obj.scale ? Math.max(0.1, (obj.scale.x + obj.scale.y) / 2) : 1;
+          const base = obj.userData?.sizePx ?? Math.max(16, Math.min(canvas.width, canvas.height) * 0.1);
+          const w = Math.max(4, base * scaleFactor * (1 / Math.max(0.1, camera.position.distanceTo(tmpPos) * 0.05)));
+          const h = w * (mapImage.height / mapImage.width || 1);
+          drawables.push({ type: 'imageRect', obj, rect: { minX: sx - w / 2, minY: sy - h / 2, width: w, height: h, avgZ: p.z } });
           return;
         }
 
         // fallback marker
-        const fallbackSize = obj.userData?.markerSizePx ?? 6;
-        drawables.push({ type: 'rect', obj, sx: sx || 0, sy: sy || 0, dist: distToCenter, sizePx: fallbackSize, projZ: proj.z });
+        obj.getWorldPosition(tmpPos);
+        proj.copy(tmpPos).project(camera);
+        if (proj.z > 1 || proj.z < -1) return;
+        const sx = (proj.x * 0.5 + 0.5) * canvas.width;
+        const sy = (-proj.y * 0.5 + 0.5) * canvas.height;
+        drawables.push({ type: 'rect', obj, sx, sy, dist, sizePx: obj.userData?.markerSizePx ?? 6, projZ: proj.z });
       });
 
-      // depth sort: use projected Z when available (smaller z -> closer)
+      // sorting: triangles / objects back-to-front (largest z is far)
       drawables.sort((a, b) => {
-        const za = (typeof a.projZ === 'number') ? a.projZ : (a.dist ? (a.dist / (a.dist + 1)) : 0);
-        const zb = (typeof b.projZ === 'number') ? b.projZ : (b.dist ? (b.dist / (b.dist + 1)) : 0);
+        const za = (typeof a.avgZ === 'number') ? a.avgZ : (typeof a.projZ === 'number' ? a.projZ : 0);
+        const zb = (typeof b.avgZ === 'number') ? b.avgZ : (typeof b.projZ === 'number' ? b.projZ : 0);
         return zb - za;
       });
 
-      // draw each drawable
-      for (let i = 0; i < drawables.length; i++) {
-        const d = drawables[i];
-        const { obj } = d;
-        const dist = d.dist ?? 0;
-
-        // color selection (material color or userData.color)
-        let color = obj.userData?.color;
-        if (!color && obj.material && obj.material.color) {
-          try {
-            color = obj.material.color.getStyle ? obj.material.color.getStyle() : (`#${obj.material.color.getHexString()}`);
-          } catch (e) {
-            color = obj.userData?.color || 'white';
-          }
-        }
-        color = color || obj.userData?.color || 'white';
-
-        const effectiveAlpha = (obj.userData?.opacity ?? (obj.material && typeof obj.material.opacity !== 'undefined' ? obj.material.opacity : 1));
-
-        // IMAGE RECT: draw image stretched to projected bounding box (width & height separately)
-        if ((d.type === 'imageRect' || d.type === 'inst' || d.type === 'image') && d.mapImage && d.mapImage.width) {
+      // draw
+      for (let d of drawables) {
+        const obj = d.obj;
+        const color = obj.userData?.color || (obj.material && obj.material.color ? (obj.material.color.getStyle ? obj.material.color.getStyle() : `#${obj.material.color.getHexString()}`) : 'white');
+        const alpha = obj.userData?.opacity ?? (obj.material && typeof obj.material.opacity === 'number' ? obj.material.opacity : 1);
+        if (d.type === 'tri') {
           ctx.save();
-          // determine screen rectangle
-          let minX, minY, wPx, hPx, centerX, centerY;
-          if (d.rect) {
-            minX = d.rect.minX;
-            minY = d.rect.minY;
-            wPx = Math.max(1, d.rect.width);
-            hPx = Math.max(1, d.rect.height);
-            centerX = minX + wPx / 2;
-            centerY = minY + hPx / 2;
-          } else {
-            // fallback single-center square (rare)
-            wPx = obj.userData?.sizePx ?? 64;
-            hPx = wPx;
-            centerX = d.sx;
-            centerY = d.sy;
-            minX = centerX - wPx / 2;
-            minY = centerY - hPx / 2;
-          }
-
-          // clamp extremely large values to avoid huge canvas draws, use userData.maxScreenSizePx or default 4096
-          const maxScreen = Math.max(256, Math.min(4096, obj.userData?.maxScreenSizePx ?? 2048));
-          if (wPx > maxScreen || hPx > maxScreen) {
-            const scale = maxScreen / Math.max(wPx, hPx);
-            wPx *= scale;
-            hPx *= scale;
-          }
-
-          ctx.globalAlpha = effectiveAlpha;
-          // If sprite with scale, respect sprite's aspect-ish
-          if (d.type === 'inst' && obj.material && obj.material.map && obj.material.map.image) {
-            // instanced meshes: we don't have per-instance rotation in screen-space, draw axis-aligned bbox
-            ctx.drawImage(d.mapImage, minX, minY, wPx, hPx);
-          } else {
-            // normal mesh sprite/texture
-            ctx.drawImage(d.mapImage, minX, minY, wPx, hPx);
-          }
+          ctx.beginPath();
+          ctx.moveTo(d.pts[0].x, d.pts[0].y);
+          ctx.lineTo(d.pts[1].x, d.pts[1].y);
+          ctx.lineTo(d.pts[2].x, d.pts[2].y);
+          ctx.closePath();
+          ctx.globalAlpha = Math.max(0.05, Math.min(1, alpha));
+          ctx.fillStyle = color;
+          ctx.fill();
           ctx.restore();
           continue;
         }
 
-        if (d.type === 'poly' && d.pts) {
+        if ((d.type === 'imageRect') && d.mapImage) {
+          const rect = d.rect;
+          ctx.save();
+          ctx.globalAlpha = alpha;
+          // clamp excessively large sizes
+          const maxScreen = Math.max(256, Math.min(8192, obj.userData?.maxScreenSizePx ?? 4096));
+          let w = Math.max(1, rect.width), h = Math.max(1, rect.height);
+          if (w > maxScreen || h > maxScreen) {
+            const sc = maxScreen / Math.max(w, h);
+            w *= sc; h *= sc;
+          }
+          ctx.drawImage(d.mapImage, rect.minX, rect.minY, w, h);
+          ctx.restore();
+          continue;
+        }
+
+        if (d.type === 'poly') {
           ctx.save();
           ctx.beginPath();
           ctx.moveTo(d.pts[0].x, d.pts[0].y);
-          for (let j = 1; j < d.pts.length; j++) ctx.lineTo(d.pts[j].x, d.pts[j].y);
+          for (let i = 1; i < d.pts.length; i++) ctx.lineTo(d.pts[i].x, d.pts[i].y);
           ctx.closePath();
-          ctx.globalAlpha = Math.max(0.2, Math.min(1, (effectiveAlpha * (1 - (dist * 0.002)))));
+          ctx.globalAlpha = Math.max(0.15, Math.min(0.9, alpha));
           ctx.fillStyle = color;
           ctx.fill();
-          ctx.globalAlpha = Math.min(0.9, effectiveAlpha * 0.6);
-          ctx.lineWidth = Math.max(1, 2 - (dist * 0.001));
+          ctx.globalAlpha = Math.min(0.9, alpha);
           ctx.strokeStyle = 'rgba(0,0,0,0.6)';
+          ctx.lineWidth = 1;
           ctx.stroke();
           ctx.restore();
           continue;
         }
 
-        if (d.type === 'line' && d.pts && d.pts.length === 2) {
+        if (d.type === 'line') {
+          ctx.save();
           ctx.beginPath();
           ctx.moveTo(d.pts[0].x, d.pts[0].y);
           ctx.lineTo(d.pts[1].x, d.pts[1].y);
           ctx.strokeStyle = color;
-          ctx.lineWidth = obj.userData?.lineWidth ?? 3;
-          ctx.globalAlpha = Math.max(0.1, effectiveAlpha * (1 - Math.min(0.9, dist * 0.002)));
+          ctx.globalAlpha = Math.max(0.1, alpha);
+          ctx.lineWidth = obj.userData?.lineWidth ?? 2;
           ctx.stroke();
-          continue;
-        }
-
-        if (d.type === 'rect') {
-          const size = d.sizePx ?? Math.max(2, Math.round(12 * (1 / Math.max(0.1, dist * 0.05))));
-          const x = (d.sx || d.sx === 0) ? d.sx : 0;
-          const y = (d.sy || d.sy === 0) ? d.sy : 0;
-          ctx.save();
-          ctx.globalAlpha = Math.max(0.15, Math.min(1, effectiveAlpha * (1 - (dist * 0.001))));
-          ctx.fillStyle = color;
-          ctx.fillRect(x - size / 2, y - size / 2, size, size);
           ctx.restore();
           continue;
         }
 
-        // default: nothing
-      }
-    }
+        if (d.type === 'rect') {
+          ctx.save();
+          const size = d.sizePx ?? 6;
+          ctx.fillStyle = color;
+          ctx.globalAlpha = Math.max(0.15, alpha);
+          ctx.fillRect(d.sx - size / 2, d.sy - size / 2, size, size);
+          ctx.restore();
+          continue;
+        }
+      } // draw loop end
+    } // render end
   };
 
   return api;
 }
-
 
 
 /* ---------- Updated scene initializers (CPU renderer) ---------- */
@@ -3355,6 +3317,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
