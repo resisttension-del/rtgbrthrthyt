@@ -2326,6 +2326,10 @@ function round2(n) {
 
 
 
+// Add a global-level frustum variable
+const frustum = new THREE.Frustum();
+const matrix = new THREE.Matrix4();
+
 export function animate(timestamp) {
   // Schedule the next frame first
   requestAnimationFrame(animate);
@@ -2379,6 +2383,13 @@ export function animate(timestamp) {
       }
       if (respawnOverlay) respawnOverlay.style.display = "flex";
 
+      // --- FRUSTUM UPDATE FIX ---
+      if (window.camera) {
+        window.camera.updateMatrixWorld();
+        frustum.setFromProjectionMatrix(matrix.multiplyMatrices(window.camera.projectionMatrix, window.camera.matrixWorldInverse));
+        window.camera.frustum = frustum; // Attach the frustum to the camera
+      }
+      
       // Render final frame
       if (composer && typeof composer.render === 'function') {
         composer.render();
@@ -2539,6 +2550,13 @@ export function animate(timestamp) {
           });
         }
       }
+    }
+
+    // --- FRUSTUM UPDATE FIX ---
+    if (window.camera) {
+      window.camera.updateMatrixWorld();
+      frustum.setFromProjectionMatrix(matrix.multiplyMatrices(window.camera.projectionMatrix, window.camera.matrixWorldInverse));
+      window.camera.frustum = frustum; // Attach the frustum to the camera
     }
 
     // Render
