@@ -812,157 +812,300 @@ function setupDetailToggle() {
 
 
 function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
-            const canvas = document.createElement('canvas');
-            canvas.style.position = 'relative';
-            canvas.style.zIndex = '0';
-            canvas.width = width;
-            canvas.height = height;
-            const ctx = canvas.getContext('2d');
+    const canvas = document.createElement('canvas');
+    canvas.style.position = 'relative';
+    canvas.style.zIndex = '0';
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
 
-            const proj = new THREE.Vector3();
-            const tmpPos = new THREE.Vector3();
-            const tmpVec = new THREE.Vector3();
+    const proj = new THREE.Vector3();
+    const tmpPos = new THREE.Vector3();
+    const tmpVec = new THREE.Vector3();
+    const aVec = new THREE.Vector3();
+    const bVec = new THREE.Vector3();
+    const cVec = new THREE.Vector3();
+    const e1 = new THREE.Vector3();
+    const e2 = new THREE.Vector3();
+    const faceNormal = new THREE.Vector3();
+    const centroid = new THREE.Vector3();
 
-            // Function to draw a 2D bounding box wireframe
-            function drawBoundingBoxWireframe(points2d, color, dist) {
-                // If the object's center is behind the camera, skip drawing it entirely.
-                // This is a simple, effective way to prevent the "shoving" effect without
-                // culling internal lines.
-                const centerZ = points2d.reduce((sum, p) => sum + p.z, 0) / points2d.length;
-                if (centerZ > 1) {
-                    return;
-                }
+    // Function to draw a 2D bounding box wireframe (kept as fallback)
+    function drawBoundingBoxWireframe(points2d, color, dist) {
+        const centerZ = points2d.reduce((sum, p) => sum + p.z, 0) / points2d.length;
+        if (centerZ > 1) return;
+        if (points2d.length === 0) return;
 
-                if (points2d.length === 0) return;
-                
-                ctx.save();
-                ctx.globalAlpha = Math.max(0.2, Math.min(1, 1 - (dist * 0.002)));
-                ctx.strokeStyle = color;
-                ctx.lineWidth = Math.max(1, 2 - (dist * 0.001));
+        ctx.save();
+        ctx.globalAlpha = Math.max(0.2, Math.min(1, 1 - (dist * 0.002)));
+        ctx.strokeStyle = color;
+        ctx.lineWidth = Math.max(1, 2 - (dist * 0.001));
 
-                // Define the wireframe edges (pairs of indices)
-                const edges = [
-                    [0, 1], [1, 3], [3, 2], [2, 0], // Front face
-                    [4, 5], [5, 7], [7, 6], [6, 4], // Back face
-                    [0, 4], [1, 5], [2, 6], [3, 7]  // Connecting edges
-                ];
+        const edges = [
+            [0, 1], [1, 3], [3, 2], [2, 0],
+            [4, 5], [5, 7], [7, 6], [6, 4],
+            [0, 4], [1, 5], [2, 6], [3, 7]
+        ];
 
-                for (const [startIdx, endIdx] of edges) {
-                    const p1 = points2d[startIdx];
-                    const p2 = points2d[endIdx];
-                    
-                    // Only draw the line if both points are in front of the camera's near plane (z < 1).
-                    // This handles cases where the user is inside an object, but only shows
-                    // the parts that are not behind the camera, solving the "shoving" issue.
-                    if (p1.z < 1 && p2.z < 1) {
-                        ctx.beginPath();
-                        ctx.moveTo(p1.x, p1.y);
-                        ctx.lineTo(p2.x, p2.y);
-                        ctx.stroke();
-                    }
-                }
-                
-                ctx.restore();
+        for (const [s, e] of edges) {
+            const p1 = points2d[s], p2 = points2d[e];
+            if (p1.z < 1 && p2.z < 1) {
+                ctx.beginPath();
+                ctx.moveTo(p1.x, p1.y);
+                ctx.lineTo(p2.x, p2.y);
+                ctx.stroke();
             }
+        }
 
-            const api = {
-                domElement: canvas,
-                setSize(w, h, updateStyle = true) {
-                    canvas.width = w;
-                    canvas.height = h;
-                    if (updateStyle) {
-                        canvas.style.width = `${w}px`;
-                        canvas.style.height = `${h}px`;
+        ctx.restore();
+    }
+
+    // Draw silhouette edges of the mesh by detecting edges shared by a front-facing and back-facing face.
+    // This handles holes and internal loops (torus, geometry with holes, etc.)
+    function drawMeshSilhouette(obj, geom, color, dist, camera) {
+        // Get position attribute
+        const posAttr = geom.attributes && geom.attributes.position;
+        if (!posAttr) return false; // nothing we can do
+
+        const vertexCount = posAttr.count;
+        // derive triangle count
+        const indexAttr = geom.index;
+        const triCount = indexAttr ? indexAttr.count / 3 : vertexCount / 3;
+
+        // fallback guard for huge geometries
+        if (vertexCount > 20000 || triCount > 30000) {
+            // avoid heavy CPU usage — use bbox instead
+            return false;
+        }
+
+        // Build world-space vertex list
+        const worldVerts = new Array(vertexCount);
+        for (let i = 0; i < vertexCount; i++) {
+            tmpVec.fromBufferAttribute(posAttr, i).applyMatrix4(obj.matrixWorld);
+            worldVerts[i] = tmpVec.clone();
+        }
+
+        // Edge map: "minIdx_maxIdx" => [{facing:bool}, ...]
+        const edgeMap = Object.create(null);
+
+        const getEdgeKey = (i1, i2) => {
+            return i1 < i2 ? `${i1}_${i2}` : `${i2}_${i1}`;
+        };
+
+        // iterate triangles
+        const getIndex = (i) => indexAttr ? indexAttr.array[i] : i;
+
+        for (let t = 0; t < triCount; t++) {
+            const ia = getIndex(t * 3 + 0);
+            const ib = getIndex(t * 3 + 1);
+            const ic = getIndex(t * 3 + 2);
+
+            aVec.copy(worldVerts[ia]);
+            bVec.copy(worldVerts[ib]);
+            cVec.copy(worldVerts[ic]);
+
+            // compute face normal (world space)
+            e1.subVectors(bVec, aVec);
+            e2.subVectors(cVec, aVec);
+            faceNormal.crossVectors(e1, e2).normalize();
+
+            // centroid
+            centroid.set(
+                (aVec.x + bVec.x + cVec.x) / 3,
+                (aVec.y + bVec.y + cVec.y) / 3,
+                (aVec.z + bVec.z + cVec.z) / 3
+            );
+
+            // vector from centroid to camera
+            const toCamera = camera.position.clone().sub(centroid);
+            const facing = faceNormal.dot(toCamera) > 0; // true if face points roughly toward camera
+
+            // register the three edges
+            const edges = [[ia, ib], [ib, ic], [ic, ia]];
+            for (const [v1, v2] of edges) {
+                const key = getEdgeKey(v1, v2);
+                if (!edgeMap[key]) edgeMap[key] = [];
+                edgeMap[key].push(facing);
+            }
+        }
+
+        // collect silhouette segments
+        const segments = [];
+        for (const key in edgeMap) {
+            const facings = edgeMap[key];
+            // silhouette if only one adjacent face (boundary edge) OR adjacent faces have different facing booleans
+            if (facings.length === 1 || (facings.length === 2 && facings[0] !== facings[1])) {
+                const parts = key.split('_').map(s => parseInt(s, 10));
+                const v0 = worldVerts[parts[0]];
+                const v1 = worldVerts[parts[1]];
+                if (!v0 || !v1) continue;
+
+                // project endpoints to NDC
+                proj.copy(v0).project(camera);
+                const x0 = (proj.x * 0.5 + 0.5) * canvas.width;
+                const y0 = (-proj.y * 0.5 + 0.5) * canvas.height;
+                const z0 = proj.z;
+
+                proj.copy(v1).project(camera);
+                const x1 = (proj.x * 0.5 + 0.5) * canvas.width;
+                const y1 = (-proj.y * 0.5 + 0.5) * canvas.height;
+                const z1 = proj.z;
+
+                // optionally cull if both points behind camera
+                if (z0 > 1 && z1 > 1) continue;
+
+                segments.push({ x0, y0, z0, x1, y1, z1 });
+            }
+        }
+
+        if (segments.length === 0) return false;
+
+        // draw segments
+        ctx.save();
+        ctx.globalAlpha = Math.max(0.25, Math.min(1, 1 - (dist * 0.002)));
+        ctx.strokeStyle = color;
+        ctx.lineWidth = Math.max(1, 2 - (dist * 0.001));
+        ctx.lineJoin = 'round';
+        ctx.lineCap = 'round';
+
+        ctx.beginPath();
+        for (const s of segments) {
+            // only draw visible segment portion if both endpoints are in front of camera near-plane (z < 1)
+            if (s.z0 < 1 && s.z1 < 1) {
+                ctx.moveTo(s.x0, s.y0);
+                ctx.lineTo(s.x1, s.y1);
+            } else {
+                // if partially behind the near plane, still draw the visible endpoint to the projected midpoint
+                // (simple heuristic) — could be improved with proper clipping later.
+                if (s.z0 < 1 && s.z1 >= 1) {
+                    ctx.moveTo(s.x0, s.y0);
+                    ctx.lineTo((s.x0 + s.x1) / 2, (s.y0 + s.y1) / 2);
+                } else if (s.z1 < 1 && s.z0 >= 1) {
+                    ctx.moveTo((s.x0 + s.x1) / 2, (s.y0 + s.y1) / 2);
+                    ctx.lineTo(s.x1, s.y1);
+                }
+            }
+        }
+        ctx.stroke();
+        ctx.restore();
+
+        return true;
+    }
+
+    const api = {
+        domElement: canvas,
+        setSize(w, h, updateStyle = true) {
+            canvas.width = w;
+            canvas.height = h;
+            if (updateStyle) {
+                canvas.style.width = `${w}px`;
+                canvas.style.height = `${h}px`;
+            }
+        },
+        setClearColor(hex, alpha = 1) {
+            api._clearColor = { hex, alpha };
+        },
+        _clearColor: { hex: 0x000000, alpha: 1 },
+
+        render(scene, camera) {
+            const c = api._clearColor;
+            const r = (c.hex >> 16) & 0xff;
+            const g = (c.hex >> 8) & 0xff;
+            const b = c.hex & 0xff;
+            ctx.save();
+            ctx.setTransform(1, 0, 0, 1, 0, 0);
+            ctx.fillStyle = `rgba(${r},${g},${b},${c.alpha})`;
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            ctx.restore();
+
+            const drawables = [];
+            scene.traverse((obj) => {
+                if (!obj.visible) return;
+                if (obj.isCamera || obj.isLight) return;
+
+                obj.getWorldPosition(tmpPos);
+                const dist = camera.position.distanceTo(tmpPos);
+
+                let color = obj.userData?.color;
+                if (!color && obj.material && obj.material.color) {
+                    try {
+                        color = obj.material.color.getStyle ? obj.material.color.getStyle() : (`#${obj.material.color.getHexString()}`);
+                    } catch (e) {
+                        color = obj.userData?.color || 'white';
                     }
-                },
-                setClearColor(hex, alpha = 1) {
-                    api._clearColor = { hex, alpha };
-                },
-                _clearColor: { hex: 0x000000, alpha: 1 },
+                }
+                color = color || obj.userData?.color || 'white';
 
-                render(scene, camera) {
-                    const c = api._clearColor;
-                    const r = (c.hex >> 16) & 0xff;
-                    const g = (c.hex >> 8) & 0xff;
-                    const b = c.hex & 0xff;
-                    ctx.save();
-                    ctx.setTransform(1, 0, 0, 1, 0, 0);
-                    ctx.fillStyle = `rgba(${r},${g},${b},${c.alpha})`;
-                    ctx.fillRect(0, 0, canvas.width, canvas.height);
-                    ctx.restore();
+                if (obj.isMesh && obj.geometry) {
+                    const geom = obj.geometry;
+                    if (!geom.boundingBox) geom.computeBoundingBox && geom.computeBoundingBox();
 
-                    const drawables = [];
-                    scene.traverse((obj) => {
-                        if (!obj.visible) return;
-                        if (obj.isCamera || obj.isLight) return;
-                        
-                        obj.getWorldPosition(tmpPos);
-                        const dist = camera.position.distanceTo(tmpPos);
-                        
-                        let color = obj.userData?.color;
-                        if (!color && obj.material && obj.material.color) {
-                            try {
-                                color = obj.material.color.getStyle ? obj.material.color.getStyle() : (`#${obj.material.color.getHexString()}`);
-                            } catch (e) {
-                                color = obj.userData?.color || 'white';
-                            }
-                        }
-                        color = color || obj.userData?.color || 'white';
+                    // attempt silhouette drawing
+                    drawables.push({ type: 'mesh', obj, geom, dist, color });
+                }
+            });
 
-                        // Always render with a bounding box for performance and simplicity
-                        if (obj.isMesh && obj.geometry) {
-                            const geom = obj.geometry;
-                            if (!geom.boundingBox) geom.computeBoundingBox && geom.computeBoundingBox();
-                            
+            // sort back-to-front for nicer overlay ordering
+            drawables.sort((a, b) => b.dist - a.dist);
+
+            for (let i = 0; i < drawables.length; i++) {
+                const d = drawables[i];
+                const { obj, dist, color } = d;
+
+                if (d.type === 'mesh' && d.geom) {
+                    const success = drawMeshSilhouette(obj, d.geom, color, dist, camera);
+                    if (!success) {
+                        // fallback to bounding box rendering
+                        const geom = d.geom;
+                        if (geom.boundingBox) {
+                            const bb = geom.boundingBox;
+                            const min = bb.min;
+                            const max = bb.max;
+                            const corners = [
+                                new THREE.Vector3(min.x, min.y, min.z),
+                                new THREE.Vector3(min.x, min.y, max.z),
+                                new THREE.Vector3(min.x, max.y, min.z),
+                                new THREE.Vector3(min.x, max.y, max.z),
+                                new THREE.Vector3(max.x, min.y, min.z),
+                                new THREE.Vector3(max.x, min.y, max.z),
+                                new THREE.Vector3(max.x, max.y, min.z),
+                                new THREE.Vector3(max.x, max.y, max.z),
+                            ];
                             const worldPoints = [];
-                            if (geom.boundingBox) {
-                                const bb = geom.boundingBox;
-                                const min = bb.min;
-                                const max = bb.max;
-                                const corners = [
-                                    new THREE.Vector3(min.x, min.y, min.z),
-                                    new THREE.Vector3(min.x, min.y, max.z),
-                                    new THREE.Vector3(min.x, max.y, min.z),
-                                    new THREE.Vector3(min.x, max.y, max.z),
-                                    new THREE.Vector3(max.x, min.y, min.z),
-                                    new THREE.Vector3(max.x, min.y, max.z),
-                                    new THREE.Vector3(max.x, max.y, min.z),
-                                    new THREE.Vector3(max.x, max.y, max.z),
-                                ];
-                                for (let c of corners) {
-                                    tmpVec.copy(c).applyMatrix4(obj.matrixWorld);
-                                    worldPoints.push(tmpVec.clone());
-                                }
-                            } else {
-                                worldPoints.push(tmpPos.clone());
+                            for (let c of corners) {
+                                tmpVec.copy(c).applyMatrix4(obj.matrixWorld);
+                                worldPoints.push(tmpVec.clone());
                             }
-
                             const pts2d = [];
                             for (let wp of worldPoints) {
                                 proj.copy(wp).project(camera);
                                 const px = (proj.x * 0.5 + 0.5) * canvas.width;
                                 const py = (-proj.y * 0.5 + 0.5) * canvas.height;
-                                pts2d.push({ x: px, y: py, z: proj.z }); // Include Z for culling
+                                pts2d.push({ x: px, y: py, z: proj.z });
                             }
-                            
-                            drawables.push({ type: 'bbox_wireframe', obj, pts: pts2d, dist, color });
-                        }
-                    });
-
-                    drawables.sort((a, b) => b.dist - a.dist);
-
-                    for (let i = 0; i < drawables.length; i++) {
-                        const d = drawables[i];
-                        const { obj, dist, color } = d;
-
-                        if (d.type === 'bbox_wireframe' && d.pts) {
-                            drawBoundingBoxWireframe(d.pts, color, dist);
+                            drawBoundingBoxWireframe(pts2d, color, dist);
+                        } else {
+                            // final fallback: draw a single point at object world position
+                            proj.copy(tmpPos).project(camera);
+                            if (proj.z < 1) {
+                                const px = (proj.x * 0.5 + 0.5) * canvas.width;
+                                const py = (-proj.y * 0.5 + 0.5) * canvas.height;
+                                ctx.save();
+                                ctx.fillStyle = color;
+                                ctx.globalAlpha = 0.9;
+                                ctx.beginPath();
+                                ctx.arc(px, py, Math.max(1, 3 - dist * 0.001), 0, Math.PI * 2);
+                                ctx.fill();
+                                ctx.restore();
+                            }
                         }
                     }
                 }
-            };
-            return api;
+            }
         }
+    };
+    return api;
+}
 
 
 /* ---------- Updated scene initializers (CPU renderer) ---------- */
