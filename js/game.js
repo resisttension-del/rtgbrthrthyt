@@ -856,15 +856,17 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
         canvas.style.height = `${h}px`;
       }
     },
-    // Minimal clear color support
     setClearColor(hex, alpha = 1) {
       api._clearColor = { hex, alpha };
     },
     _clearColor: { hex: 0x000000, alpha: 1 },
 
-    // Basic render: draw sprites (material.map.image) and approximated shapes for meshes
     render(scene, camera) {
-      // Clear with the clear color (converted to CSS)
+      // Ensure world matrices are up-to-date (fixes many vanishing/invisible issues)
+      if (scene && typeof scene.updateMatrixWorld === 'function') scene.updateMatrixWorld(true);
+      if (camera && typeof camera.updateMatrixWorld === 'function') camera.updateMatrixWorld(true);
+
+      // Clear
       const c = api._clearColor;
       const r = (c.hex >> 16) & 0xff;
       const g = (c.hex >> 8) & 0xff;
@@ -875,41 +877,42 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
       ctx.fillRect(0, 0, canvas.width, canvas.height);
       ctx.restore();
 
-      // collect drawables (so we can sort by depth)
       const drawables = [];
+
+      // Traverse scene and build drawables. NOTE: no early cull by object center.
       scene.traverse((obj) => {
         if (!obj.visible) return;
         if (obj.isCamera || obj.isLight) return;
 
-        // World position (center)
+        // compute a reliable world center
         obj.getWorldPosition(tmpPos);
-        proj.copy(tmpPos).project(camera); // NDC -1..1
 
-        // quick NDC cull (if center far off-screen, skip). We allow some slack for large objects.
-        if (proj.z > 1 || proj.z < -1 || proj.x < -2 || proj.x > 2 || proj.y < -2 || proj.y > 2) {
-          // still allow meshes that have explicit userData.alwaysRender = true
-          if (!obj.userData?.alwaysRender) return;
-        }
+        // screen center projection (used as fallback coords)
+        proj.copy(tmpPos).project(camera);
+        const centerSx = (proj.x * 0.5 + 0.5) * canvas.width;
+        const centerSy = (-proj.y * 0.5 + 0.5) * canvas.height;
+        const centerProjZ = proj.z;
 
-        // screen coords
-        const sx = (proj.x * 0.5 + 0.5) * canvas.width;
-        const sy = (-proj.y * 0.5 + 0.5) * canvas.height;
-
-        // distance for depth sorting
         const dist = camera.position.distanceTo(tmpPos);
-
-        // check for texture
         const mapImage = obj.material && obj.material.map && obj.material.map.image ? obj.material.map.image : null;
 
-        // categorize drawable
+        // If it's a sprite/image, keep it
         if (mapImage) {
-          drawables.push({ type: 'image', obj, sx, sy, dist, projZ: proj.z, mapImage });
-        } else if (obj.isMesh && obj.geometry) {
+          drawables.push({ type: 'image', obj, sx: centerSx, sy: centerSy, dist, mapImage });
+          return;
+        }
+
+        // If it's a Mesh with geometry: try to project geometry samples / bounding box
+        if (obj.isMesh && obj.geometry) {
           const geom = obj.geometry;
-          if (!geom.boundingBox) geom.computeBoundingBox && geom.computeBoundingBox();
-          if (!geom.boundingSphere) geom.computeBoundingSphere && geom.computeBoundingSphere();
+
+          // ensure bounding data - compute only if missing
+          if (!geom.boundingBox && geom.computeBoundingBox) geom.computeBoundingBox();
+          if (!geom.boundingSphere && geom.computeBoundingSphere) geom.computeBoundingSphere();
 
           const worldPoints = [];
+
+          // Prefer boundingBox corners (local space) transformed to world
           if (geom.boundingBox) {
             const bb = geom.boundingBox;
             const min = bb.min;
@@ -929,6 +932,7 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
               worldPoints.push(tmpVec.clone());
             }
           } else if (geom.boundingSphere) {
+            // fallback: sphere sample points
             const bs = geom.boundingSphere;
             const center = bs.center.clone().applyMatrix4(obj.matrixWorld);
             const r = bs.radius * (obj.matrixWorld.getMaxScaleOnAxis ? obj.matrixWorld.getMaxScaleOnAxis() : 1);
@@ -940,61 +944,84 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
             worldPoints.push(center.clone().add(new THREE.Vector3(0, 0, r)));
             worldPoints.push(center.clone().add(new THREE.Vector3(0, 0, -r)));
           } else {
+            // cheap vertex sampling (if positions exist)
             const posAttr = geom.attributes && geom.attributes.position;
             if (posAttr && posAttr.count > 0) {
-              for (let i = 0; i < Math.min(12, posAttr.count); i += Math.max(1, Math.floor(posAttr.count / 12))) {
-                tmpVec.set(
-                  posAttr.getX(i),
-                  posAttr.getY(i),
-                  posAttr.getZ(i)
-                ).applyMatrix4(obj.matrixWorld);
+              const sampleCount = Math.min(16, posAttr.count);
+              const step = Math.max(1, Math.floor(posAttr.count / sampleCount));
+              for (let i = 0; i < posAttr.count; i += step) {
+                tmpVec.set(posAttr.getX(i), posAttr.getY(i), posAttr.getZ(i)).applyMatrix4(obj.matrixWorld);
                 worldPoints.push(tmpVec.clone());
+                if (worldPoints.length >= sampleCount) break;
               }
             } else {
+              // last resort: use world position
               worldPoints.push(tmpPos.clone());
             }
           }
 
-          // project worldPoints to screen-space 2D points
+          // Project those points and keep ones within a tolerance of the NDC range.
+          // Use a looser tolerance so large objects near the edge aren't culled.
           const pts2d = [];
           for (let wp of worldPoints) {
             proj.copy(wp).project(camera);
-            if (proj.z > 1 || proj.z < -1) continue;
+            // Accept any point within this looser z tolerance (helps partial near-plane visibility)
+            if (proj.z > 2 || proj.z < -2) continue;
             const px = (proj.x * 0.5 + 0.5) * canvas.width;
             const py = (-proj.y * 0.5 + 0.5) * canvas.height;
-            pts2d.push({ x: px, y: py });
+            pts2d.push({ x: px, y: py, ndcZ: proj.z });
           }
 
-          // if no good projected points, skip drawing (no more spheres)
-          if (pts2d.length === 0) {
-            // If you want a fallback marker instead of skipping, set userData.forceMarker = true
-            if (obj.userData?.forceMarker) {
-              drawables.push({ type: 'rect', obj, sx, sy, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
-            }
-            return;
-          } else {
+          if (pts2d.length > 0) {
+            // compute hull & render polygon silhouette
             const hull = convexHull(pts2d);
             if (hull.length >= 3) {
-              drawables.push({ type: 'poly', obj, pts: hull, dist, projZ: proj.z });
+              drawables.push({ type: 'poly', obj, pts: hull, dist, projZ: centerProjZ });
             } else if (hull.length === 2) {
               drawables.push({ type: 'line', obj, pts: hull, dist });
             } else {
-              // single point fallback: only draw if explicitly requested
+              // single projected point (rare)
               if (obj.userData?.forceMarker) {
                 drawables.push({ type: 'rect', obj, sx: pts2d[0].x, sy: pts2d[0].y, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
               }
             }
             return;
           }
-        } else {
-          // unknown / fallback: only draw marker if explicitly requested
-          if (obj.userData?.forceMarker) {
-            drawables.push({ type: 'rect', obj, sx, sy, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
-          }
-        }
-      });
 
-      // Painter's order: furthest first (larger distance)
+          // If we got no projected points, try a conservative bounding-sphere fallback so big objects don't vanish.
+          // Only apply fallback when the object's boundingSphere exists or user explicitly allows it.
+          if (geom.boundingSphere) {
+            const bs = geom.boundingSphere;
+            const centerWorld = bs.center.clone().applyMatrix4(obj.matrixWorld);
+            const worldR = bs.radius * (obj.matrixWorld.getMaxScaleOnAxis ? obj.matrixWorld.getMaxScaleOnAxis() : 1);
+            const pCenter = centerWorld.clone().project(camera);
+            // only draw fallback if center isn't *extremely* far behind/far in front
+            if (pCenter.z <= 2 && pCenter.z >= -2) {
+              const cx = (pCenter.x * 0.5 + 0.5) * canvas.width;
+              const cy = (-pCenter.y * 0.5 + 0.5) * canvas.height;
+              // Derive radius in px by projecting a radial offset
+              const edge = centerWorld.clone().add(new THREE.Vector3(worldR, 0, 0)).project(camera);
+              const ex = (edge.x * 0.5 + 0.5) * canvas.width;
+              const ey = (-edge.y * 0.5 + 0.5) * canvas.height;
+              const radiusPx = Math.hypot(ex - cx, ey - cy);
+              // Instead of drawing a sphere/circle (you asked to remove spheres), draw a small rectangle sized to radiusPx (clamped)
+              const fallbackSize = Math.max(6, Math.min(120, radiusPx));
+              drawables.push({ type: 'rect', obj, sx: cx, sy: cy, dist, sizePx: fallbackSize });
+              return;
+            }
+          }
+
+          // else: nothing visible and no fallback allowed => skip rendering this object
+          return;
+        } // end isMesh
+
+        // If we reach here (non-mesh, non-image) draw only when explicitly flagged
+        if (obj.userData?.forceMarker) {
+          drawables.push({ type: 'rect', obj, sx: centerSx, sy: centerSy, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
+        }
+      }); // end traverse
+
+      // Painter's order: furthest first
       drawables.sort((a, b) => b.dist - a.dist);
 
       // draw
@@ -1002,7 +1029,7 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
         const d = drawables[i];
         const { obj, dist } = d;
 
-        // common color selection
+        // color selection
         let color = obj.userData?.color;
         if (!color && obj.material && obj.material.color) {
           try {
@@ -1064,8 +1091,7 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
           ctx.globalAlpha = 1 - Math.min(0.9, dist * 0.002);
           ctx.stroke();
         } else if (d.type === 'rect') {
-          // small centered rectangle marker (replaces prior circle/sphere)
-          const size = d.sizePx ?? Math.max(2, Math.round(12 * (1 / Math.max(0.1, dist * 0.05))));
+          const size = d.sizePx ?? Math.max(4, Math.round(12 * (1 / Math.max(0.1, dist * 0.05))));
           const x = (d.sx || d.sx === 0) ? d.sx : 0;
           const y = (d.sy || d.sy === 0) ? d.sy : 0;
           ctx.save();
@@ -1074,7 +1100,7 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
           ctx.fillRect(x - size / 2, y - size / 2, size, size);
           ctx.restore();
         } else {
-          // nothing - we've removed automatic sphere/arc drawing
+          // intentionally draw nothing for other types
         }
       }
     }
@@ -3184,6 +3210,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
