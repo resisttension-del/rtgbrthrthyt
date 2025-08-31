@@ -811,198 +811,23 @@ function setupDetailToggle() {
 }
 
 
-
-function resetSceneState() {
-  try {
-    // stop any known looping audio
-    if (window.windSound && !window.windSound.paused) try { window.windSound.pause(); } catch(e){/*ignore*/ }
-    if (window.forestNoise && !window.forestNoise.paused) try { window.forestNoise.pause(); } catch(e){/*ignore*/ }
-    if (window.dessertWindSound && !window.dessertWindSound.paused) try { window.dessertWindSound.pause(); } catch(e){/*ignore*/ }
-    if (window.deathTheme && !window.deathTheme.paused) try { window.deathTheme.pause(); } catch(e){/*ignore*/}
-
-    // remove resize handler if stored
-    if (window._canvasRenderer_onWindowResize && typeof window._canvasRenderer_onWindowResize === 'function') {
-      window.removeEventListener('resize', window._canvasRenderer_onWindowResize, false);
-      delete window._canvasRenderer_onWindowResize;
-    }
-
-    // remove renderer DOM elements created by createCanvasRenderer or THREE.WebGLRenderer
-    const container = document.getElementById('game-container');
-    if (container) {
-      // remove any canvas created by our cpu renderer
-      const cpuCanvases = Array.from(container.querySelectorAll('canvas')).filter(c => c.dataset && c.dataset.cpuRenderer === '1');
-      cpuCanvases.forEach(c => {
-        try { c.remove(); } catch (e) { /*ignore*/ }
-      });
-
-      // also remove any WebGLRenderer canvas if it was inserted and flagged
-      const webglCanvases = Array.from(container.querySelectorAll('canvas')).filter(c => c.dataset && c.dataset.webglRenderer === '1');
-      webglCanvases.forEach(c => {
-        try { c.remove(); } catch (e) { /*ignore*/ }
-      });
-    }
-
-    // dispose previous renderer object if stored
-    if (window.renderer && typeof window.renderer.dispose === 'function') {
-      try { window.renderer.dispose(); } catch(e){ /*ignore*/ }
-    }
-    delete window.renderer;
-
-    // dispose composer if exists
-    if (window.composer && typeof window.composer.dispose === 'function') {
-      try { window.composer.dispose(); } catch(e){ /*ignore*/ }
-    }
-    delete window.composer;
-    delete window.renderPass;
-
-    // attempt to dispose scene resources (geometries/materials/textures)
-    try {
-      if (window.scene) {
-        window.scene.traverse(o => {
-          try {
-            if (o.geometry) {
-              if (typeof o.geometry.dispose === 'function') o.geometry.dispose();
-            }
-            if (o.material) {
-              // material may be an array
-              if (Array.isArray(o.material)) {
-                o.material.forEach(m => { if (m && typeof m.dispose === 'function') m.dispose(); if (m && m.map && typeof m.map.dispose === 'function') m.map.dispose(); });
-              } else {
-                if (o.material.map && typeof o.material.map.dispose === 'function') try { o.material.map.dispose(); } catch(e){}
-                if (typeof o.material.dispose === 'function') try { o.material.dispose(); } catch(e){}
-              }
-            }
-          } catch(e) { /*ignore per-object dispose errors*/ }
-        });
-        // remove from memory
-        try {
-          if (window.scene.parent) window.scene.parent.remove(window.scene);
-        } catch(e){}
-      }
-    } catch (e) { /*ignore*/ }
-
-    // remove any sky/aux variables we used
-    if (window.skyMesh && window.skyMesh.parent) {
-      try { window.skyMesh.parent.remove(window.skyMesh); } catch(e){/*ignore*/}
-    }
-    delete window.skyMesh;
-    delete window.starField;
-    delete window.worldFog;
-
-    // detach global camera from previous parent so adding to new scene won't duplicate visual parents
-    if (window.camera && window.camera.parent) {
-      try { window.camera.parent.remove(window.camera); } catch(e){/*ignore*/ }
-    }
-
-    // clear other scene globals we used
-    delete window.scene;
-    delete window.hemi;
-    delete window.envMeshes;
-    delete window.collidables;
-    delete window.mapReady;
-    delete window.spawnPoints;
-
-    // reset sceneNum marker
-    // (optional) don't delete other globals like localPlayer, physicsController etc.
-    if (typeof sceneNum !== 'undefined') sceneNum = null;
-
-  } catch (err) {
-    console.warn('resetSceneState() encountered errors but continuing:', err);
-  }
-}
-
-
-
-
 function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
   const canvas = document.createElement('canvas');
-  canvas.dataset.cpuRenderer = '1'; // <-- mark it
   canvas.style.position = 'relative';
   canvas.style.zIndex = '0';
   canvas.width = width;
   canvas.height = height;
   const ctx = canvas.getContext('2d');
 
-  // Scratch vars
+  // Scratch vars for projections & temp math
   const proj = new THREE.Vector3();
   const tmpPos = new THREE.Vector3();
   const tmpVec = new THREE.Vector3();
+  const tmpVec2 = new THREE.Vector3();
 
-  // config / debug toggles
-  const CONFIG = {
-    maxFillAreaRatio: 0.35, // don't fill polygons larger than this fraction of canvas area (safety)
-    ndcToleranceZ: 2,       // looser tolerance when projecting points
-    debug: !!window.canvasRendererDebug
-  };
-
-  // small helpers
-  function isFiniteNumber(v) { return typeof v === 'number' && isFinite(v); }
-
-  function clamp(val, a, b) { return Math.max(a, Math.min(b, val)); }
-
-  function sanitizePoint(p) {
-    if (!isFiniteNumber(p.x) || !isFiniteNumber(p.y)) return null;
-    // clamp to a little beyond the viewport to keep hull sane
-    const padX = canvas.width * 0.2;
-    const padY = canvas.height * 0.2;
-    return { x: clamp(p.x, -padX, canvas.width + padX), y: clamp(p.y, -padY, canvas.height + padY) };
-  }
-
-  // convert various color forms to CSS rgba string. Safe fallback to white.
-  function cssColorFrom(obj, alphaOverride = null) {
-    try {
-      const udColor = obj?.userData?.color;
-      if (udColor) {
-        if (typeof udColor === 'string') {
-          // if string includes alpha, leave it; otherwise we'll set via ctx.globalAlpha
-          return udColor;
-        } else if (typeof udColor === 'number') {
-          const hex = udColor >>> 0;
-          const r = (hex >> 16) & 0xff, g = (hex >> 8) & 0xff, b = hex & 0xff;
-          return `rgba(${r},${g},${b},${alphaOverride ?? 1})`;
-        } else if (udColor instanceof THREE.Color) {
-          const c = udColor;
-          const r = Math.round(c.r * 255), g = Math.round(c.g * 255), b = Math.round(c.b * 255);
-          return `rgba(${r},${g},${b},${alphaOverride ?? 1})`;
-        }
-      }
-
-      if (obj && obj.material && obj.material.color) {
-        const matColor = obj.material.color;
-        if (matColor instanceof THREE.Color) {
-          const r = Math.round(matColor.r * 255), g = Math.round(matColor.g * 255), b = Math.round(matColor.b * 255);
-          return `rgba(${r},${g},${b},${alphaOverride ?? (obj.material.opacity ?? 1)})`;
-        } else if (typeof matColor === 'number') {
-          const hex = matColor >>> 0;
-          const r = (hex >> 16) & 0xff, g = (hex >> 8) & 0xff, b = hex & 0xff;
-          return `rgba(${r},${g},${b},${alphaOverride ?? (obj.material.opacity ?? 1)})`;
-        } else if (typeof matColor === 'string') {
-          return matColor;
-        }
-      }
-
-      // final fallback
-      return `rgba(255,255,255,${alphaOverride ?? 1})`;
-    } catch (e) {
-      return 'rgba(255,255,255,1)';
-    }
-  }
-
-  // polygon area (shoelace)
-  function polygonArea(pts) {
-    if (!pts || pts.length < 3) return 0;
-    let area = 0;
-    for (let i = 0, n = pts.length; i < n; i++) {
-      const a = pts[i];
-      const b = pts[(i + 1) % n];
-      area += a.x * b.y - b.x * a.y;
-    }
-    return Math.abs(area) * 0.5;
-  }
-
-  // convex hull (Andrew monotone chain) for screen points
+  // helper: build convex hull (Andrew monotone chain) of 2D points
   function convexHull(points) {
-    if (!points || points.length <= 1) return points ? points.slice() : [];
+    if (points.length <= 1) return points.slice();
     const pts = points.slice().sort((a, b) => (a.x === b.x ? a.y - b.y : a.x - b.x));
     const cross = (o, a, b) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
     const lower = [];
@@ -1016,7 +841,8 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
       while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop();
       upper.push(p);
     }
-    lower.pop(); upper.pop();
+    lower.pop();
+    upper.pop();
     return lower.concat(upper);
   }
 
@@ -1030,60 +856,73 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
         canvas.style.height = `${h}px`;
       }
     },
+    // Minimal clear color support
     setClearColor(hex, alpha = 1) {
       api._clearColor = { hex, alpha };
     },
     _clearColor: { hex: 0x000000, alpha: 1 },
 
+    // Basic render: draw sprites (material.map.image) and approximated shapes for meshes
     render(scene, camera) {
-      // update matrices to remove stale transform issues
-      if (scene && typeof scene.updateMatrixWorld === 'function') scene.updateMatrixWorld(true);
-      if (camera && typeof camera.updateMatrixWorld === 'function') camera.updateMatrixWorld(true);
-
-      // clear canvas
+      // Clear with the clear color (converted to CSS)
       const c = api._clearColor;
-      const r = (c.hex >> 16) & 0xff, g = (c.hex >> 8) & 0xff, b = c.hex & 0xff;
+      const r = (c.hex >> 16) & 0xff;
+      const g = (c.hex >> 8) & 0xff;
+      const b = c.hex & 0xff;
       ctx.save();
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.fillStyle = `rgba(${r},${g},${b},${c.alpha})`;
       ctx.fillRect(0, 0, canvas.width, canvas.height);
       ctx.restore();
 
+      // collect drawables (so we can sort by depth)
       const drawables = [];
-      // gather drawables WITHOUT early center-culling
       scene.traverse((obj) => {
         if (!obj.visible) return;
         if (obj.isCamera || obj.isLight) return;
 
-        // world center
+        // World position (center)
         obj.getWorldPosition(tmpPos);
-        proj.copy(tmpPos).project(camera);
-        const centerSx = (proj.x * 0.5 + 0.5) * canvas.width;
-        const centerSy = (-proj.y * 0.5 + 0.5) * canvas.height;
-        const centerProjZ = proj.z;
-        const dist = camera.position.distanceTo(tmpPos);
-        const mapImage = obj.material && obj.material.map && obj.material.map.image ? obj.material.map.image : null;
+        proj.copy(tmpPos).project(camera); // NDC -1..1
 
-        // image sprites pass through
-        if (mapImage) {
-          drawables.push({ type: 'image', obj, sx: centerSx, sy: centerSy, dist, mapImage });
-          return;
+        // quick NDC cull (if center far off-screen, skip). We allow some slack for large objects.
+        if (proj.z > 1 || proj.z < -1 || proj.x < -2 || proj.x > 2 || proj.y < -2 || proj.y > 2) {
+          // still allow meshes that have explicit userData.alwaysRender = true
+          if (!obj.userData?.alwaysRender) return;
         }
 
-        // meshes: sample bounding box / sphere / vertices
-        if (obj.isMesh && obj.geometry) {
+        // screen coords
+        const sx = (proj.x * 0.5 + 0.5) * canvas.width;
+        const sy = (-proj.y * 0.5 + 0.5) * canvas.height;
+
+        // distance for depth sorting
+        const dist = camera.position.distanceTo(tmpPos);
+
+        // check for texture
+        const mapImage = obj.material && obj.material.map && obj.material.map.image ? obj.material.map.image : null;
+
+        // categorize drawable
+        if (mapImage) {
+          drawables.push({ type: 'image', obj, sx, sy, dist, projZ: proj.z, mapImage });
+        } else if (obj.isMesh && obj.geometry) {
           const geom = obj.geometry;
-          if (!geom.boundingBox && geom.computeBoundingBox) geom.computeBoundingBox();
-          if (!geom.boundingSphere && geom.computeBoundingSphere) geom.computeBoundingSphere();
+          if (!geom.boundingBox) geom.computeBoundingBox && geom.computeBoundingBox();
+          if (!geom.boundingSphere) geom.computeBoundingSphere && geom.computeBoundingSphere();
 
           const worldPoints = [];
-
           if (geom.boundingBox) {
             const bb = geom.boundingBox;
-            const min = bb.min, max = bb.max;
+            const min = bb.min;
+            const max = bb.max;
             const corners = [
-              [min.x, min.y, min.z],[min.x, min.y, max.z],[min.x, max.y, min.z],[min.x, max.y, max.z],
-              [max.x, min.y, min.z],[max.x, min.y, max.z],[max.x, max.y, min.z],[max.x, max.y, max.z]
+              [min.x, min.y, min.z],
+              [min.x, min.y, max.z],
+              [min.x, max.y, min.z],
+              [min.x, max.y, max.z],
+              [max.x, min.y, min.z],
+              [max.x, min.y, max.z],
+              [max.x, max.y, min.z],
+              [max.x, max.y, max.z],
             ];
             for (let c of corners) {
               tmpVec.set(c[0], c[1], c[2]).applyMatrix4(obj.matrixWorld);
@@ -1103,246 +942,281 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
           } else {
             const posAttr = geom.attributes && geom.attributes.position;
             if (posAttr && posAttr.count > 0) {
-              const sampleCount = Math.min(12, posAttr.count);
-              const step = Math.max(1, Math.floor(posAttr.count / sampleCount));
-              for (let i = 0; i < posAttr.count; i += step) {
-                tmpVec.set(posAttr.getX(i), posAttr.getY(i), posAttr.getZ(i)).applyMatrix4(obj.matrixWorld);
+              for (let i = 0; i < Math.min(12, posAttr.count); i += Math.max(1, Math.floor(posAttr.count / 12))) {
+                tmpVec.set(
+                  posAttr.getX(i),
+                  posAttr.getY(i),
+                  posAttr.getZ(i)
+                ).applyMatrix4(obj.matrixWorld);
                 worldPoints.push(tmpVec.clone());
-                if (worldPoints.length >= sampleCount) break;
               }
             } else {
               worldPoints.push(tmpPos.clone());
             }
           }
 
-          // project points and sanitize
+          // project worldPoints to screen-space 2D points
           const pts2d = [];
           for (let wp of worldPoints) {
             proj.copy(wp).project(camera);
-            // looser z tolerance
-            if (proj.z > CONFIG.ndcToleranceZ || proj.z < -CONFIG.ndcToleranceZ) continue;
+            if (proj.z > 1 || proj.z < -1) continue;
             const px = (proj.x * 0.5 + 0.5) * canvas.width;
             const py = (-proj.y * 0.5 + 0.5) * canvas.height;
-            const p = sanitizePoint({ x: px, y: py });
-            if (p) pts2d.push(p);
+            pts2d.push({ x: px, y: py });
           }
 
-          if (pts2d.length > 0) {
+          // if no good projected points, skip drawing (no more spheres)
+          if (pts2d.length === 0) {
+            // If you want a fallback marker instead of skipping, set userData.forceMarker = true
+            if (obj.userData?.forceMarker) {
+              drawables.push({ type: 'rect', obj, sx, sy, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
+            }
+            return;
+          } else {
             const hull = convexHull(pts2d);
-            // ensure all hull points are finite
-            if (hull && hull.length >= 3) {
-              let invalid = false;
-              for (let hp of hull) { if (!isFiniteNumber(hp.x) || !isFiniteNumber(hp.y)) invalid = true; }
-              if (!invalid) {
-                // area check
-                const area = polygonArea(hull);
-                const canvasArea = canvas.width * canvas.height;
-                if (!isFiniteNumber(area) || area <= 0) {
-                  if (CONFIG.debug) console.warn('skip zero-area hull', obj);
-                } else if (area > canvasArea * CONFIG.maxFillAreaRatio) {
-                  // suspiciously large polygon -> skip unless forced
-                  if (obj.userData?.forceHugeDraw) {
-                    drawables.push({ type: 'poly', obj, pts: hull, dist, debugArea: area });
-                  } else {
-                    if (CONFIG.debug) console.warn('skipping huge polygon (safety)', { obj, area, canvasArea });
-                    // instead of drawing, optionally mark bounding rect if user asked
-                    if (obj.userData?.forceMarker) drawables.push({ type: 'rect', obj, sx: centerSx, sy: centerSy, dist, sizePx: 10 });
-                  }
-                } else {
-                  drawables.push({ type: 'poly', obj, pts: hull, dist });
-                }
-              } else {
-                if (obj.userData?.forceMarker) drawables.push({ type: 'rect', obj, sx: centerSx, sy: centerSy, dist, sizePx: 8 });
-              }
+            if (hull.length >= 3) {
+              drawables.push({ type: 'poly', obj, pts: hull, dist, projZ: proj.z });
             } else if (hull.length === 2) {
               drawables.push({ type: 'line', obj, pts: hull, dist });
-            } else if (hull.length === 1 && obj.userData?.forceMarker) {
-              drawables.push({ type: 'rect', obj, sx: hull[0].x, sy: hull[0].y, dist, sizePx: 8 });
             } else {
-              // nothing projected meaningful
-              if (obj.userData?.forceMarker) drawables.push({ type: 'rect', obj, sx: centerSx, sy: centerSy, dist, sizePx: 8 });
+              // single point fallback: only draw if explicitly requested
+              if (obj.userData?.forceMarker) {
+                drawables.push({ type: 'rect', obj, sx: pts2d[0].x, sy: pts2d[0].y, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
+              }
             }
             return;
           }
-
-          // no projected points -> conservatively draw marker when boundingSphere exists & center is reasonable
-          if (geom.boundingSphere) {
-            const bs = geom.boundingSphere;
-            const centerWorld = bs.center.clone().applyMatrix4(obj.matrixWorld);
-            const pCenter = centerWorld.clone().project(camera);
-            if (pCenter.z <= CONFIG.ndcToleranceZ && pCenter.z >= -CONFIG.ndcToleranceZ) {
-              const cx = (pCenter.x * 0.5 + 0.5) * canvas.width;
-              const cy = (-pCenter.y * 0.5 + 0.5) * canvas.height;
-              // draw small marker only if forced by user or debug
-              if (obj.userData?.forceMarker || CONFIG.debug) {
-                drawables.push({ type: 'rect', obj, sx: cx, sy: cy, dist, sizePx: 10 });
-              }
-            }
+        } else {
+          // unknown / fallback: only draw marker if explicitly requested
+          if (obj.userData?.forceMarker) {
+            drawables.push({ type: 'rect', obj, sx, sy, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
           }
-
-          return; // mesh processed
         }
+      });
 
-        // non-mesh: only draw if user forces it (prevents noise)
-        if (obj.userData?.forceMarker) {
-          drawables.push({ type: 'rect', obj, sx: centerSx, sy: centerSy, dist, sizePx: obj.userData?.markerSizePx ?? 8 });
-        }
-      }); // end traverse
-
-      // sort back-to-front
+      // Painter's order: furthest first (larger distance)
       drawables.sort((a, b) => b.dist - a.dist);
 
-      // actually draw
-      for (let d of drawables) {
-        const obj = d.obj;
-        // reset context compositing/alpha to safe defaults
-        ctx.globalCompositeOperation = 'source-over';
-        ctx.globalAlpha = 1;
+      // draw
+      for (let i = 0; i < drawables.length; i++) {
+        const d = drawables[i];
+        const { obj, dist } = d;
 
-        const colorCss = cssColorFrom(obj, 1);
+        // common color selection
+        let color = obj.userData?.color;
+        if (!color && obj.material && obj.material.color) {
+          try {
+            color = obj.material.color.getStyle ? obj.material.color.getStyle() : (`#${obj.material.color.getHexString()}`);
+          } catch (e) {
+            color = obj.userData?.color || 'white';
+          }
+        }
+        color = color || obj.userData?.color || 'white';
 
         if (d.type === 'image' && d.mapImage && d.mapImage.width) {
-          // image sprite - keep previous heuristics but clamp size and guard against NaN
-          let size = obj.userData?.sizePx ?? 64;
+          let size;
           if (obj.geometry && obj.geometry.boundingBox) {
             const bb = obj.geometry.boundingBox;
-            const corners = [[bb.min.x, bb.min.y, bb.min.z],[bb.max.x, bb.max.y, bb.max.z]];
+            const corners = [
+              [bb.min.x, bb.min.y, bb.min.z],
+              [bb.max.x, bb.max.y, bb.max.z]
+            ];
             const screenPts = [];
-            for (let c of corners) { tmpVec.set(c[0], c[1], c[2]).applyMatrix4(obj.matrixWorld); const p = tmpVec.project(camera); screenPts.push({ x: (p.x * 0.5 + 0.5) * canvas.width, y: (-p.y * 0.5 + 0.5) * canvas.height }); }
+            for (let c of corners) {
+              tmpVec.set(c[0], c[1], c[2]).applyMatrix4(obj.matrixWorld);
+              const p = tmpVec.project(camera);
+              screenPts.push({ x: (p.x * 0.5 + 0.5) * canvas.width, y: (-p.y * 0.5 + 0.5) * canvas.height });
+            }
             const wPx = Math.abs(screenPts[0].x - screenPts[1].x);
             const hPx = Math.abs(screenPts[0].y - screenPts[1].y);
-            size = Math.max(8, Math.min(1024, obj.userData?.sizePx ?? Math.max(wPx, hPx, 32)));
+            size = Math.max(8, obj.userData?.sizePx ?? Math.max(wPx, hPx, 32));
+          } else {
+            const baseSize = obj.userData?.sizePx ?? 300;
+            size = Math.max(8, baseSize * (1 / Math.max(0.1, dist * 0.05)));
           }
-          // draw safely
           ctx.save();
           ctx.translate(d.sx, d.sy);
           const rot = obj.userData?.rotation ?? (obj.rotation?.z ?? 0);
           if (rot) ctx.rotate(rot);
           ctx.globalAlpha = obj.userData?.opacity ?? (obj.material?.opacity ?? 1);
-          try {
-            ctx.drawImage(d.mapImage, -size / 2, -size / 2, size, size);
-          } catch (e) {
-            if (CONFIG.debug) console.warn('drawImage failed', e, obj);
-          }
+          ctx.drawImage(d.mapImage, -size / 2, -size / 2, size, size);
           ctx.restore();
         } else if (d.type === 'poly' && d.pts) {
-          // guard again against bad pts
-          if (!d.pts || d.pts.length < 3) continue;
-          let anyInvalid = false;
-          for (let p of d.pts) if (!isFiniteNumber(p.x) || !isFiniteNumber(p.y)) anyInvalid = true;
-          if (anyInvalid) {
-            if (CONFIG.debug) console.warn('skip poly with invalid pts', obj);
-            continue;
-          }
-          const area = polygonArea(d.pts);
-          const canvasArea = canvas.width * canvas.height;
-          if (!isFiniteNumber(area) || area <= 0) continue;
-          if (area > canvasArea * CONFIG.maxFillAreaRatio && !obj.userData?.forceHugeDraw) {
-            if (CONFIG.debug) {
-              console.warn('skipping poly due to large area', { area, canvasArea, ratio: area / canvasArea, obj });
-              // optionally draw outline to see where it would have been
-              ctx.save();
-              ctx.beginPath();
-              ctx.moveTo(d.pts[0].x, d.pts[0].y);
-              for (let i = 1; i < d.pts.length; i++) ctx.lineTo(d.pts[i].x, d.pts[i].y);
-              ctx.closePath();
-              ctx.strokeStyle = 'rgba(255,0,0,0.9)';
-              ctx.lineWidth = 2;
-              ctx.stroke();
-              ctx.restore();
-            }
-            continue;
-          }
-          // draw the polygon
           ctx.save();
           ctx.beginPath();
           ctx.moveTo(d.pts[0].x, d.pts[0].y);
-          for (let i = 1; i < d.pts.length; i++) ctx.lineTo(d.pts[i].x, d.pts[i].y);
+          for (let j = 1; j < d.pts.length; j++) ctx.lineTo(d.pts[j].x, d.pts[j].y);
           ctx.closePath();
-          // alpha falls off with distance but stays visible
-          ctx.globalAlpha = Math.max(0.25, Math.min(1, 1 - (d.dist * 0.0015)));
-          ctx.fillStyle = colorCss;
+          ctx.globalAlpha = Math.max(0.2, Math.min(1, 1 - (dist * 0.002)));
+          ctx.fillStyle = color;
           ctx.fill();
-          ctx.globalAlpha = 0.75;
-          ctx.lineWidth = Math.max(1, 1.5 - (d.dist * 0.0005));
+          ctx.globalAlpha = 0.6;
+          ctx.lineWidth = Math.max(1, 2 - (dist * 0.001));
           ctx.strokeStyle = 'rgba(0,0,0,0.6)';
           ctx.stroke();
           ctx.restore();
-
-          if (CONFIG.debug && d.debugArea) {
-            console.info('drew forced huge poly', { area: d.debugArea, obj });
-          }
         } else if (d.type === 'line' && d.pts && d.pts.length === 2) {
-          ctx.save();
           ctx.beginPath();
           ctx.moveTo(d.pts[0].x, d.pts[0].y);
           ctx.lineTo(d.pts[1].x, d.pts[1].y);
-          ctx.globalAlpha = 1;
-          ctx.strokeStyle = cssColorFrom(obj, 1);
-          ctx.lineWidth = obj.userData?.lineWidth ?? 2;
+          ctx.strokeStyle = color;
+          ctx.lineWidth = obj.userData?.lineWidth ?? 3;
+          ctx.globalAlpha = 1 - Math.min(0.9, dist * 0.002);
           ctx.stroke();
-          ctx.restore();
         } else if (d.type === 'rect') {
+          // small centered rectangle marker (replaces prior circle/sphere)
+          const size = d.sizePx ?? Math.max(2, Math.round(12 * (1 / Math.max(0.1, dist * 0.05))));
+          const x = (d.sx || d.sx === 0) ? d.sx : 0;
+          const y = (d.sy || d.sy === 0) ? d.sy : 0;
           ctx.save();
-          const size = d.sizePx ?? 8;
-          ctx.globalAlpha = Math.max(0.45, Math.min(1, 1 - (d.dist * 0.0015)));
-          ctx.fillStyle = cssColorFrom(obj, 1);
-          const x = d.sx || 0, y = d.sy || 0;
+          ctx.globalAlpha = Math.max(0.5, Math.min(1, 1 - (dist * 0.002)));
+          ctx.fillStyle = color;
           ctx.fillRect(x - size / 2, y - size / 2, size, size);
           ctx.restore();
+        } else {
+          // nothing - we've removed automatic sphere/arc drawing
         }
-      } // end draw loop
-
-      // debugging overlay: quickly show count if debug enabled
-      if (CONFIG.debug) {
-        ctx.save();
-        ctx.fillStyle = 'rgba(0,0,0,0.6)';
-        ctx.fillRect(6, 6, 120, 24);
-        ctx.fillStyle = '#fff';
-        ctx.font = '12px monospace';
-        ctx.fillText(`drawables: ${drawables.length}`, 10, 22);
-        ctx.restore();
       }
-    } // render
-  }; // api
-
-  // expose debug toggles to runtime
-  Object.defineProperty(window, 'canvasRendererDebug', {
-    get() { return CONFIG.debug; },
-    set(v) { CONFIG.debug = !!v; window.canvasRendererDebug = CONFIG.debug; }
-  });
+    }
+  };
 
   return api;
 }
 
+
 /* ---------- Updated scene initializers (CPU renderer) ---------- */
 
 export async function initSceneCrocodilosConstruction() {
-  // cleanup any previous scene/canvas first
-  resetSceneState();
-
   sceneNum = 1;
   console.log("Initializing CrocodilosConstruction scene...");
 
   // 1. Scene
-  const newScene = new THREE.Scene();
-  window.scene = newScene;
-  scene = newScene; // preserve local var if used elsewhere
-
-  // sky / background
+  scene = new THREE.Scene();
   const skyGeo = new THREE.SphereGeometry(200, 32, 32).scale(-1, 1, 1);
-  const skyMat = new THREE.MeshBasicMaterial({ color: 0x000022, side: THREE.BackSide, fog: false });
+  const skyMat = new THREE.MeshBasicMaterial({
+    color: 0x000022,
+    side: THREE.BackSide,
+    fog: false
+  });
   const skyColor = new THREE.Color(0x111122);
-  newScene.background = skyColor;
-  window.skyMesh = new THREE.Mesh(skyGeo, skyMat);
-  newScene.add(window.skyMesh);
+  scene.background = skyColor;
+  skyMesh = new THREE.Mesh(skyGeo, skyMat);
+  scene.add(skyMesh);
+  window.scene = scene;
 
-  // ensure camera isn't already parented
-  if (window.camera && window.camera.parent) {
-    try { window.camera.parent.remove(window.camera); } catch (e) { /*ignore*/ }
-  }
   window.camera.rotation.order = "YXZ";
-  newScene.add(window.camera);
+  scene.add(window.camera);
+
+  // 3. Renderer (CPU canvas)
+  const cpuRenderer = createCanvasRenderer({ width: FIXED_WIDTH, height: FIXED_HEIGHT });
+  cpuRenderer.setClearColor(0x000000, 1);
+  renderer = cpuRenderer;
+  window.renderer = renderer;
+
+  const container = document.getElementById("game-container");
+  // remove any previous renderer DOM element if present
+  if (container) {
+    // clear existing children with canvas or WebGLRenderer
+    // (be careful not to remove other unrelated DOM nodes)
+    const prev = container.querySelector('canvas');
+    if (prev) container.removeChild(prev);
+    container.appendChild(renderer.domElement);
+  }
+
+  // 4. Hemisphere Light (kept for scene lighting math / potential use)
+  hemi = new THREE.HemisphereLight(0xffffff, 0x444444, 0.05);
+  scene.add(hemi);
+  window.hemi = hemi;
+
+  // 5. Post-processing composer: not available for CPU canvas — null out
+  composer = null;
+  renderPass = null;
+  window.composer = composer;
+  window.renderPass = renderPass;
+
+  // --- Initial Detail Setup for CrocodilosConstruction ---
+  toggleSceneDetails(detailsEnabled);
+
+  // --- Map and Physics Initialization ---
+  spawnPoints = await createCrocodilosConstruction(scene, physicsController);
+  window.spawnPoints = spawnPoints;
+
+  const initialSpawnPoint = findFurthestSpawn();
+  physicsController.setPlayerPosition(initialSpawnPoint);
+
+  // --- Audio Initialization ---
+  if (typeof windSound !== 'undefined') {
+    windSound.play().catch(err => console.warn("Failed to play wind sound:", err));
+    window.windSound = windSound;
+  } else {
+    console.warn("windSound is not defined. Audio might not play for CrocodilosConstruction.");
+  }
+
+  // --- Window Resize Handling ---
+  function onWindowResize() {
+    const displayWidth = container.clientWidth;
+    const displayHeight = container.clientHeight;
+
+    // 1) Render at fixed internal resolution
+    renderer.setSize(FIXED_WIDTH, FIXED_HEIGHT, false);
+
+    // 2) Stretch the canvas via CSS to fill the container
+    renderer.domElement.style.width = `${displayWidth}px`;
+    renderer.domElement.style.height = `${displayHeight}px`;
+
+    // 3) Update camera aspect ratio
+    window.camera.aspect = displayWidth / displayHeight;
+    window.camera.updateProjectionMatrix();
+
+    // 4) Re-attach weapon to local player (if needed)
+    if (window.weaponController && window.localPlayer && typeof getWeaponModel === 'function' && typeof attachWeaponToPlayer === 'function') {
+      const key = window.localPlayer.weapon.replace(/-/g, "").toLowerCase();
+      const proto = getWeaponModel(key);
+      if (proto) attachWeaponToPlayer(window.localPlayer.id, key);
+    }
+
+    // 5) Re-attach weapons for remote players
+    if (window.remotePlayers) {
+      Object.values(window.remotePlayers).forEach(({ currentWeapon, weaponRoot }) => {
+        if (currentWeapon && weaponRoot && typeof attachWeaponToPlayer === 'function') {
+          attachWeaponToPlayer(weaponRoot.userData.playerId, currentWeapon);
+        }
+      });
+    }
+
+    // 6) Resize HUD overlay
+    const hud = document.getElementById("hud");
+    if (hud) {
+      hud.style.width = `${displayWidth}px`;
+      hud.style.height = `${displayHeight}px`;
+    }
+  }
+
+  window.addEventListener("resize", onWindowResize, false);
+  onWindowResize();
+}
+
+export async function initSceneSigmaCity() {
+  sceneNum = 2;
+  console.log("Initializing SigmaCity scene...");
+
+  scene = new THREE.Scene();
+  const skyColor = new THREE.Color(0x87CEEB);
+  scene.background = skyColor;
+  window.scene = scene;
+
+  const skyGeo = new THREE.SphereGeometry(200, 32, 32).scale(-1, 1, 1);
+  const skyMat = new THREE.MeshBasicMaterial({
+    color: 0x000022,
+    side: THREE.BackSide,
+    fog: false
+  });
+  skyMesh = new THREE.Mesh(skyGeo, skyMat);
+  scene.add(skyMesh);
+  window.scene = scene;
+
+  window.camera.rotation.order = "YXZ";
+  scene.add(window.camera);
 
   // 3. Renderer (CPU canvas)
   const cpuRenderer = createCanvasRenderer({ width: FIXED_WIDTH, height: FIXED_HEIGHT });
@@ -1352,62 +1226,60 @@ export async function initSceneCrocodilosConstruction() {
 
   const container = document.getElementById("game-container");
   if (container) {
-    // remove any previous cpu canvas (extra safety)
-    const prev = container.querySelector('canvas[data-cpu-renderer="1"], canvas[data-cpuRenderer="1"], canvas[data-cpu-renderer]');
-    // older code used different attribute naming; remove any canvas we marked earlier:
-    const allCpu = Array.from(container.querySelectorAll('canvas')).filter(c => c.dataset && (c.dataset.cpuRenderer === '1' || c.dataset.cpuRenderer === 'true'));
-    allCpu.forEach(c => c.remove());
-
+    const prev = container.querySelector('canvas');
+    if (prev) container.removeChild(prev);
     container.appendChild(renderer.domElement);
   }
 
   // 4. Hemisphere Light
   hemi = new THREE.HemisphereLight(0xffffff, 0x444444, 0.05);
-  newScene.add(hemi);
+  scene.add(hemi);
   window.hemi = hemi;
 
-  // composer not used in CPU mode
+  // 5. Composer - not used in CPU mode
   composer = null;
   renderPass = null;
   window.composer = composer;
   window.renderPass = renderPass;
 
-  // initial detail setup
+  // --- Initial Detail Setup for SigmaCity ---
   toggleSceneDetails(detailsEnabled);
 
-  // spawn/map setup - keep using your functions
-  spawnPoints = await createCrocodilosConstruction(newScene, physicsController);
+  // --- Map and Physics Initialization ---
+  spawnPoints = await createSigmaCity(scene, physicsController);
   window.spawnPoints = spawnPoints;
 
   const initialSpawnPoint = findFurthestSpawn();
   physicsController.setPlayerPosition(initialSpawnPoint);
 
-  // audio
-  if (typeof windSound !== 'undefined') {
-    windSound.play().catch(err => console.warn("Failed to play wind sound:", err));
-    window.windSound = windSound;
+  // --- Audio Initialization ---
+  if (typeof forestNoise !== 'undefined') {
+    forestNoise.volume = 0.05;
+    forestNoise.play().catch(err => console.warn("Failed to play forest noise:", err));
+    window.windSound = forestNoise;
   } else {
-    console.warn("windSound is not defined. Audio might not play for CrocodilosConstruction.");
+    console.warn("forestNoise is not defined. Audio might not play for SigmaCity.");
   }
 
-  // Window Resize Handling (store the handler so we can remove it on reset)
+  // --- Window Resize Handling ---
   function onWindowResize() {
     const displayWidth = container.clientWidth;
     const displayHeight = container.clientHeight;
 
     renderer.setSize(FIXED_WIDTH, FIXED_HEIGHT, false);
+
     renderer.domElement.style.width = `${displayWidth}px`;
     renderer.domElement.style.height = `${displayHeight}px`;
 
     window.camera.aspect = displayWidth / displayHeight;
     window.camera.updateProjectionMatrix();
 
-    // re-attach weapons - same as before...
     if (window.weaponController && window.localPlayer && typeof getWeaponModel === 'function' && typeof attachWeaponToPlayer === 'function') {
       const key = window.localPlayer.weapon.replace(/-/g, "").toLowerCase();
       const proto = getWeaponModel(key);
       if (proto) attachWeaponToPlayer(window.localPlayer.id, key);
     }
+
     if (window.remotePlayers) {
       Object.values(window.remotePlayers).forEach(({ currentWeapon, weaponRoot }) => {
         if (currentWeapon && weaponRoot && typeof attachWeaponToPlayer === 'function') {
@@ -1423,8 +1295,6 @@ export async function initSceneCrocodilosConstruction() {
     }
   }
 
-  // store the handler so resetSceneState can remove it
-  window._canvasRenderer_onWindowResize = onWindowResize;
   window.addEventListener("resize", onWindowResize, false);
   onWindowResize();
 }
@@ -3314,10 +3184,6 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
-
-
-
-
 
 
 
