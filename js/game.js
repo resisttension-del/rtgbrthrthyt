@@ -838,7 +838,7 @@ scene.add( window.camera );
 
 
 // 3. Renderer
-window.renderer = new THREE.WebGLRenderer({ antialias: false }); // Antialias might reduce the "pixelated" effect of lower resolution
+window.renderer = new THREE.CanvasRenderer();
 renderer = window.renderer;
 renderer.domElement.style.position = "relative";
 renderer.domElement.style.zIndex = "0";
@@ -951,7 +951,7 @@ scene.add( window.camera );
 
 
 // 3. Renderer
-window.renderer = new THREE.WebGLRenderer({ antialias: false }); // Antialias might reduce the "pixelated" effect of lower resolution
+window.renderer = new THREE.CanvasRenderer();
 renderer = window.renderer;
 renderer.domElement.style.position = "relative";
 renderer.domElement.style.zIndex = "0";
@@ -1066,7 +1066,7 @@ scene.add( window.camera );
 
 
 // 3. Renderer
-window.renderer = new THREE.WebGLRenderer({ antialias: false }); // Antialias might reduce the "pixelated" effect of lower resolution
+window.renderer = new THREE.CanvasRenderer();
 renderer = window.renderer;
 renderer.domElement.style.position = "relative";
 renderer.domElement.style.zIndex = "0";
@@ -2195,7 +2195,7 @@ export function animate(timestamp) {
             }
             if (respawnOverlay) respawnOverlay.style.display = "flex";
 
-            composer.render();
+            if (window.scene && window.camera) window.renderer.render(window.scene, window.camera);
             postFrameCleanup();
             return; // Exit early if player is dead
         } else {
@@ -2376,7 +2376,7 @@ export function animate(timestamp) {
         }
 
         // Render the scene
-        renderer.render();
+        if (window.scene && window.camera) window.renderer.render(window.scene, window.camera);
     } catch (err) {
         console.error("Error in animate:", err);
     } finally {
@@ -2970,6 +2970,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
