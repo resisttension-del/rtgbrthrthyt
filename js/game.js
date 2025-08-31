@@ -2485,7 +2485,7 @@ export function animate(timestamp) {
 window.THREE = THREE;
 
 // -----------------------------
-// Updated SimpleCanvasRenderer (local CPU fallback)
+// SimpleCanvasRenderer (z-buffer rasterizer, flat shading)
 // -----------------------------
 class SimpleCanvasRenderer {
   constructor(opts = {}) {
@@ -2499,16 +2499,21 @@ class SimpleCanvasRenderer {
     this.autoClear = opts.autoClear !== undefined ? opts.autoClear : true;
     this.setSize(opts.width || window.innerWidth, opts.height || window.innerHeight);
 
-    // Reusable temporaries to reduce GC
+    // Reusable temporaries
     this._vA = new THREE.Vector3();
     this._vB = new THREE.Vector3();
     this._vC = new THREE.Vector3();
-    this._v4A = new THREE.Vector4();
-    this._v4B = new THREE.Vector4();
-    this._v4C = new THREE.Vector4();
+    this._clipA = new THREE.Vector4();
+    this._clipB = new THREE.Vector4();
+    this._clipC = new THREE.Vector4();
     this._viewMatrix = new THREE.Matrix4();
     this._viewProj = new THREE.Matrix4();
     this._worldMatrix = new THREE.Matrix4();
+
+    // lighting
+    this.lightDir = new THREE.Vector3(0.5, 0.8, 0.2).normalize(); // directional light
+    this.ambientFactor = 0.22;
+    this.diffuseFactor = 0.78;
   }
 
   setSize(w, h) {
@@ -2523,15 +2528,28 @@ class SimpleCanvasRenderer {
   }
 
   // Use scene.background (if available) otherwise fallback to this.clearColor
-  clear(scene) {
-    let clearStyle = this.clearColor;
-    if (scene && scene.background) {
-      const b = scene.background;
-      if (b.isColor) clearStyle = b.getStyle();
-      // ignore texture/cube backgrounds for now
+  _clearToBackground(scene, imageData) {
+    let r = 0, g = 0, b = 0;
+    if (scene && scene.background && scene.background.isColor) {
+      const c = scene.background;
+      r = Math.round(c.r * 255);
+      g = Math.round(c.g * 255);
+      b = Math.round(c.b * 255);
+    } else {
+      // parse clearColor if string #rrggbb or use default
+      const cc = new THREE.Color(this.clearColor);
+      r = Math.round(cc.r * 255);
+      g = Math.round(cc.g * 255);
+      b = Math.round(cc.b * 255);
     }
-    this.ctx.fillStyle = clearStyle;
-    this.ctx.fillRect(0, 0, this.width, this.height);
+    // fill imageData buffer with background color
+    const data = imageData.data;
+    for (let i = 0, n = data.length; i < n; i += 4) {
+      data[i] = r;
+      data[i + 1] = g;
+      data[i + 2] = b;
+      data[i + 3] = 255;
+    }
   }
 
   // Basic render supporting Mesh + BufferGeometry (positions) + simple material colors
@@ -2539,14 +2557,27 @@ class SimpleCanvasRenderer {
     try {
       if (!scene || !camera) return;
 
-      if (this.autoClear) this.clear(scene);
-
       // prepare matrices
       camera.updateMatrixWorld(true);
       this._viewMatrix.copy(camera.matrixWorld).invert();
       this._viewProj.multiplyMatrices(camera.projectionMatrix, this._viewMatrix);
 
-      const triangles = [];
+      // Prepare buffers
+      const w = this.width, h = this.height;
+      // create ImageData buffer
+      const imageData = this.ctx.createImageData(w, h);
+      // clear to background
+      if (this.autoClear) this._clearToBackground(scene, imageData);
+
+      // z-buffer (store smaller = nearer)
+      const zBuffer = new Float32Array(w * h);
+      for (let i = 0; i < zBuffer.length; i++) zBuffer[i] = Infinity;
+
+      // Get camera world position for facing tests
+      const camPos = new THREE.Vector3();
+      camera.getWorldPosition(camPos);
+
+      const triangles = []; // collect tri raster tasks (we still collect but will raster immediately below to keep code clearer)
 
       // traverse and collect triangles
       scene.traverse(obj => {
@@ -2567,7 +2598,7 @@ class SimpleCanvasRenderer {
           positions = posAttr.array;
           if (geometry.index) indices = geometry.index.array;
         } else if (geometry.isGeometry) {
-          // legacy geometry -> convert to positions/indices
+          // convert legacy
           positions = new Float32Array(geometry.vertices.length * 3);
           for (let i = 0; i < geometry.vertices.length; i++) {
             positions[i * 3] = geometry.vertices[i].x;
@@ -2603,28 +2634,50 @@ class SimpleCanvasRenderer {
             cIdx = t * 3 + 2;
           }
 
+          // get object-space vertex
           getVertex(aIdx, this._vA);
           getVertex(bIdx, this._vB);
           getVertex(cIdx, this._vC);
 
-          // world transform
-          this._vA.applyMatrix4(this._worldMatrix);
-          this._vB.applyMatrix4(this._worldMatrix);
-          this._vC.applyMatrix4(this._worldMatrix);
+          // transform to world
+          const wA = this._vA.clone().applyMatrix4(this._worldMatrix);
+          const wB = this._vB.clone().applyMatrix4(this._worldMatrix);
+          const wC = this._vC.clone().applyMatrix4(this._worldMatrix);
 
-          // project using viewProj (Vector4 for w)
-          const clipA = this._v4A.set(this._vA.x, this._vA.y, this._vA.z, 1).applyMatrix4(this._viewProj);
-          const clipB = this._v4B.set(this._vB.x, this._vB.y, this._vB.z, 1).applyMatrix4(this._viewProj);
-          const clipC = this._v4C.set(this._vC.x, this._vC.y, this._vC.z, 1).applyMatrix4(this._viewProj);
+          // face normal in world space
+          const e1 = new THREE.Vector3().subVectors(wB, wA);
+          const e2 = new THREE.Vector3().subVectors(wC, wA);
+          const faceNormal = new THREE.Vector3().crossVectors(e1, e2).normalize();
 
-          // discard degenerate / w ~ 0
+          // centroid for facing test
+          const centroid = new THREE.Vector3().addVectors(wA, wB).add(wC).multiplyScalar(1 / 3);
+
+          // camera-facing test (front-facing if dot(normal, camPos-centroid) > 0)
+          const viewVec = new THREE.Vector3().subVectors(camPos, centroid);
+          const frontFacing = faceNormal.dot(viewVec) > 0;
+
+          // material side handling
+          const mat = Array.isArray(mesh.material) ? mesh.material[0] : mesh.material;
+          const side = mat && mat.side !== undefined ? mat.side : THREE.FrontSide;
+
+          if (side === THREE.FrontSide && !frontFacing) continue;
+          if (side === THREE.BackSide && frontFacing) continue;
+          // DoubleSide -> render always
+
+          // project using viewProj (compute clip coords)
+          const clipA = this._clipA.set(wA.x, wA.y, wA.z, 1).applyMatrix4(this._viewProj);
+          const clipB = this._clipB.set(wB.x, wB.y, wB.z, 1).applyMatrix4(this._viewProj);
+          const clipC = this._clipC.set(wC.x, wC.y, wC.z, 1).applyMatrix4(this._viewProj);
+
+          // w near zero guard
           if (Math.abs(clipA.w) < 1e-9 || Math.abs(clipB.w) < 1e-9 || Math.abs(clipC.w) < 1e-9) continue;
 
+          // NDC
           const ndcA = { x: clipA.x / clipA.w, y: clipA.y / clipA.w, z: clipA.z / clipA.w };
           const ndcB = { x: clipB.x / clipB.w, y: clipB.y / clipB.w, z: clipB.z / clipB.w };
           const ndcC = { x: clipC.x / clipC.w, y: clipC.y / clipC.w, z: clipC.z / clipC.w };
 
-          // quick frustum reject (all verts outside same side)
+          // frustum quick reject (if all verts outside same plane)
           const outside =
             (ndcA.x < -1 && ndcB.x < -1 && ndcC.x < -1) ||
             (ndcA.x > 1 && ndcB.x > 1 && ndcC.x > 1) ||
@@ -2634,81 +2687,91 @@ class SimpleCanvasRenderer {
             (ndcA.z > 1 && ndcB.z > 1 && ndcC.z > 1);
           if (outside) continue;
 
-          // screen coords
+          // screen coords (float)
           const sA = { x: ndcA.x * this.halfWidth + this.halfWidth, y: -ndcA.y * this.halfHeight + this.halfHeight, z: ndcA.z };
           const sB = { x: ndcB.x * this.halfWidth + this.halfWidth, y: -ndcB.y * this.halfHeight + this.halfHeight, z: ndcB.z };
           const sC = { x: ndcC.x * this.halfWidth + this.halfWidth, y: -ndcC.y * this.halfHeight + this.halfHeight, z: ndcC.z };
 
-          const zAvg = (sA.z + sB.z + sC.z) / 3;
-
-          // material color fallback: try material.color -> material.emissive -> white
-          let color = '#888';
-          const mat = mesh.material;
-          if (Array.isArray(mat)) {
-            if (mat[0] && mat[0].color) color = mat[0].color.getStyle();
-            else if (mat[0] && mat[0].emissive) color = mat[0].emissive.getStyle();
-          } else if (mat) {
-            if (mat.color) color = mat.color.getStyle();
-            else if (mat.emissive) color = mat.emissive.getStyle();
-            else if (mat.map && mat.map.image) {
-              // Textures not sampled here — fallback to white
-              color = '#ffffff';
-            } else if (mat instanceof THREE.MeshBasicMaterial && !mat.color) {
-              color = '#cccccc';
-            }
+          // compute flat shading color (baseColor * (ambient + diffuse * lambert))
+          let baseColor = new THREE.Color(0x888888);
+          if (mat) {
+            if (mat.color) baseColor.copy(mat.color);
+            else if (mat.emissive) baseColor.copy(mat.emissive);
           }
+          const lambert = Math.max(0, faceNormal.dot(this.lightDir));
+          const shade = this.ambientFactor + this.diffuseFactor * lambert;
+          const r = Math.min(1, baseColor.r * shade);
+          const g = Math.min(1, baseColor.g * shade);
+          const b = Math.min(1, baseColor.b * shade);
 
+          // push triangle job
           triangles.push({
-            points: [sA, sB, sC],
-            color,
-            zAvg,
-            visible: mesh.visible
+            sA, sB, sC,
+            zA: sA.z, zB: sB.z, zC: sC.z,
+            color: [Math.round(r * 255), Math.round(g * 255), Math.round(b * 255)]
           });
-        }
+        } // for each tri
       }); // traverse
 
-      // painter's algorithm: far -> near
-      triangles.sort((A, B) => B.zAvg - A.zAvg);
+      // Rasterize triangles with z-buffer (per-triangle)
+      const data = imageData.data;
+      const edge = (ax, ay, bx, by, px, py) => (px - ax) * (by - ay) - (py - ay) * (bx - ax);
 
-      const ctx = this.ctx;
-      ctx.save();
-      let drawn = 0;
       for (const tri of triangles) {
-        const p0 = tri.points[0], p1 = tri.points[1], p2 = tri.points[2];
+        const p0 = tri.sA, p1 = tri.sB, p2 = tri.sC;
+        // compute bbox in pixel coords (integer)
+        let minX = Math.floor(Math.min(p0.x, p1.x, p2.x));
+        let maxX = Math.ceil(Math.max(p0.x, p1.x, p2.x));
+        let minY = Math.floor(Math.min(p0.y, p1.y, p2.y));
+        let maxY = Math.ceil(Math.max(p0.y, p1.y, p2.y));
 
-        // skip tiny/degenerate triangles
-        const area = Math.abs((p1.x - p0.x) * (p2.y - p0.y) - (p2.x - p0.x) * (p1.y - p0.y));
-        if (area < 0.5) continue;
+        // clamp
+        if (maxX < 0 || maxY < 0 || minX >= w || minY >= h) continue;
+        minX = Math.max(0, minX);
+        minY = Math.max(0, minY);
+        maxX = Math.min(w - 1, maxX);
+        maxY = Math.min(h - 1, maxY);
 
-        ctx.beginPath();
-        ctx.moveTo(p0.x, p0.y);
-        ctx.lineTo(p1.x, p1.y);
-        ctx.lineTo(p2.x, p2.y);
-        ctx.closePath();
+        // denom (area) using edge function
+        const denom = edge(p0.x, p0.y, p1.x, p1.y, p2.x, p2.y);
+        if (Math.abs(denom) < 1e-6) continue;
 
-        ctx.fillStyle = tri.color;
-        ctx.fill();
-        drawn++;
+        // For each pixel in bbox
+        for (let y = minY; y <= maxY; y++) {
+          for (let x = minX; x <= maxX; x++) {
+            // sample at pixel center
+            const px = x + 0.5, py = y + 0.5;
+            // barycentric weights
+            const w0 = edge(p1.x, p1.y, p2.x, p2.y, px, py) / denom;
+            const w1 = edge(p2.x, p2.y, p0.x, p0.y, px, py) / denom;
+            const w2 = edge(p0.x, p0.y, p1.x, p1.y, px, py) / denom;
+            // if any weight < 0 -> outside triangle (this handles any winding)
+            if (w0 < -1e-6 || w1 < -1e-6 || w2 < -1e-6) continue;
+
+            // interpolate depth (using ndc z)
+            const z = w0 * tri.zA + w1 * tri.zB + w2 * tri.zC;
+            const idx = y * w + x;
+            if (z < zBuffer[idx]) {
+              zBuffer[idx] = z;
+              const di = idx * 4;
+              data[di] = tri.color[0];
+              data[di + 1] = tri.color[1];
+              data[di + 2] = tri.color[2];
+              data[di + 3] = 255;
+            }
+          }
+        }
       }
-      ctx.restore();
 
-      // If nothing was drawn, paint a faint overlay + debug text so screen isn't pure black
-      if (drawn === 0) {
-        ctx.save();
-        ctx.fillStyle = 'rgba(255,255,255,0.03)';
-        ctx.fillRect(0, 0, this.width, this.height);
-        ctx.fillStyle = 'rgba(255,0,0,0.6)';
-        ctx.font = '14px sans-serif';
-        ctx.fillText('SimpleCanvasRenderer: no triangles drawn (debug)', 12, 22);
-        ctx.restore();
-      }
+      // blit to canvas
+      this.ctx.putImageData(imageData, 0, 0);
     } catch (e) {
       console.error('SimpleCanvasRenderer.render error:', e);
     }
   }
 }
 
-// Expose local renderer class so tryLoadLegacyCanvasRenderer can use it
+// expose
 window.SimpleCanvasRenderer = SimpleCanvasRenderer;
 
 // -----------------------------
@@ -3446,6 +3509,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
