@@ -846,13 +846,72 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
       detectQuads: true,           // enable quad detection
       maxQuadsPerObject: 5000,    // cap quads processed per object (tweak for perf)
       projectSkipBehind: true,    // skip quads fully behind near/far clip
-      fillQuads: true             // fill quads (set false to only stroke)
+      fillQuads: true,            // fill quads (set false to only stroke)
+
+      // new options:
+      maxVerticesPerGeometry: 100,        // extra safety cap when scanning vertex lists
+      isolatedConnect: true,                // enable connecting isolated vertices to nearest neighbor
+      isolatedConnectMaxPerGeom: 200,       // maximum isolated connections to create per geometry
+      isolatedConnectMaxDistance: Infinity, // maximum distance (in local space) to connect an isolated vertex
+      minProjectionDistance: 0.1            // minimum distance from camera for safe projection (meters)
     },
     setOptions(o = {}) { Object.assign(api.options, o); },
 
     // distance culling
     setMaxRenderDistance(d) { api._maxRenderDistance = Number.isFinite(d) ? d : Infinity; },
     _maxRenderDistance: Infinity,
+
+    // SAFE project helper:
+    // Projects a world Vector3 onto screen but avoids NaN/inf results by clamping points
+    // that are behind the camera or too close to a minimum distance in front of the camera.
+    // Returns {x,y,z} or null if projection cannot be produced.
+    _safeProjectToScreen(worldVec, camera) {
+      // quick project
+      const p = worldVec.clone().project(camera);
+
+      // if projection is within clip region and finite, convert to screen and return
+      if (Number.isFinite(p.x) && Number.isFinite(p.y) && Number.isFinite(p.z) && p.z >= -1 && p.z <= 1) {
+        const sx = (p.x * 0.5 + 0.5) * canvas.width;
+        const sy = (-p.y * 0.5 + 0.5) * canvas.height;
+        return { x: sx, y: sy, z: p.z };
+      }
+
+      // otherwise compute a safe fallback point in front of the camera
+      // get direction from camera to point
+      const dirToPoint = worldVec.clone().sub(camera.position);
+      const dist = dirToPoint.length();
+
+      // camera forward direction (where camera is looking)
+      const camForward = new THREE.Vector3();
+      camera.getWorldDirection(camForward);
+
+      const minD = api.options.minProjectionDistance || 0.1;
+
+      // If point is behind camera (dot < 0) or too close, move it to a safe location in front of camera:
+      const dot = dirToPoint.dot(camForward);
+      let safeWorld;
+      if (dot <= 0 || dist < minD) {
+        // place safe point at camera.position + camForward * minD (slightly in front of camera)
+        safeWorld = camera.position.clone().add(camForward.clone().multiplyScalar(minD));
+      } else {
+        // point is in front but projection clipped - nudge it slightly away along line-of-sight
+        safeWorld = camera.position.clone().add(dirToPoint.clone().normalize().multiplyScalar(Math.max(minD, Math.min(dist, minD))));
+      }
+
+      // project the safe point
+      const sp = safeWorld.clone().project(camera);
+      if (!Number.isFinite(sp.x) || !Number.isFinite(sp.y) || !Number.isFinite(sp.z)) return null;
+
+      let sx = (sp.x * 0.5 + 0.5) * canvas.width;
+      let sy = (-sp.y * 0.5 + 0.5) * canvas.height;
+
+      // clamp to a padded screen rect to avoid extreme offscreen coordinates
+      const pad = 200; // px
+      sx = Math.max(-pad, Math.min(canvas.width + pad, sx));
+      sy = Math.max(-pad, Math.min(canvas.height + pad, sy));
+
+      return { x: sx, y: sy, z: sp.z };
+    },
 
     // internal helper: project 3D world pos to screen (returns {x,y,z} or null if clipping)
     _projectToScreen(worldVec, camera) {
@@ -889,6 +948,15 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
         const posAttr = geom.attributes.position;
         const idxAttr = geom.index;
         const triIndices = []; // array of triangles [a,b,c]
+
+        const maxVerts = api.options.maxVerticesPerGeometry;
+        if (posAttr.count > maxVerts && maxVerts > 0) {
+          // If geometry ridiculously large, bail out (or handle in chunks)
+          // store empty cache so we don't retry constantly
+          const cacheEmpty = { quads: [], triCount: 0, isolatedPairs: [] };
+          geom._quadCache = cacheEmpty;
+          return cacheEmpty;
+        }
 
         if (idxAttr && idxAttr.count >= 3) {
           const ia = idxAttr.array;
@@ -935,7 +1003,42 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
           quads.push(arr); // store the 4 vertex indices
         }
 
-        const cache = { quads, triCount: triIndices.length };
+        // new: find isolated vertices (those not in any quad) and pair them to nearest neighbor
+        const usedVerts = new Set();
+        for (const q of quads) for (const vi of q) usedVerts.add(vi);
+
+        const isolatedPairs = []; // [[a,b], ...] pairs of indices
+        if (api.options.isolatedConnect && posAttr.count > 0) {
+          // build list of unused vertex indices
+          const unused = [];
+          for (let vi = 0; vi < posAttr.count; vi++) if (!usedVerts.has(vi)) unused.push(vi);
+
+          // brute-force nearest neighbor (OK for moderate numbers); cap number of pairs
+          const cap = Math.max(0, Math.min(api.options.isolatedConnectMaxPerGeom || 200, unused.length));
+          let pairsCreated = 0;
+          for (let i = 0; i < unused.length && pairsCreated < cap; i++) {
+            const a = unused[i];
+            // compute position of a
+            const ax = posAttr.getX(a), ay = posAttr.getY(a), az = posAttr.getZ(a);
+            let best = -1, bestDist = Infinity;
+            for (let j = 0; j < posAttr.count; j++) {
+              if (j === a) continue;
+              const bx = posAttr.getX(j), by = posAttr.getY(j), bz = posAttr.getZ(j);
+              const dx = ax - bx, dy = ay - by, dz = az - bz;
+              const d2 = dx * dx + dy * dy + dz * dz;
+              if (d2 < bestDist) { bestDist = d2; best = j; }
+            }
+            if (best !== -1) {
+              const dist = Math.sqrt(bestDist);
+              if (dist <= (api.options.isolatedConnectMaxDistance || Infinity)) {
+                isolatedPairs.push([a, best]);
+                pairsCreated++;
+              }
+            }
+          }
+        }
+
+        const cache = { quads, triCount: triIndices.length, isolatedPairs };
         geom._quadCache = cache;
         return cache;
       }
@@ -958,10 +1061,7 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
         if (obj.isInstancedMesh && obj.geometry && api.options.detectQuads) {
           const geom = obj.geometry;
           const cache = buildQuadCacheForGeometry(geom);
-          if (!cache || !cache.quads || cache.quads.length === 0) {
-            // no quads for geometry - skip (or optionally fallback)
-            return;
-          }
+          if (!cache) return;
           const instLimit = Math.min(obj.count, obj.userData?.instanceLimit || obj.count);
           const quadCapGlobal = obj.userData?.quadMax ?? api.options.maxQuadsPerObject;
           // per-instance cap (distribute)
@@ -986,15 +1086,6 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
             for (let qi = 0; qi < quadsToProcess.length; qi++) {
               const quad = quadsToProcess[qi]; // [i0,i1,i2,i3]
               // world positions for quad vertices
-              const worldPts = quad.map(vi => {
-                tmpVec.set(
-                  geom.attributes.position.getX(vi),
-                  geom.attributes.position.getY(vi),
-                  geom.attributes.position.getZ(vi)
-                ).applyMatrix4(tmpMat).clone();
-                return worldPts ? worldPts : tmpVec; // (we'll actually return below)
-              });
-              // Actually build worldPts properly to avoid reuse issues:
               const wp0 = new THREE.Vector3(
                 geom.attributes.position.getX(quad[0]),
                 geom.attributes.position.getY(quad[0]),
@@ -1023,24 +1114,32 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
               for (let wpt of worldArr) if (frustum.containsPoint(wpt)) { anyInside = true; break; }
               if (!anyInside && !obj.userData?.alwaysRender) continue;
 
-              // project to screen
+              // project to screen (use safeProject fallback for bad cases)
               const projPts = [];
               let allClipped = true, avgZ = 0;
               for (let wpt of worldArr) {
                 const ps = api._projectToScreen(wpt, camera);
                 if (ps) { projPts.push(ps); avgZ += ps.z; allClipped = false; } else {
-                  // if projection skipped, still push approximate projected fallback by projecting center
-                  projPts.push(null);
+                  // use safe fallback that avoids NaN collapsing
+                  const safe = api._safeProjectToScreen(wpt, camera);
+                  if (safe) { projPts.push(safe); avgZ += safe.z; } else {
+                    projPts.push(null);
+                  }
                 }
               }
               if (api.options.projectSkipBehind && allClipped) continue;
-              // if some points null, we'll compute approximate screen positions by projecting 3D points without clipping check
+
+              // second pass: for any remaining null projecteds, replace using safeProject
               for (let idx = 0; idx < projPts.length; idx++) {
                 if (!projPts[idx]) {
-                  const p = worldArr[idx].clone().project(camera);
-                  projPts[idx] = { x: (p.x * 0.5 + 0.5) * canvas.width, y: (-p.y * 0.5 + 0.5) * canvas.height, z: p.z };
+                  const safe = api._safeProjectToScreen(worldArr[idx], camera);
+                  if (safe) projPts[idx] = safe;
                 }
               }
+
+              // if still any null, skip this quad
+              if (projPts.some(p => !p)) continue;
+
               avgZ = projPts.reduce((s, p) => s + (p.z || 0), 0) / projPts.length;
 
               // order vertices into a correct loop: compute centroid in screen-space and sort by angle
@@ -1059,6 +1158,42 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
                 strokeWidth: obj.userData?.quadStrokeWidth ?? 1
               });
             } // quad loop
+
+            // process isolated pairs (lines) for this instance
+            if (cache.isolatedPairs && cache.isolatedPairs.length > 0) {
+              for (const pair of cache.isolatedPairs) {
+                const aIdx = pair[0], bIdx = pair[1];
+                const wa = new THREE.Vector3(
+                  geom.attributes.position.getX(aIdx),
+                  geom.attributes.position.getY(aIdx),
+                  geom.attributes.position.getZ(aIdx)
+                ).applyMatrix4(tmpMat);
+                const wb = new THREE.Vector3(
+                  geom.attributes.position.getX(bIdx),
+                  geom.attributes.position.getY(bIdx),
+                  geom.attributes.position.getZ(bIdx)
+                ).applyMatrix4(tmpMat);
+
+                // frustum quick test
+                if (!frustum.containsPoint(wa) && !frustum.containsPoint(wb) && !obj.userData?.alwaysRender) continue;
+
+                const pa = api._safeProjectToScreen(wa, camera);
+                const pb = api._safeProjectToScreen(wb, camera);
+                if (!pa || !pb) continue;
+                const avgZ = (pa.z + pb.z) / 2;
+
+                drawables.push({
+                  type: 'line',
+                  pts: [{ x: pa.x, y: pa.y }, { x: pb.x, y: pb.y }],
+                  avgZ,
+                  obj,
+                  color,
+                  alpha,
+                  strokeWidth: obj.userData?.quadStrokeWidth ?? 1
+                });
+              }
+            }
+
           } // instance loop
           return;
         } // end instanced path
@@ -1095,10 +1230,14 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
               if (api.options.projectSkipBehind && allClipped) continue;
               for (let idx = 0; idx < projPts.length; idx++) {
                 if (!projPts[idx]) {
-                  const p = worldArr[idx].clone().project(camera);
-                  projPts[idx] = { x: (p.x * 0.5 + 0.5) * canvas.width, y: (-p.y * 0.5 + 0.5) * canvas.height, z: p.z };
+                  const safe = api._safeProjectToScreen(worldArr[idx], camera);
+                  if (safe) projPts[idx] = safe;
                 }
               }
+
+              // if still any null, skip this quad
+              if (projPts.some(p => !p)) continue;
+
               avgZ = projPts.reduce((s, p) => s + (p.z || 0), 0) / projPts.length;
 
               // order vertices by center angle (screen-space)
@@ -1117,6 +1256,41 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
                 strokeWidth: obj.userData?.quadStrokeWidth ?? 1
               });
             } // quads loop
+
+            // isolated pairs -> draw as lines
+            if (cache.isolatedPairs && cache.isolatedPairs.length > 0) {
+              for (const pair of cache.isolatedPairs) {
+                const aIdx = pair[0], bIdx = pair[1];
+                const wa = new THREE.Vector3(
+                  geom.attributes.position.getX(aIdx),
+                  geom.attributes.position.getY(aIdx),
+                  geom.attributes.position.getZ(aIdx)
+                ).applyMatrix4(obj.matrixWorld);
+                const wb = new THREE.Vector3(
+                  geom.attributes.position.getX(bIdx),
+                  geom.attributes.position.getY(bIdx),
+                  geom.attributes.position.getZ(bIdx)
+                ).applyMatrix4(obj.matrixWorld);
+
+                if (!frustum.containsPoint(wa) && !frustum.containsPoint(wb) && !obj.userData?.alwaysRender) continue;
+
+                const pa = api._safeProjectToScreen(wa, camera);
+                const pb = api._safeProjectToScreen(wb, camera);
+                if (!pa || !pb) continue;
+                const avgZ = (pa.z + pb.z) / 2;
+
+                drawables.push({
+                  type: 'line',
+                  pts: [{ x: pa.x, y: pa.y }, { x: pb.x, y: pb.y }],
+                  avgZ,
+                  obj,
+                  color,
+                  alpha,
+                  strokeWidth: obj.userData?.quadStrokeWidth ?? 1
+                });
+              }
+            }
+
             return;
           } // end if cache.quads
         } // end mesh quad detection
@@ -1172,7 +1346,7 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
         return zb - za;
       });
 
-      // draw quads/images/rects
+      // draw quads/images/rects/lines
       for (let d of drawables) {
         if (d.type === 'quad') {
           ctx.save();
@@ -1196,6 +1370,29 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
             ctx.closePath();
             ctx.stroke();
           }
+          ctx.restore();
+          continue;
+        }
+
+        if (d.type === 'line') {
+          ctx.save();
+          ctx.globalAlpha = Math.min(1, d.alpha);
+          ctx.lineWidth = d.strokeWidth || 1;
+          ctx.strokeStyle = 'rgba(0,0,0,0.6)';
+          ctx.beginPath();
+          ctx.moveTo(d.pts[0].x, d.pts[0].y);
+          ctx.lineTo(d.pts[1].x, d.pts[1].y);
+          ctx.stroke();
+
+          // small endpoint dots for clarity
+          const dotSize = 2;
+          ctx.fillStyle = d.color;
+          ctx.beginPath();
+          ctx.arc(d.pts[0].x, d.pts[0].y, dotSize, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.beginPath();
+          ctx.arc(d.pts[1].x, d.pts[1].y, dotSize, 0, Math.PI * 2);
+          ctx.fill();
           ctx.restore();
           continue;
         }
