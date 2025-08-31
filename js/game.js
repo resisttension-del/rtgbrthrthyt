@@ -669,6 +669,7 @@ export async function startGame(username, mapName, initialDetailsEnabled, ffaEna
     initializeAudioManager(window.camera, scene);
     startSoundListener();
 
+
 const initialBodyColor = Math.floor(Math.random() * 0xffffff);
 
 window.localPlayer = {
@@ -810,6 +811,121 @@ function setupDetailToggle() {
 }
 
 
+function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
+  const canvas = document.createElement('canvas');
+  canvas.style.position = 'relative';
+  canvas.style.zIndex = '0';
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d');
+
+  // Scratch vars for projections
+  const proj = new THREE.Vector3();
+  const tmpPos = new THREE.Vector3();
+
+  const api = {
+    domElement: canvas,
+    setSize(w, h, updateStyle = true) {
+      canvas.width = w;
+      canvas.height = h;
+      if (updateStyle) {
+        canvas.style.width = `${w}px`;
+        canvas.style.height = `${h}px`;
+      }
+    },
+    // Minimal clear color support
+    setClearColor(hex, alpha = 1) {
+      api._clearColor = { hex, alpha };
+    },
+    _clearColor: { hex: 0x000000, alpha: 1 },
+    // Basic render: draw sprites (material.map.image) and points for other objects.
+    render(scene, camera) {
+      // Clear with the clear color (converted to CSS)
+      const c = api._clearColor;
+      const r = (c.hex >> 16) & 0xff;
+      const g = (c.hex >> 8) & 0xff;
+      const b = c.hex & 0xff;
+      ctx.save();
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.fillStyle = `rgba(${r},${g},${b},${c.alpha})`;
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.restore();
+
+      // collect drawables (so we can sort by depth)
+      const drawables = [];
+      scene.traverse((obj) => {
+        if (!obj.visible) return;
+        // Skip cameras and helpers
+        if (obj.isCamera || obj.isLight) return;
+
+        // world position
+        obj.getWorldPosition(tmpPos);
+        proj.copy(tmpPos).project(camera); // NDC -1..1
+
+        // behind camera? z > 1 => behind near? We'll cull anything outside NDC [-1..1]
+        if (proj.z > 1 || proj.z < -1 || proj.x < -1.5 || proj.x > 1.5 || proj.y < -1.5 || proj.y > 1.5) {
+          return;
+        }
+
+        // screen coords
+        const sx = (proj.x * 0.5 + 0.5) * canvas.width;
+        const sy = (-proj.y * 0.5 + 0.5) * canvas.height;
+
+        // distance for depth sorting
+        const dist = camera.position.distanceTo(tmpPos);
+
+        // check for texture
+        const mapImage = obj.material && obj.material.map && obj.material.map.image ? obj.material.map.image : null;
+
+        drawables.push({
+          obj,
+          sx,
+          sy,
+          dist,
+          projZ: proj.z,
+          mapImage
+        });
+      });
+
+      // Painter's order: furthest first (larger distance)
+      drawables.sort((a, b) => b.dist - a.dist);
+
+      // draw
+      for (let i = 0; i < drawables.length; i++) {
+        const d = drawables[i];
+        const { obj, sx, sy, mapImage, dist } = d;
+
+        if (mapImage && mapImage.width) {
+          // size heuristic: userData.sizePx if provided, otherwise basic distance falloff
+          const baseSize = obj.userData?.sizePx ?? 300;
+          const size = Math.max(8, baseSize * (1 / Math.max(0.1, dist * 0.05)));
+          ctx.save();
+
+          // optional rotation (if sprite-like)
+          const rot = obj.userData?.rotation ?? (obj.rotation?.z ?? 0);
+          ctx.translate(sx, sy);
+          if (rot) ctx.rotate(rot);
+          // draw centered
+          ctx.drawImage(mapImage, -size / 2, -size / 2, size, size);
+
+          ctx.restore();
+        } else {
+          // fallback: draw a simple circle with optional color in userData
+          ctx.beginPath();
+          ctx.fillStyle = obj.userData?.color || 'white';
+          const radius = obj.userData?.pointRadius ?? Math.max(3, 40 * (1 / Math.max(0.1, dist * 0.05)));
+          ctx.arc(sx, sy, radius, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+    }
+  };
+
+  return api;
+}
+
+/* ---------- Updated scene initializers (CPU renderer) ---------- */
+
 export async function initSceneCrocodilosConstruction() {
   sceneNum = 1;
   console.log("Initializing CrocodilosConstruction scene...");
@@ -825,89 +941,38 @@ export async function initSceneCrocodilosConstruction() {
   const skyColor = new THREE.Color(0x111122);
   scene.background = skyColor;
   skyMesh = new THREE.Mesh(skyGeo, skyMat);
-  // mark sky so autoFitScene ignores it
-  skyMesh.userData._isSky = true;
   scene.add(skyMesh);
   window.scene = scene;
-
-  // ensure camera exists
-  if (!window.camera) {
-    console.error("initSceneCrocodilosConstruction: window.camera is not defined.");
-    return;
-  }
 
   window.camera.rotation.order = "YXZ";
   scene.add(window.camera);
 
-  // 3. Renderer
-  await tryLoadLegacyCanvasRenderer();
-  renderer = window.renderer;
-
-  // Safety: ensure renderer exists
-  if (!renderer) {
-    console.error("initSceneCrocodilosConstruction: renderer was not created by tryLoadLegacyCanvasRenderer().");
-    return;
-  }
-
-  // Prefer z-buffer for CPU fallback and disable diagnostic overlays by default
-  if (typeof renderer.usePainter !== 'undefined') renderer.usePainter = false;
-  if (renderer.debug) renderer.debug.showWireframe = false;
-
-  // DOM element styling
-  if (renderer.domElement) {
-    renderer.domElement.style.position = "relative";
-    renderer.domElement.style.zIndex = "0";
-  }
-
-  // Ensure a shadowMap object exists before assigning type (SimpleCanvasRenderer won't have it)
-  if (!renderer.shadowMap) renderer.shadowMap = {};
-  if (typeof THREE.PCFSoftShadowMap !== "undefined") {
-    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-  } else {
-    // fallback numeric constant or leave as-is
-    renderer.shadowMap.type = renderer.shadowMap.type || 0;
-  }
-
-  // set clear color safely (only call setClearColor if available)
-  if (typeof renderer.setClearColor === "function") {
-    try {
-      renderer.setClearColor(0x000000, 1);
-    } catch (e) {
-      console.warn("renderer.setClearColor failed:", e);
-    }
-  } else if ('clearColor' in renderer) {
-    // SimpleCanvasRenderer uses string hex; convert number -> string
-    renderer.clearColor = '#000000';
-  }
-
-  // Append DOM element once
-  const container = document.getElementById("game-container");
-  if (renderer.domElement && container && !container.contains(renderer.domElement)) {
-    container.appendChild(renderer.domElement);
-  }
+  // 3. Renderer (CPU canvas)
+  const cpuRenderer = createCanvasRenderer({ width: FIXED_WIDTH, height: FIXED_HEIGHT });
+  cpuRenderer.setClearColor(0x000000, 1);
+  renderer = cpuRenderer;
   window.renderer = renderer;
 
-  // 4. Hemisphere Light
+  const container = document.getElementById("game-container");
+  // remove any previous renderer DOM element if present
+  if (container) {
+    // clear existing children with canvas or WebGLRenderer
+    // (be careful not to remove other unrelated DOM nodes)
+    const prev = container.querySelector('canvas');
+    if (prev) container.removeChild(prev);
+    container.appendChild(renderer.domElement);
+  }
+
+  // 4. Hemisphere Light (kept for scene lighting math / potential use)
   hemi = new THREE.HemisphereLight(0xffffff, 0x444444, 0.05);
   scene.add(hemi);
   window.hemi = hemi;
 
-  // 5. Post-processing Composer
-  // Only create EffectComposer if we have a WebGLRenderer (composer requires WebGL)
-  const isWebGLRenderer = (typeof THREE.WebGLRenderer !== "undefined") && (renderer instanceof THREE.WebGLRenderer);
-  if (isWebGLRenderer) {
-    composer = new EffectComposer(renderer);
-    renderPass = new RenderPass(scene, window.camera);
-    composer.addPass(renderPass);
-    window.composer = composer;
-    window.renderPass = renderPass;
-  } else {
-    composer = null;
-    renderPass = null;
-    window.composer = null;
-    window.renderPass = null;
-    console.warn("EffectComposer disabled: renderer is not WebGL (CPU canvas fallback).");
-  }
+  // 5. Post-processing composer: not available for CPU canvas — null out
+  composer = null;
+  renderPass = null;
+  window.composer = composer;
+  window.renderPass = renderPass;
 
   // --- Initial Detail Setup for CrocodilosConstruction ---
   toggleSceneDetails(detailsEnabled);
@@ -915,19 +980,6 @@ export async function initSceneCrocodilosConstruction() {
   // --- Map and Physics Initialization ---
   spawnPoints = await createCrocodilosConstruction(scene, physicsController);
   window.spawnPoints = spawnPoints;
-
-  // --- NEW: Auto-fit & recenter the loaded map so it renders correctly ---
-  try {
-    const fitInfo = await autoFitScene(scene, window.camera, { targetSize: 140, preferFlat: true });
-    if (fitInfo) {
-      console.log('autoFitScene applied (CrocodilosConstruction):', fitInfo);
-      window._lastMapFit = fitInfo;
-    } else {
-      console.warn('autoFitScene: no mesh data found to fit for CrocodilosConstruction.');
-    }
-  } catch (e) {
-    console.warn('autoFitScene failed for CrocodilosConstruction:', e);
-  }
 
   const initialSpawnPoint = findFurthestSpawn();
   physicsController.setPlayerPosition(initialSpawnPoint);
@@ -942,23 +994,17 @@ export async function initSceneCrocodilosConstruction() {
 
   // --- Window Resize Handling ---
   function onWindowResize() {
-    const container = document.getElementById("game-container");
-    const displayWidth  = container ? container.clientWidth : window.innerWidth;
-    const displayHeight = container ? container.clientHeight : window.innerHeight;
+    const displayWidth = container.clientWidth;
+    const displayHeight = container.clientHeight;
 
-    // 1) Render & post-process at fixed 1280×720
-    if (typeof renderer.setSize === 'function') {
-      renderer.setSize(FIXED_WIDTH, FIXED_HEIGHT, false);
-    }
-    if (composer) composer.setSize(FIXED_WIDTH, FIXED_HEIGHT);
+    // 1) Render at fixed internal resolution
+    renderer.setSize(FIXED_WIDTH, FIXED_HEIGHT, false);
 
     // 2) Stretch the canvas via CSS to fill the container
-    if (renderer.domElement) {
-      renderer.domElement.style.width  = `${displayWidth}px`;
-      renderer.domElement.style.height = `${displayHeight}px`;
-    }
+    renderer.domElement.style.width = `${displayWidth}px`;
+    renderer.domElement.style.height = `${displayHeight}px`;
 
-    // 3) Update camera to match the display aspect ratio
+    // 3) Update camera aspect ratio
     window.camera.aspect = displayWidth / displayHeight;
     window.camera.updateProjectionMatrix();
 
@@ -981,7 +1027,7 @@ export async function initSceneCrocodilosConstruction() {
     // 6) Resize HUD overlay
     const hud = document.getElementById("hud");
     if (hud) {
-      hud.style.width  = `${displayWidth}px`;
+      hud.style.width = `${displayWidth}px`;
       hud.style.height = `${displayHeight}px`;
     }
   }
@@ -989,7 +1035,6 @@ export async function initSceneCrocodilosConstruction() {
   window.addEventListener("resize", onWindowResize, false);
   onWindowResize();
 }
-
 
 export async function initSceneSigmaCity() {
   sceneNum = 2;
@@ -1007,79 +1052,35 @@ export async function initSceneSigmaCity() {
     fog: false
   });
   skyMesh = new THREE.Mesh(skyGeo, skyMat);
-  skyMesh.userData._isSky = true;
   scene.add(skyMesh);
   window.scene = scene;
-
-  if (!window.camera) {
-    console.error("initSceneSigmaCity: window.camera is not defined.");
-    return;
-  }
 
   window.camera.rotation.order = "YXZ";
   scene.add(window.camera);
 
-  // 3. Renderer
-  await tryLoadLegacyCanvasRenderer();
-  renderer = window.renderer;
-
-  if (!renderer) {
-    console.error("initSceneSigmaCity: renderer was not created by tryLoadLegacyCanvasRenderer().");
-    return;
-  }
-
-  // prefer z-buffer & turn off diagnostics by default
-  if (typeof renderer.usePainter !== 'undefined') renderer.usePainter = false;
-  if (renderer.debug) renderer.debug.showWireframe = false;
-
-  if (renderer.domElement) {
-    renderer.domElement.style.position = "relative";
-    renderer.domElement.style.zIndex = "0";
-  }
-
-  if (!renderer.shadowMap) renderer.shadowMap = {};
-  if (typeof THREE.PCFSoftShadowMap !== "undefined") {
-    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-  } else {
-    renderer.shadowMap.type = renderer.shadowMap.type || 0;
-  }
-
-  if (typeof renderer.setClearColor === "function") {
-    try {
-      renderer.setClearColor(0x000000, 1);
-    } catch (e) {
-      console.warn("renderer.setClearColor failed:", e);
-    }
-  } else if ('clearColor' in renderer) {
-    renderer.clearColor = '#000000';
-  }
+  // 3. Renderer (CPU canvas)
+  const cpuRenderer = createCanvasRenderer({ width: FIXED_WIDTH, height: FIXED_HEIGHT });
+  cpuRenderer.setClearColor(0x000000, 1);
+  renderer = cpuRenderer;
+  window.renderer = renderer;
 
   const container = document.getElementById("game-container");
-  if (renderer.domElement && container && !container.contains(renderer.domElement)) {
+  if (container) {
+    const prev = container.querySelector('canvas');
+    if (prev) container.removeChild(prev);
     container.appendChild(renderer.domElement);
   }
-  window.renderer = renderer;
 
   // 4. Hemisphere Light
   hemi = new THREE.HemisphereLight(0xffffff, 0x444444, 0.05);
   scene.add(hemi);
   window.hemi = hemi;
 
-  // 5. Post-processing Composer
-  const isWebGLRenderer = (typeof THREE.WebGLRenderer !== "undefined") && (renderer instanceof THREE.WebGLRenderer);
-  if (isWebGLRenderer) {
-    composer = new EffectComposer(renderer);
-    renderPass = new RenderPass(scene, window.camera);
-    composer.addPass(renderPass);
-    window.composer = composer;
-    window.renderPass = renderPass;
-  } else {
-    composer = null;
-    renderPass = null;
-    window.composer = null;
-    window.renderPass = null;
-    console.warn("EffectComposer disabled: renderer is not WebGL (CPU canvas fallback).");
-  }
+  // 5. Composer - not used in CPU mode
+  composer = null;
+  renderPass = null;
+  window.composer = composer;
+  window.renderPass = renderPass;
 
   // --- Initial Detail Setup for SigmaCity ---
   toggleSceneDetails(detailsEnabled);
@@ -1087,19 +1088,6 @@ export async function initSceneSigmaCity() {
   // --- Map and Physics Initialization ---
   spawnPoints = await createSigmaCity(scene, physicsController);
   window.spawnPoints = spawnPoints;
-
-  // --- NEW: Auto-fit & recenter the loaded map so it renders correctly ---
-  try {
-    const fitInfo = await autoFitScene(scene, window.camera, { targetSize: 140, preferFlat: true });
-    if (fitInfo) {
-      console.log('autoFitScene applied (SigmaCity):', fitInfo);
-      window._lastMapFit = fitInfo;
-    } else {
-      console.warn('autoFitScene: no mesh data found to fit for SigmaCity.');
-    }
-  } catch (e) {
-    console.warn('autoFitScene failed for SigmaCity:', e);
-  }
 
   const initialSpawnPoint = findFurthestSpawn();
   physicsController.setPlayerPosition(initialSpawnPoint);
@@ -1115,19 +1103,13 @@ export async function initSceneSigmaCity() {
 
   // --- Window Resize Handling ---
   function onWindowResize() {
-    const container = document.getElementById("game-container");
-    const displayWidth  = container ? container.clientWidth : window.innerWidth;
-    const displayHeight = container ? container.clientHeight : window.innerHeight;
+    const displayWidth = container.clientWidth;
+    const displayHeight = container.clientHeight;
 
-    if (typeof renderer.setSize === 'function') {
-      renderer.setSize(FIXED_WIDTH, FIXED_HEIGHT, false);
-    }
-    if (composer) composer.setSize(FIXED_WIDTH, FIXED_HEIGHT);
+    renderer.setSize(FIXED_WIDTH, FIXED_HEIGHT, false);
 
-    if (renderer.domElement) {
-      renderer.domElement.style.width  = `${displayWidth}px`;
-      renderer.domElement.style.height = `${displayHeight}px`;
-    }
+    renderer.domElement.style.width = `${displayWidth}px`;
+    renderer.domElement.style.height = `${displayHeight}px`;
 
     window.camera.aspect = displayWidth / displayHeight;
     window.camera.updateProjectionMatrix();
@@ -1148,7 +1130,7 @@ export async function initSceneSigmaCity() {
 
     const hud = document.getElementById("hud");
     if (hud) {
-      hud.style.width  = `${displayWidth}px`;
+      hud.style.width = `${displayWidth}px`;
       hud.style.height = `${displayHeight}px`;
     }
   }
@@ -1156,7 +1138,6 @@ export async function initSceneSigmaCity() {
   window.addEventListener("resize", onWindowResize, false);
   onWindowResize();
 }
-
 
 export async function initSceneDiddyDunes() {
   sceneNum = 3;
@@ -1174,78 +1155,35 @@ export async function initSceneDiddyDunes() {
     fog: false
   });
   skyMesh = new THREE.Mesh(skyGeo, skyMat);
-  skyMesh.userData._isSky = true;
   scene.add(skyMesh);
   window.scene = scene;
-
-  if (!window.camera) {
-    console.error("initSceneDiddyDunes: window.camera is not defined.");
-    return;
-  }
 
   window.camera.rotation.order = "YXZ";
   scene.add(window.camera);
 
-  // 3. Renderer
-  await tryLoadLegacyCanvasRenderer();
-  renderer = window.renderer;
-
-  if (!renderer) {
-    console.error("initSceneDiddyDunes: renderer was not created by tryLoadLegacyCanvasRenderer().");
-    return;
-  }
-
-  if (typeof renderer.usePainter !== 'undefined') renderer.usePainter = false;
-  if (renderer.debug) renderer.debug.showWireframe = false;
-
-  if (renderer.domElement) {
-    renderer.domElement.style.position = "relative";
-    renderer.domElement.style.zIndex = "0";
-  }
-
-  if (!renderer.shadowMap) renderer.shadowMap = {};
-  if (typeof THREE.PCFSoftShadowMap !== "undefined") {
-    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-  } else {
-    renderer.shadowMap.type = renderer.shadowMap.type || 0;
-  }
-
-  if (typeof renderer.setClearColor === "function") {
-    try {
-      renderer.setClearColor(0x000000, 1);
-    } catch (e) {
-      console.warn("renderer.setClearColor failed:", e);
-    }
-  } else if ('clearColor' in renderer) {
-    renderer.clearColor = '#000000';
-  }
+  // 3. Renderer (CPU canvas)
+  const cpuRenderer = createCanvasRenderer({ width: FIXED_WIDTH, height: FIXED_HEIGHT });
+  cpuRenderer.setClearColor(0x000000, 1);
+  renderer = cpuRenderer;
+  window.renderer = renderer;
 
   const container = document.getElementById("game-container");
-  if (renderer.domElement && container && !container.contains(renderer.domElement)) {
+  if (container) {
+    const prev = container.querySelector('canvas');
+    if (prev) container.removeChild(prev);
     container.appendChild(renderer.domElement);
   }
-  window.renderer = renderer;
 
   // 4. Hemisphere Light
   hemi = new THREE.HemisphereLight(0xffffff, 0x444444, 0.05);
   scene.add(hemi);
   window.hemi = hemi;
 
-  // 5. Post-processing Composer
-  const isWebGLRenderer = (typeof THREE.WebGLRenderer !== "undefined") && (renderer instanceof THREE.WebGLRenderer);
-  if (isWebGLRenderer) {
-    composer = new EffectComposer(renderer);
-    renderPass = new RenderPass(scene, window.camera);
-    composer.addPass(renderPass);
-    window.composer = composer;
-    window.renderPass = renderPass;
-  } else {
-    composer = null;
-    renderPass = null;
-    window.composer = null;
-    window.renderPass = null;
-    console.warn("EffectComposer disabled: renderer is not WebGL (CPU canvas fallback).");
-  }
+  // 5. Composer - not used in CPU mode
+  composer = null;
+  renderPass = null;
+  window.composer = composer;
+  window.renderPass = renderPass;
 
   // --- Initial Detail Setup for DiddyDunes ---
   toggleSceneDetails(detailsEnabled);
@@ -1254,26 +1192,13 @@ export async function initSceneDiddyDunes() {
   spawnPoints = await createDiddyDunes(scene, physicsController);
   window.spawnPoints = spawnPoints;
 
-  // --- NEW: Auto-fit & recenter the loaded map so it renders correctly ---
-  try {
-    const fitInfo = await autoFitScene(scene, window.camera, { targetSize: 140, preferFlat: true });
-    if (fitInfo) {
-      console.log('autoFitScene applied (DiddyDunes):', fitInfo);
-      window._lastMapFit = fitInfo;
-    } else {
-      console.warn('autoFitScene: no mesh data found to fit for DiddyDunes.');
-    }
-  } catch (e) {
-    console.warn('autoFitScene failed for DiddyDunes:', e);
-  }
-
   const initialSpawnPoint = findFurthestSpawn();
   physicsController.setPlayerPosition(initialSpawnPoint);
 
   // --- Audio Initialization ---
   if (typeof dessertWindSound !== 'undefined') {
     dessertWindSound.volume = 0.25;
-    dessertWindSound.play().catch(err => console.warn("Failed to play desert wind:", err));
+    dessertWindSound.play().catch(err => console.warn("Failed to play dessert wind sound:", err));
     window.windSound = dessertWindSound;
   } else {
     console.warn("dessertWindSound is not defined. Audio might not play for DiddyDunes.");
@@ -1281,19 +1206,13 @@ export async function initSceneDiddyDunes() {
 
   // --- Window Resize Handling ---
   function onWindowResize() {
-    const container = document.getElementById("game-container");
-    const displayWidth  = container ? container.clientWidth : window.innerWidth;
-    const displayHeight = container ? container.clientHeight : window.innerHeight;
+    const displayWidth = container.clientWidth;
+    const displayHeight = container.clientHeight;
 
-    if (typeof renderer.setSize === 'function') {
-      renderer.setSize(FIXED_WIDTH, FIXED_HEIGHT, false);
-    }
-    if (composer) composer.setSize(FIXED_WIDTH, FIXED_HEIGHT);
+    renderer.setSize(FIXED_WIDTH, FIXED_HEIGHT, false);
 
-    if (renderer.domElement) {
-      renderer.domElement.style.width  = `${displayWidth}px`;
-      renderer.domElement.style.height = `${displayHeight}px`;
-    }
+    renderer.domElement.style.width = `${displayWidth}px`;
+    renderer.domElement.style.height = `${displayHeight}px`;
 
     window.camera.aspect = displayWidth / displayHeight;
     window.camera.updateProjectionMatrix();
@@ -1314,7 +1233,7 @@ export async function initSceneDiddyDunes() {
 
     const hud = document.getElementById("hud");
     if (hud) {
-      hud.style.width  = `${displayWidth}px`;
+      hud.style.width = `${displayWidth}px`;
       hud.style.height = `${displayHeight}px`;
     }
   }
@@ -1322,8 +1241,6 @@ export async function initSceneDiddyDunes() {
   window.addEventListener("resize", onWindowResize, false);
   onWindowResize();
 }
-
-
 
 
 // js/game.js (modify existing initGameNetwork)
@@ -2293,12 +2210,8 @@ function round2(n) {
 
 
 
-// -----------------------------
-// animate() (unchanged game logic, with better guards)
-// -----------------------------
 export function animate(timestamp) {
-  // Schedule the next frame *first*. This ensures the loop continues
-  // even if an error occurs later in this frame.
+  // Schedule the next frame first
   requestAnimationFrame(animate);
 
   // --- Disconnection/Pause Logic ---
@@ -2306,26 +2219,18 @@ export function animate(timestamp) {
     return;
   }
 
-  // --- Frame Throttling (60fps) ---
-  const FRAME_INTERVAL = 1000 / 60; // ≈16.67ms
-  if (!animate.lastTime) {
-    animate.lastTime = timestamp; // Initialize for the first frame
-  }
+  // Frame throttling ~60fps
+  const FRAME_INTERVAL = 1000 / 60;
+  if (!animate.lastTime) animate.lastTime = timestamp;
   const deltaMs = timestamp - animate.lastTime;
-
-  if (deltaMs < FRAME_INTERVAL) {
-    return; // Too early, skip this frame
-  }
-  // Carry over any "extra" time for smoother timing
+  if (deltaMs < FRAME_INTERVAL) return;
   animate.lastTime = timestamp - (deltaMs % FRAME_INTERVAL);
-
-  // Convert to seconds for game logic
   const delta = deltaMs / 1000;
 
-  // --- Pre-animation checks ---
+  // Pre-animation checks
   if (!physicsController || !weaponController) {
     console.warn("Skipping animate(): controllers not yet initialized");
-    postFrameCleanup(); // Clean up even if controllers aren't ready
+    postFrameCleanup();
     return;
   }
   if (!window.mapReady) {
@@ -2339,12 +2244,11 @@ export function animate(timestamp) {
   }
 
   try {
-    // --- Death Screen Logic ---
+    // Death screen handling
     if (window.localPlayer.isDead) {
       const cross = document.getElementById("crosshair");
       if (cross) cross.style.display = "none";
 
-      // Ensure death-related sounds are playing and others are paused
       if (windSound && !windSound.paused) windSound.pause();
       if (forestNoise && !forestNoise.paused) forestNoise.pause();
       if (dessertWindSound && !dessertWindSound.paused) dessertWindSound.pause();
@@ -2353,37 +2257,36 @@ export function animate(timestamp) {
         deathTheme.play().catch(e => console.error("Error playing death theme:", e));
       }
 
-      // Show death overlays
       if (fadeOverlay) {
         fadeOverlay.style.pointerEvents = "auto";
         fadeOverlay.style.opacity = "1";
       }
       if (respawnOverlay) respawnOverlay.style.display = "flex";
 
-      // use safeRender instead of composer.render()
-      safeRender();
+      // Render final frame
+      if (composer && typeof composer.render === 'function') {
+        composer.render();
+      } else if (renderer && typeof renderer.render === 'function') {
+        renderer.render(scene, window.camera);
+      }
+
       postFrameCleanup();
-      return; // Exit early if player is dead
+      return;
     } else {
-
-      if (fadeOverlay && fadeOverlay.style.opacity !== "0") {
-        hideFadeOverlay();
-      }
-      if (respawnOverlay && respawnOverlay.style.display !== "none") {
-        hideRespawn();
-      }
-
+      if (fadeOverlay && fadeOverlay.style.opacity !== "0") hideFadeOverlay();
+      if (respawnOverlay && respawnOverlay.style.display !== "none") hideRespawn();
       const cross = document.getElementById("crosshair");
       if (cross) cross.style.display = "block";
     }
 
-    // --- Normal Game Updates ---
+    // Normal game updates
     checkForDamagePulse();
 
     if (weaponController.stats.speedModifier != null) {
       physicsController.setSpeedModifier(weaponController.stats.speedModifier);
     }
 
+    // Remote players falling
     const GRAVITY = 9.8;
     Object.values(window.remotePlayers).forEach(rp => {
       const g = rp.group;
@@ -2427,7 +2330,6 @@ export function animate(timestamp) {
     for (let i = activeTracers.length - 1; i >= 0; i--) {
       const tracer = activeTracers[i];
       tracer.update(delta);
-
       if (tracer.remove) {
         tracer.dispose();
         activeTracers.splice(i, 1);
@@ -2453,12 +2355,13 @@ export function animate(timestamp) {
       console.warn("Skipping sendPlayerUpdate: dbRefs, dbRefs.playersRef or localPlayerId is null.");
     }
 
+    // Remote avatars update
     for (const id in window.remotePlayers) {
       const rp = window.remotePlayers[id];
       if (rp.data) updateRemotePlayer(rp.data);
     }
 
-    // Weapon Switching
+    // Weapon switching
     if (inputState.weaponSwitch) {
       const oldW = window.localPlayer.weapon;
       weaponAmmo[oldW] = weaponController.getCurrentAmmo();
@@ -2467,9 +2370,7 @@ export function animate(timestamp) {
 
       if (dbRefs && dbRefs.playersRef && localPlayerId) {
         try {
-          dbRefs.playersRef.child(localPlayerId).update({
-            weapon: newW
-          });
+          dbRefs.playersRef.child(localPlayerId).update({ weapon: newW });
         } catch (error) {
           console.error("Failed to update local player weapon in Firebase:", error);
         }
@@ -2485,7 +2386,7 @@ export function animate(timestamp) {
       if (newW === "knife") activeRecoils.length = 0;
     }
 
-    // Mouse Look + Recoil
+    // Mouse look + recoil
     const baseSens = parseFloat(localStorage.getItem("sensitivity") || "5.00");
     const aimMul = inputState.aim ? (window.localPlayer.weapon === "marshal" ? 0.15 : 0.5) : 1;
     const finalSens = baseSens * aimMul;
@@ -2494,7 +2395,7 @@ export function animate(timestamp) {
     let newPitch = window.camera.rotation.x - inputState.mouseDY * finalSens * 0.002;
     window.camera.rotation.x = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, newPitch));
 
-    // Recoil processing
+    // Recoil
     {
       const now = performance.now() / 1000;
       let totalOffset = 0;
@@ -2518,523 +2419,24 @@ export function animate(timestamp) {
         const other = window.remotePlayers[otherId];
         if (other.group?.visible) {
           other.group.traverse(child => {
-            if (child.isMesh && child.userData?.isPlayerBodyPart) {
-              window.collidables.push(child);
-            }
+            if (child.isMesh && child.userData?.isPlayerBodyPart) window.collidables.push(child);
           });
         }
       }
     }
 
-    // Render the scene using safeRender()
-    safeRender();
+    // Render
+    if (composer && typeof composer.render === 'function') {
+      composer.render();
+    } else if (renderer && typeof renderer.render === 'function') {
+      renderer.render(scene, window.camera);
+    }
   } catch (err) {
     console.error("Error in animate:", err);
   } finally {
-    postFrameCleanup(); // Ensure cleanup runs even if an error occurs
+    postFrameCleanup();
   }
 }
-
-// keep THREE reference on window (your code relied on this)
-window.THREE = THREE;
-
-// -----------------------------
-// SimpleCanvasRenderer (z-buffer rasterizer, flat shading)
-// -----------------------------
-    class SimpleCanvasRenderer {
-      constructor(opts = {}) {
-        this.canvas = opts.canvas || document.createElement('canvas');
-        this.ctx = this.canvas.getContext('2d');
-        this.domElement = this.canvas;
-        this.clearColor = opts.clearColor || '#0b0b0b';
-        this.autoClear = opts.autoClear !== undefined ? opts.autoClear : true;
-        this.usePainter = opts.usePainter !== undefined ? opts.usePainter : false; // default z-buffer
-        this.setSize(opts.width || window.innerWidth, opts.height || window.innerHeight);
-
-        // temps
-        this._vA = new THREE.Vector3(); this._vB = new THREE.Vector3(); this._vC = new THREE.Vector3();
-        this._wA = new THREE.Vector3(); this._wB = new THREE.Vector3(); this._wC = new THREE.Vector3();
-        this._e1 = new THREE.Vector3(); this._e2 = new THREE.Vector3();
-        this._faceNormal = new THREE.Vector3(); this._centroid = new THREE.Vector3();
-        this._clipA = new THREE.Vector4(); this._clipB = new THREE.Vector4(); this._clipC = new THREE.Vector4();
-        this._viewMatrix = new THREE.Matrix4(); this._viewProj = new THREE.Matrix4(); this._worldMatrix = new THREE.Matrix4();
-
-        this.lightDir = new THREE.Vector3(0.5,0.8,0.2).normalize();
-        this.ambientFactor = 0.25; this.diffuseFactor = 0.75;
-
-        this.debug = { showWireframe: true, showPoints: false, showNormals: false, maxTriangles: 500000 };
-        this.lastTriangleCount = 0;
-        this.lastVisibleVerts = 0;
-
-        // small performance knobs
-        this.pointRenderSize = 1.4;
-        this.normalRenderLen = 8;
-      }
-
-      setSize(w,h) {
-        this.width = Math.max(1, Math.floor(w)); this.height = Math.max(1, Math.floor(h));
-        this.canvas.width = this.width; this.canvas.height = this.height;
-        this.canvas.style.width = this.width + 'px'; this.canvas.style.height = this.height + 'px';
-        this.halfWidth = this.width/2; this.halfHeight = this.height/2;
-      }
-
-      _clearToBackground(scene, imageData) {
-        let r=0,g=0,b=0;
-        if (scene && scene.background && scene.background.isColor) {
-          const c = scene.background; r = Math.round(c.r*255); g = Math.round(c.g*255); b = Math.round(c.b*255);
-        } else {
-          const cc = new THREE.Color(this.clearColor); r = Math.round(cc.r*255); g = Math.round(cc.g*255); b = Math.round(cc.b*255);
-        }
-        const data = imageData.data;
-        for (let i=0,n=data.length;i<n;i+=4) { data[i]=r; data[i+1]=g; data[i+2]=b; data[i+3]=255; }
-      }
-
-      render(scene, camera) {
-        try {
-          if (!scene || !camera) return;
-
-          camera.updateMatrixWorld(true);
-          camera.updateProjectionMatrix();
-          this._viewMatrix.copy(camera.matrixWorld).invert();
-          this._viewProj.multiplyMatrices(camera.projectionMatrix, this._viewMatrix);
-
-          const w = this.width, h = this.height;
-          const imageData = this.ctx.createImageData(w,h);
-          const zBuffer = new Float32Array(w*h);
-          for (let i=0;i<zBuffer.length;i++) zBuffer[i] = Infinity;
-          const data = imageData.data;
-
-          if (this.autoClear) this._clearToBackground(scene, imageData);
-
-          const camPos = new THREE.Vector3(); camera.getWorldPosition(camPos);
-
-          const triangles = [];
-          const visibleVerts = [];
-
-          const addTriangle = (sx0,sy0,sz0,sx1,sy1,sz1,sx2,sy2,sz2,colorArr,depthMetric,viewZ0,viewZ1,viewZ2, nwx, nwy, nwz) => {
-            if (triangles.length >= this.debug.maxTriangles) return;
-            triangles.push({ sx0,sy0,sz0,sx1,sy1,sz1,sx2,sy2,sz2,colorArr,depthMetric,viewZ0,viewZ1,viewZ2, nx:nwx, ny:nwy, nz:nwz });
-            // store vertices for optional overlay
-            visibleVerts.push([sx0,sy0]); visibleVerts.push([sx1,sy1]); visibleVerts.push([sx2,sy2]);
-          };
-
-          // Collect triangles
-          scene.traverse(obj => {
-            if (!obj.visible || !obj.isMesh) return;
-            const mesh = obj;
-            const geometry = mesh.geometry; if (!geometry) return;
-
-            mesh.updateMatrixWorld(true);
-            this._worldMatrix.copy(mesh.matrixWorld);
-
-            let positions=null, indices=null, itemSize=3;
-            if (geometry.isBufferGeometry) {
-              const posAttr = geometry.attributes.position; if (!posAttr) return;
-              positions = posAttr.array; itemSize = posAttr.itemSize || 3;
-              if (geometry.index) indices = geometry.index.array;
-            } else if (geometry.isGeometry) {
-              positions = new Float32Array(geometry.vertices.length*3);
-              for (let i=0;i<geometry.vertices.length;i++){ positions[i*3]=geometry.vertices[i].x; positions[i*3+1]=geometry.vertices[i].y; positions[i*3+2]=geometry.vertices[i].z; }
-              indices = new Uint32Array(geometry.faces.length*3);
-              for (let i=0;i<geometry.faces.length;i++){ indices[i*3]=geometry.faces[i].a; indices[i*3+1]=geometry.faces[i].b; indices[i*3+2]=geometry.faces[i].c; }
-            } else return;
-
-            const getVertex = (idx, out) => { const i3 = idx * itemSize; out.set(positions[i3], positions[i3+1], positions[i3+2]); };
-
-            const triCount = indices ? (indices.length/3) : (positions.length / (itemSize * 3));
-            const mat = Array.isArray(mesh.material) ? mesh.material[0] : mesh.material;
-            let baseColor = new THREE.Color(0x999999);
-            if (mat) { if (mat.color) baseColor.copy(mat.color); else if (mat.emissive) baseColor.copy(mat.emissive); }
-
-            for (let t=0;t<triCount;t++){
-              let aIdx,bIdx,cIdx;
-              if (indices) { aIdx = indices[t*3]; bIdx = indices[t*3+1]; cIdx = indices[t*3+2]; }
-              else { aIdx = t*3; bIdx = t*3+1; cIdx = t*3+2; }
-
-              getVertex(aIdx, this._vA); getVertex(bIdx, this._vB); getVertex(cIdx, this._vC);
-
-              this._wA.copy(this._vA).applyMatrix4(this._worldMatrix);
-              this._wB.copy(this._vB).applyMatrix4(this._worldMatrix);
-              this._wC.copy(this._vC).applyMatrix4(this._worldMatrix);
-
-              this._e1.subVectors(this._wB, this._wA);
-              this._e2.subVectors(this._wC, this._wA);
-              this._faceNormal.crossVectors(this._e1, this._e2);
-              if (this._faceNormal.lengthSq() < 1e-12) continue;
-              this._faceNormal.normalize();
-
-              this._centroid.copy(this._wA).add(this._wB).add(this._wC).multiplyScalar(1/3);
-
-              const clipA = this._clipA.set(this._wA.x,this._wA.y,this._wA.z,1).applyMatrix4(this._viewProj);
-              const clipB = this._clipB.set(this._wB.x,this._wB.y,this._wB.z,1).applyMatrix4(this._viewProj);
-              const clipC = this._clipC.set(this._wC.x,this._wC.y,this._wC.z,1).applyMatrix4(this._viewProj);
-
-              if (Math.abs(clipA.w) < 1e-9 || Math.abs(clipB.w) < 1e-9 || Math.abs(clipC.w) < 1e-9) continue;
-
-              const ndcAx = clipA.x/clipA.w, ndcAy = clipA.y/clipA.w, ndcAz = clipA.z/clipA.w;
-              const ndcBx = clipB.x/clipB.w, ndcBy = clipB.y/clipB.w, ndcBz = clipB.z/clipB.w;
-              const ndcCx = clipC.x/clipC.w, ndcCy = clipC.y/clipC.w, ndcCz = clipC.z/clipC.w;
-
-              const outside =
-                (ndcAx < -1 && ndcBx < -1 && ndcCx < -1) ||
-                (ndcAx > 1 && ndcBx > 1 && ndcCx > 1) ||
-                (ndcAy < -1 && ndcBy < -1 && ndcCy < -1) ||
-                (ndcAy > 1 && ndcBy > 1 && ndcCy > 1) ||
-                (ndcAz < -1 && ndcBz < -1 && ndcCz < -1) ||
-                (ndcAz > 1 && ndcBz > 1 && ndcCz > 1);
-              if (outside) continue;
-
-              const sAx = ndcAx*this.halfWidth + this.halfWidth;
-              const sAy = -ndcAy*this.halfHeight + this.halfHeight;
-              const sBx = ndcBx*this.halfWidth + this.halfWidth;
-              const sBy = -ndcBy*this.halfHeight + this.halfHeight;
-              const sCx = ndcCx*this.halfWidth + this.halfWidth;
-              const sCy = -ndcCy*this.halfHeight + this.halfHeight;
-
-              const lambert = Math.max(0, this._faceNormal.dot(this.lightDir));
-              const shade = this.ambientFactor + this.diffuseFactor * lambert;
-              const rr = Math.min(1, baseColor.r * shade);
-              const gg = Math.min(1, baseColor.g * shade);
-              const bb = Math.min(1, baseColor.b * shade);
-              const colorArr = [Math.round(rr*255), Math.round(gg*255), Math.round(bb*255)];
-
-              const depthMetric = camPos.distanceToSquared(this._centroid);
-              const viewZ0 = clipA.w, viewZ1 = clipB.w, viewZ2 = clipC.w;
-
-              // pass face normal components in world space (for optional normal overlay)
-              addTriangle(sAx,sAy,ndcAz,sBx,sBy,ndcBz,sCx,sCy,ndcCz,colorArr,depthMetric,viewZ0,viewZ1,viewZ2,
-                          this._faceNormal.x, this._faceNormal.y, this._faceNormal.z);
-            }
-          });
-
-          this.lastTriangleCount = triangles.length;
-          this.lastVisibleVerts = visibleVerts.length;
-          // If no triangles visible, draw helpful message and return early
-          if (triangles.length === 0) {
-            this.ctx.putImageData(imageData, 0, 0);
-            this.ctx.save();
-            this.ctx.font = '18px system-ui,Arial';
-            this.ctx.fillStyle = 'rgba(255,255,255,0.95)';
-            this.ctx.textAlign = 'center';
-            this.ctx.fillText('NO TRIANGLES VISIBLE', w/2, h/2 - 10);
-            this.ctx.font = '13px system-ui,Arial';
-            this.ctx.fillText('Try orbiting/zooming or toggle diagnostics.', w/2, h/2 + 12);
-            this.ctx.restore();
-            return;
-          }
-
-          // Z-buffer rasterization (accurate occlusion)
-          const edge = (ax,ay,bx,by,px,py) => (px-ax)*(by-ay) - (py-ay)*(bx-ax);
-
-          for (let ti=0; ti<triangles.length; ti++) {
-            const tri = triangles[ti];
-            const p0x = tri.sx0, p0y = tri.sy0, p1x = tri.sx1, p1y = tri.sy1, p2x = tri.sx2, p2y = tri.sy2;
-            const invZ0 = 1/tri.viewZ0, invZ1 = 1/tri.viewZ1, invZ2 = 1/tri.viewZ2;
-
-            let minX = Math.floor(Math.min(p0x,p1x,p2x)), maxX = Math.ceil(Math.max(p0x,p1x,p2x));
-            let minY = Math.floor(Math.min(p0y,p1y,p2y)), maxY = Math.ceil(Math.max(p0y,p1y,p2y));
-
-            if (maxX < 0 || maxY < 0 || minX >= w || minY >= h) continue;
-            minX = Math.max(0, minX); minY = Math.max(0, minY); maxX = Math.min(w-1, maxX); maxY = Math.min(h-1, maxY);
-
-            const denom = edge(p0x,p0y,p1x,p1y,p2x,p2y);
-            if (Math.abs(denom) < 1e-6) continue;
-
-            for (let y=minY; y<=maxY; y++){
-              for (let x=minX; x<=maxX; x++){
-                const px = x + 0.5, py = y + 0.5;
-                const w0 = edge(p1x,p1y,p2x,p2y,px,py);
-                const w1 = edge(p2x,p2y,p0x,p0y,px,py);
-                const w2 = edge(p0x,p0y,p1x,p1y,px,py);
-
-                if ((w0>=0 && w1>=0 && w2>=0) || (w0<=0 && w1<=0 && w2<=0)) {
-                  const denomInv = 1/denom;
-                  const w0n = w0*denomInv, w1n = w1*denomInv, w2n = w2*denomInv;
-                  const depthValue = 1 / (w0n*invZ0 + w1n*invZ1 + w2n*invZ2);
-                  const idx = y * w + x;
-                  if (depthValue < zBuffer[idx]) {
-                    zBuffer[idx] = depthValue;
-                    const di = idx*4;
-                    data[di] = tri.colorArr[0]; data[di+1] = tri.colorArr[1]; data[di+2] = tri.colorArr[2]; data[di+3] = 255;
-                  }
-                }
-              }
-            }
-          }
-
-          this.ctx.putImageData(imageData, 0, 0);
-
-          // Optional overlays
-          if (this.debug.showWireframe) {
-            this.ctx.save();
-            this.ctx.lineWidth = 0.6;
-            this.ctx.globalAlpha = 0.8;
-            this.ctx.strokeStyle = 'rgba(255,255,255,0.08)';
-            for (let i=0;i<triangles.length;i++){
-              const tri = triangles[i];
-              this.ctx.beginPath();
-              this.ctx.moveTo(tri.sx0, tri.sy0);
-              this.ctx.lineTo(tri.sx1, tri.sy1);
-              this.ctx.lineTo(tri.sx2, tri.sy2);
-              this.ctx.closePath();
-              this.ctx.stroke();
-            }
-            this.ctx.restore();
-          }
-
-          if (this.debug.showPoints) {
-            this.ctx.save();
-            this.ctx.fillStyle = 'rgba(255,140,0,0.9)';
-            const s = Math.max(1, this.pointRenderSize);
-            for (let i=0;i<visibleVerts.length;i++){
-              const v = visibleVerts[i];
-              this.ctx.fillRect(v[0]-s*0.5, v[1]-s*0.5, s, s);
-            }
-            this.ctx.restore();
-          }
-
-          if (this.debug.showNormals) {
-            // draw normals from triangle centroids outward (screen-space lines)
-            this.ctx.save();
-            this.ctx.strokeStyle = 'rgba(0,200,255,0.85)';
-            this.ctx.lineWidth = 1.0;
-            for (let i=0;i<triangles.length;i++){
-              const tri = triangles[i];
-              // compute centroid in screen space
-              const cx = (tri.sx0 + tri.sx1 + tri.sx2) / 3;
-              const cy = (tri.sy0 + tri.sy1 + tri.sy2) / 3;
-              // project a small step along normal in view space -> approximate as screen offset
-              // We don't have per-triangle screen-space normal, so use a tiny heuristic:
-              const len = this.normalRenderLen;
-              this.ctx.beginPath();
-              this.ctx.moveTo(cx, cy);
-              this.ctx.lineTo(cx + (tri.nx||0) * len, cy - (tri.ny||0) * len);
-              this.ctx.stroke();
-            }
-            this.ctx.restore();
-          }
-
-        } catch (e) {
-          console.error('Render error', e);
-        }
-      }
-    }
-
-
-// expose
-window.SimpleCanvasRenderer = SimpleCanvasRenderer;
-
-
-function autoFitScene(scene, camera, opts = {}) {
-  opts = Object.assign({ targetSize: 140, preferFlat: true }, opts);
-  if (!scene || !camera) return null;
-
-  // collect bbox for all meshes except sky
-  const bbox = new THREE.Box3();
-  let any = false;
-  scene.traverse(o => {
-    if (!o.isMesh) return;
-    if (o.userData && o.userData._isSky) return;
-    bbox.expandByObject(o);
-    any = true;
-  });
-  if (!any) return null;
-
-  // center geometry to origin
-  const center = bbox.getCenter(new THREE.Vector3());
-  scene.traverse(o => {
-    if (!o.isMesh) return;
-    if (o.userData && o.userData._isSky) return;
-    o.position.sub(center);
-    o.updateMatrixWorld(true);
-  });
-
-  // recompute bbox + size
-  let box = new THREE.Box3().setFromObject(scene);
-  let size = box.getSize(new THREE.Vector3());
-
-  // rotation heuristics: if Y >> X,Z then lay flat; if X >> Z rotate Y
-  if (opts.preferFlat && size.y > Math.max(size.x, size.z) * 3.5) {
-    scene.traverse(o => { if (o.isMesh && !(o.userData && o.userData._isSky)) { o.rotateX(-Math.PI/2); o.updateMatrixWorld(true); }});
-  } else if (opts.preferFlat && size.x > size.z * 3.5) {
-    scene.traverse(o => { if (o.isMesh && !(o.userData && o.userData._isSky)) { o.rotateY(Math.PI/2); o.updateMatrixWorld(true); }});
-  }
-
-  // final bbox/size and optional scale to targetSize
-  box = new THREE.Box3().setFromObject(scene);
-  size = box.getSize(new THREE.Vector3());
-  const largest = Math.max(size.x, size.y, size.z);
-  if (largest > 0) {
-    const scaleFactor = opts.targetSize / largest;
-    if (isFinite(scaleFactor) && scaleFactor > 0 && scaleFactor < 10) {
-      scene.traverse(o => { if (o.isMesh && !(o.userData && o.userData._isSky)) { o.scale.multiplyScalar(scaleFactor); o.updateMatrixWorld(true); }});
-    }
-  }
-
-  // re-center after scaling
-  box = new THREE.Box3().setFromObject(scene);
-  const centerFinal = box.getCenter(new THREE.Vector3());
-  scene.traverse(o => { if (o.isMesh && !(o.userData && o.userData._isSky)) { o.position.sub(centerFinal); o.updateMatrixWorld(true); }});
-
-  // place camera: diagonal offset relative to bounding sphere
-  const bs = box.getBoundingSphere(new THREE.Sphere());
-  const radius = bs.radius || Math.max(size.x, size.y, size.z) * 0.5 || 50;
-  const cameraDistance = Math.max(radius * 1.8, 80);
-  camera.position.set(cameraDistance * 0.8, radius * 0.7, cameraDistance * 0.8);
-  camera.lookAt(new THREE.Vector3(0, (size.y * 0.25) || 0, 0));
-  camera.updateMatrixWorld(true);
-  if (camera.isPerspectiveCamera) camera.updateProjectionMatrix();
-
-  return { size: box.getSize(new THREE.Vector3()), center: box.getCenter(new THREE.Vector3()), radius, cameraDistance };
-}
-// -----------------------------
-// tryLoadLegacyCanvasRenderer() -> now uses local CPU fallback instead of fetching r110
-// -----------------------------
-async function tryLoadLegacyCanvasRenderer() {
-  try {
-    if (typeof window.SimpleCanvasRenderer === 'function') {
-      // prefer z-buffer renderer for correctness (usePainter = false)
-      window.renderer = new window.SimpleCanvasRenderer({ width: window.innerWidth, height: window.innerHeight, usePainter: false });
-      // diagnostic defaults (toggle later if you want)
-      if (window.renderer.debug) {
-        window.renderer.debug.showWireframe = false; // set false by default; enable only when diagnosing
-        window.renderer.debug.maxTriangles = 400000;
-      }
-      console.log("SimpleCanvasRenderer created (z-buffer).");
-    } else {
-      console.warn("SimpleCanvasRenderer not found, falling back to THREE.WebGLRenderer.");
-      window.renderer = new THREE.WebGLRenderer({ antialias: false });
-    }
-  } catch (err) {
-    console.error("tryLoadLegacyCanvasRenderer error — falling back to WebGLRenderer:", err);
-    window.renderer = new THREE.WebGLRenderer({ antialias: false });
-  }
-
-  // final setup: size + append
-  try {
-    if (typeof window.renderer.setSize === 'function') {
-      window.renderer.setSize(window.innerWidth, window.innerHeight);
-    }
-    const container = document.getElementById('game-container') || document.body;
-    if (window.renderer && window.renderer.domElement && !container.contains(window.renderer.domElement)) {
-      container.appendChild(window.renderer.domElement);
-    }
-  } catch (e) {
-    console.error("Error finalizing renderer setup:", e);
-  }
-}
-
-// -----------------------------
-// Updated safeRender() with reduced diagnostics spam (throttled)
-// -----------------------------
-let __lastSafeRenderDiag = 0;
-
-function isThreeScene(o) { return !!(o && o.isScene); }
-function isThreeCamera(o) { return !!(o && (o.isCamera || o.isPerspectiveCamera || o.isOrthographicCamera)); }
-
-function inspectObjectOncePerSecond(name, obj) {
-  try {
-    const now = performance.now();
-    if (now - __lastSafeRenderDiag > 1000) {
-      console.log(`${name}:`, {
-        exists: !!obj,
-        constructor: obj ? obj.constructor?.name : undefined,
-        isScene: !!(obj && obj.isScene),
-        isCamera: !!(obj && (obj.isCamera || obj.isPerspectiveCamera || obj.isOrthographicCamera)),
-        keys: obj && typeof obj === 'object' ? Object.keys(obj).slice(0,10) : undefined,
-      });
-      __lastSafeRenderDiag = now;
-    }
-  } catch (e) {
-    /* ignore diagnostics error */
-  }
-}
-
-function safeRender() {
-  try {
-    if (!window.scene || !window.camera) {
-      if (performance.now() - __lastSafeRenderDiag > 1000) {
-        console.warn("safeRender: missing scene or camera, skipping render", {
-          scenePresent: !!window.scene,
-          cameraPresent: !!window.camera
-        });
-        __lastSafeRenderDiag = performance.now();
-      }
-      return;
-    }
-
-    // Light diagnostics (throttled)
-    inspectObjectOncePerSecond('window.scene', window.scene);
-    inspectObjectOncePerSecond('window.camera', window.camera);
-    inspectObjectOncePerSecond('window.renderer', window.renderer);
-    if (window.composer && performance.now() - __lastSafeRenderDiag > 1000) {
-      console.log('window.composer detected:', {
-        hasRender: typeof window.composer.render === 'function',
-        constructor: window.composer.constructor?.name
-      });
-      __lastSafeRenderDiag = performance.now();
-    }
-
-    if (!isThreeScene(window.scene)) {
-      console.error("safeRender: window.scene is not a THREE.Scene. Aborting render to avoid crash.");
-      return;
-    }
-    if (!isThreeCamera(window.camera)) {
-      console.error("safeRender: window.camera is not a THREE.Camera. Aborting render to avoid crash.");
-      return;
-    }
-
-    const isCanvasRenderer =
-      typeof window.THREE !== "undefined" &&
-      typeof window.THREE.CanvasRenderer === "function" &&
-      window.renderer instanceof window.THREE.CanvasRenderer;
-
-    // Debugging flag: set true temporarily if you want to bypass composer and test direct renderer.render
-    const forceDirectRenderer = false;
-
-    if (isCanvasRenderer) {
-      try { window.renderer.render(window.scene, window.camera); } catch (e) { console.error("CanvasRenderer render threw:", e); }
-      return;
-    }
-
-    if (window.composer && typeof window.composer.render === "function" && !forceDirectRenderer) {
-      try {
-        window.composer.render();
-      } catch (e) {
-        console.error("composer.render() threw — falling back to direct renderer.render. Composer details:", e);
-        if (window.renderer && typeof window.renderer.render === "function") {
-          try { window.renderer.render(window.scene, window.camera); } catch (err) { console.error("Fallback renderer.render threw:", err); }
-        }
-      }
-      return;
-    }
-
-    if (window.renderer && typeof window.renderer.render === "function") {
-      try { window.renderer.render(window.scene, window.camera); } catch (e) { console.error("Renderer.render threw:", e); }
-    } else {
-      if (performance.now() - __lastSafeRenderDiag > 1000) {
-        console.warn("safeRender: no composer or renderer available to render");
-        __lastSafeRenderDiag = performance.now();
-      }
-    }
-  } catch (e) {
-    console.error("safeRender error:", e);
-    try {
-      if (performance.now() - __lastSafeRenderDiag > 1000) {
-        console.log("Final diagnostics before aborting render:");
-        inspectObjectOncePerSecond('window.scene', window.scene);
-        inspectObjectOncePerSecond('window.camera', window.camera);
-        inspectObjectOncePerSecond('window.renderer', window.renderer);
-        if (window.composer) console.log('window.composer present:', window.composer.constructor?.name, 'render fn?', typeof window.composer.render);
-        __lastSafeRenderDiag = performance.now();
-      }
-    } catch (ee) {
-      console.error("Diagnostics logging failed:", ee);
-    }
-  }
-}
-
-
 
 
 function resetWeaponPose(weaponKey, mesh) {
@@ -3622,18 +3024,6 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
