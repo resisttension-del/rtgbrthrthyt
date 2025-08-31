@@ -922,61 +922,50 @@ export async function initSceneCrocodilosConstruction() {
   }
 
   // --- Window Resize Handling ---
-function onWindowResize() {
-  const container = document.getElementById("game-container") || document.body;
-  const displayWidth  = Math.max(1, Math.floor(container.clientWidth || window.innerWidth));
-  const displayHeight = Math.max(1, Math.floor(container.clientHeight || window.innerHeight));
+  function onWindowResize() {
+    const container = document.getElementById("game-container");
+    const displayWidth  = container.clientWidth;
+    const displayHeight = container.clientHeight;
 
-  // 1) Make the renderer's internal buffer match the display size.
-  if (window.renderer && typeof window.renderer.setSize === 'function') {
-    window.renderer.setSize(displayWidth, displayHeight, false);
-  } else if (window.renderer && window.renderer.domElement) {
-    window.renderer.domElement.width = displayWidth;
-    window.renderer.domElement.height = displayHeight;
-  }
-
-  // 2) Stretch the canvas via CSS to fill the container
-  if (window.renderer && window.renderer.domElement) {
-    window.renderer.domElement.style.width  = `${displayWidth}px`;
-    window.renderer.domElement.style.height = `${displayHeight}px`;
-  }
-
-  // 3) Update camera
-  if (window.camera) {
-    if (typeof window.camera.aspect === "number") {
-      window.camera.aspect = displayWidth / displayHeight;
+    // 1) Render & post-process at fixed 1280×720
+    if (typeof renderer.setSize === 'function') {
+      renderer.setSize(FIXED_WIDTH, FIXED_HEIGHT, false);
     }
-    if (typeof window.camera.updateProjectionMatrix === "function") {
-      window.camera.updateProjectionMatrix();
+    if (composer) composer.setSize(FIXED_WIDTH, FIXED_HEIGHT);
+
+    // 2) Stretch the canvas via CSS to fill the container
+    if (renderer.domElement) {
+      renderer.domElement.style.width  = `${displayWidth}px`;
+      renderer.domElement.style.height = `${displayHeight}px`;
+    }
+
+    // 3) Update camera to match the display aspect ratio
+    window.camera.aspect = displayWidth / displayHeight;
+    window.camera.updateProjectionMatrix();
+
+    // 4) Re-attach weapon to local player (if needed)
+    if (window.weaponController && window.localPlayer && typeof getWeaponModel === 'function' && typeof attachWeaponToPlayer === 'function') {
+      const key = window.localPlayer.weapon.replace(/-/g, "").toLowerCase();
+      const proto = getWeaponModel(key);
+      if (proto) attachWeaponToPlayer(window.localPlayer.id, key);
+    }
+
+    // 5) Re-attach weapons for remote players
+    if (window.remotePlayers) {
+      Object.values(window.remotePlayers).forEach(({ currentWeapon, weaponRoot }) => {
+        if (currentWeapon && weaponRoot && typeof attachWeaponToPlayer === 'function') {
+          attachWeaponToPlayer(weaponRoot.userData.playerId, currentWeapon);
+        }
+      });
+    }
+
+    // 6) Resize HUD overlay
+    const hud = document.getElementById("hud");
+    if (hud) {
+      hud.style.width  = `${displayWidth}px`;
+      hud.style.height = `${displayHeight}px`;
     }
   }
-
-  // 4) Composer
-  if (window.composer && typeof window.composer.setSize === 'function') {
-    window.composer.setSize(displayWidth, displayHeight);
-  }
-
-  // 5) HUD overlay
-  const hud = document.getElementById("hud");
-  if (hud) {
-    hud.style.width  = `${displayWidth}px`;
-    hud.style.height = `${displayHeight}px`;
-  }
-
-  // Reattach weapons if necessary (keep your existing code here)
-  if (window.weaponController && window.localPlayer && typeof getWeaponModel === 'function' && typeof attachWeaponToPlayer === 'function') {
-    const key = (window.localPlayer.weapon || "").replace(/-/g, "").toLowerCase();
-    const proto = getWeaponModel(key);
-    if (proto) attachWeaponToPlayer(window.localPlayer.id, key);
-  }
-  if (window.remotePlayers) {
-    Object.values(window.remotePlayers).forEach(({ currentWeapon, weaponRoot }) => {
-      if (currentWeapon && weaponRoot && typeof attachWeaponToPlayer === 'function') {
-        attachWeaponToPlayer(weaponRoot.userData.playerId, currentWeapon);
-      }
-    });
-  }
-}
 
   window.addEventListener("resize", onWindowResize, false);
   onWindowResize();
@@ -1088,61 +1077,44 @@ export async function initSceneSigmaCity() {
   }
 
   // --- Window Resize Handling ---
-function onWindowResize() {
-  const container = document.getElementById("game-container") || document.body;
-  const displayWidth  = Math.max(1, Math.floor(container.clientWidth || window.innerWidth));
-  const displayHeight = Math.max(1, Math.floor(container.clientHeight || window.innerHeight));
+  function onWindowResize() {
+    const container = document.getElementById("game-container");
+    const displayWidth  = container.clientWidth;
+    const displayHeight = container.clientHeight;
 
-  // 1) Make the renderer's internal buffer match the display size.
-  if (window.renderer && typeof window.renderer.setSize === 'function') {
-    window.renderer.setSize(displayWidth, displayHeight, false);
-  } else if (window.renderer && window.renderer.domElement) {
-    window.renderer.domElement.width = displayWidth;
-    window.renderer.domElement.height = displayHeight;
-  }
-
-  // 2) Stretch the canvas via CSS to fill the container
-  if (window.renderer && window.renderer.domElement) {
-    window.renderer.domElement.style.width  = `${displayWidth}px`;
-    window.renderer.domElement.style.height = `${displayHeight}px`;
-  }
-
-  // 3) Update camera
-  if (window.camera) {
-    if (typeof window.camera.aspect === "number") {
-      window.camera.aspect = displayWidth / displayHeight;
+    if (typeof renderer.setSize === 'function') {
+      renderer.setSize(FIXED_WIDTH, FIXED_HEIGHT, false);
     }
-    if (typeof window.camera.updateProjectionMatrix === "function") {
-      window.camera.updateProjectionMatrix();
+    if (composer) composer.setSize(FIXED_WIDTH, FIXED_HEIGHT);
+
+    if (renderer.domElement) {
+      renderer.domElement.style.width  = `${displayWidth}px`;
+      renderer.domElement.style.height = `${displayHeight}px`;
+    }
+
+    window.camera.aspect = displayWidth / displayHeight;
+    window.camera.updateProjectionMatrix();
+
+    if (window.weaponController && window.localPlayer && typeof getWeaponModel === 'function' && typeof attachWeaponToPlayer === 'function') {
+      const key = window.localPlayer.weapon.replace(/-/g, "").toLowerCase();
+      const proto = getWeaponModel(key);
+      if (proto) attachWeaponToPlayer(window.localPlayer.id, key);
+    }
+
+    if (window.remotePlayers) {
+      Object.values(window.remotePlayers).forEach(({ currentWeapon, weaponRoot }) => {
+        if (currentWeapon && weaponRoot && typeof attachWeaponToPlayer === 'function') {
+          attachWeaponToPlayer(weaponRoot.userData.playerId, currentWeapon);
+        }
+      });
+    }
+
+    const hud = document.getElementById("hud");
+    if (hud) {
+      hud.style.width  = `${displayWidth}px`;
+      hud.style.height = `${displayHeight}px`;
     }
   }
-
-  // 4) Composer
-  if (window.composer && typeof window.composer.setSize === 'function') {
-    window.composer.setSize(displayWidth, displayHeight);
-  }
-
-  // 5) HUD overlay
-  const hud = document.getElementById("hud");
-  if (hud) {
-    hud.style.width  = `${displayWidth}px`;
-    hud.style.height = `${displayHeight}px`;
-  }
-
-  // Reattach weapons if necessary (keep your existing code here)
-  if (window.weaponController && window.localPlayer && typeof getWeaponModel === 'function' && typeof attachWeaponToPlayer === 'function') {
-    const key = (window.localPlayer.weapon || "").replace(/-/g, "").toLowerCase();
-    const proto = getWeaponModel(key);
-    if (proto) attachWeaponToPlayer(window.localPlayer.id, key);
-  }
-  if (window.remotePlayers) {
-    Object.values(window.remotePlayers).forEach(({ currentWeapon, weaponRoot }) => {
-      if (currentWeapon && weaponRoot && typeof attachWeaponToPlayer === 'function') {
-        attachWeaponToPlayer(weaponRoot.userData.playerId, currentWeapon);
-      }
-    });
-  }
-}
 
   window.addEventListener("resize", onWindowResize, false);
   onWindowResize();
@@ -1254,61 +1226,44 @@ export async function initSceneDiddyDunes() {
   }
 
   // --- Window Resize Handling ---
-function onWindowResize() {
-  const container = document.getElementById("game-container") || document.body;
-  const displayWidth  = Math.max(1, Math.floor(container.clientWidth || window.innerWidth));
-  const displayHeight = Math.max(1, Math.floor(container.clientHeight || window.innerHeight));
+  function onWindowResize() {
+    const container = document.getElementById("game-container");
+    const displayWidth  = container.clientWidth;
+    const displayHeight = container.clientHeight;
 
-  // 1) Make the renderer's internal buffer match the display size.
-  if (window.renderer && typeof window.renderer.setSize === 'function') {
-    window.renderer.setSize(displayWidth, displayHeight, false);
-  } else if (window.renderer && window.renderer.domElement) {
-    window.renderer.domElement.width = displayWidth;
-    window.renderer.domElement.height = displayHeight;
-  }
-
-  // 2) Stretch the canvas via CSS to fill the container
-  if (window.renderer && window.renderer.domElement) {
-    window.renderer.domElement.style.width  = `${displayWidth}px`;
-    window.renderer.domElement.style.height = `${displayHeight}px`;
-  }
-
-  // 3) Update camera
-  if (window.camera) {
-    if (typeof window.camera.aspect === "number") {
-      window.camera.aspect = displayWidth / displayHeight;
+    if (typeof renderer.setSize === 'function') {
+      renderer.setSize(FIXED_WIDTH, FIXED_HEIGHT, false);
     }
-    if (typeof window.camera.updateProjectionMatrix === "function") {
-      window.camera.updateProjectionMatrix();
+    if (composer) composer.setSize(FIXED_WIDTH, FIXED_HEIGHT);
+
+    if (renderer.domElement) {
+      renderer.domElement.style.width  = `${displayWidth}px`;
+      renderer.domElement.style.height = `${displayHeight}px`;
+    }
+
+    window.camera.aspect = displayWidth / displayHeight;
+    window.camera.updateProjectionMatrix();
+
+    if (window.weaponController && window.localPlayer && typeof getWeaponModel === 'function' && typeof attachWeaponToPlayer === 'function') {
+      const key = window.localPlayer.weapon.replace(/-/g, "").toLowerCase();
+      const proto = getWeaponModel(key);
+      if (proto) attachWeaponToPlayer(window.localPlayer.id, key);
+    }
+
+    if (window.remotePlayers) {
+      Object.values(window.remotePlayers).forEach(({ currentWeapon, weaponRoot }) => {
+        if (currentWeapon && weaponRoot && typeof attachWeaponToPlayer === 'function') {
+          attachWeaponToPlayer(weaponRoot.userData.playerId, currentWeapon);
+        }
+      });
+    }
+
+    const hud = document.getElementById("hud");
+    if (hud) {
+      hud.style.width  = `${displayWidth}px`;
+      hud.style.height = `${displayHeight}px`;
     }
   }
-
-  // 4) Composer
-  if (window.composer && typeof window.composer.setSize === 'function') {
-    window.composer.setSize(displayWidth, displayHeight);
-  }
-
-  // 5) HUD overlay
-  const hud = document.getElementById("hud");
-  if (hud) {
-    hud.style.width  = `${displayWidth}px`;
-    hud.style.height = `${displayHeight}px`;
-  }
-
-  // Reattach weapons if necessary (keep your existing code here)
-  if (window.weaponController && window.localPlayer && typeof getWeaponModel === 'function' && typeof attachWeaponToPlayer === 'function') {
-    const key = (window.localPlayer.weapon || "").replace(/-/g, "").toLowerCase();
-    const proto = getWeaponModel(key);
-    if (proto) attachWeaponToPlayer(window.localPlayer.id, key);
-  }
-  if (window.remotePlayers) {
-    Object.values(window.remotePlayers).forEach(({ currentWeapon, weaponRoot }) => {
-      if (currentWeapon && weaponRoot && typeof attachWeaponToPlayer === 'function') {
-        attachWeaponToPlayer(weaponRoot.userData.playerId, currentWeapon);
-      }
-    });
-  }
-}
 
   window.addEventListener("resize", onWindowResize, false);
   onWindowResize();
@@ -2288,41 +2243,43 @@ function round2(n) {
 // animate() (unchanged game logic, with better guards)
 // -----------------------------
 export function animate(timestamp) {
-  // request next frame first
+  // Schedule the next frame *first*. This ensures the loop continues
+  // even if an error occurs later in this frame.
   requestAnimationFrame(animate);
 
-  // guard: make timestamp robust
-  if (typeof timestamp !== "number") timestamp = performance.now();
-
   // --- Disconnection/Pause Logic ---
-  // If we don't yet have a player or the game is paused we still want to render
-  const shouldSkipUpdates = (localPlayerId === null) || !!window.isGamePaused;
+  if (localPlayerId === null || window.isGamePaused) {
+    return;
+  }
 
   // --- Frame Throttling (60fps) ---
   const FRAME_INTERVAL = 1000 / 60; // ≈16.67ms
-  if (!animate.lastTime) animate.lastTime = timestamp;
-  let deltaMs = timestamp - animate.lastTime;
-  if (deltaMs < FRAME_INTERVAL) {
-    // too early; still keep the loop alive but draw nothing new
-    // do not advance lastTime so timing stays stable
-    return;
+  if (!animate.lastTime) {
+    animate.lastTime = timestamp; // Initialize for the first frame
   }
-  // carry over remainder to keep timing stable
+  const deltaMs = timestamp - animate.lastTime;
+
+  if (deltaMs < FRAME_INTERVAL) {
+    return; // Too early, skip this frame
+  }
+  // Carry over any "extra" time for smoother timing
   animate.lastTime = timestamp - (deltaMs % FRAME_INTERVAL);
-  // convert to seconds
+
+  // Convert to seconds for game logic
   const delta = deltaMs / 1000;
 
-  // If controllers or map/player not ready we still should render scene so the user sees the environment / loading UI
-  if (!physicsController || !weaponController || !window.mapReady || !window.localPlayer) {
-    // small diagnostic log (throttled in safeRender)
-    safeRender();
+  // --- Pre-animation checks ---
+  if (!physicsController || !weaponController) {
+    console.warn("Skipping animate(): controllers not yet initialized");
+    postFrameCleanup(); // Clean up even if controllers aren't ready
+    return;
+  }
+  if (!window.mapReady) {
     postFrameCleanup();
     return;
   }
-
-  // If disconnected or paused, render but skip game update logic
-  if (shouldSkipUpdates) {
-    safeRender();
+  if (!window.localPlayer) {
+    console.warn("Skipping animate(): window.localPlayer is not initialized.");
     postFrameCleanup();
     return;
   }
@@ -2333,6 +2290,7 @@ export function animate(timestamp) {
       const cross = document.getElementById("crosshair");
       if (cross) cross.style.display = "none";
 
+      // Ensure death-related sounds are playing and others are paused
       if (windSound && !windSound.paused) windSound.pause();
       if (forestNoise && !forestNoise.paused) forestNoise.pause();
       if (dessertWindSound && !dessertWindSound.paused) dessertWindSound.pause();
@@ -2341,18 +2299,26 @@ export function animate(timestamp) {
         deathTheme.play().catch(e => console.error("Error playing death theme:", e));
       }
 
+      // Show death overlays
       if (fadeOverlay) {
         fadeOverlay.style.pointerEvents = "auto";
         fadeOverlay.style.opacity = "1";
       }
       if (respawnOverlay) respawnOverlay.style.display = "flex";
 
+      // use safeRender instead of composer.render()
       safeRender();
       postFrameCleanup();
-      return;
+      return; // Exit early if player is dead
     } else {
-      if (fadeOverlay && fadeOverlay.style.opacity !== "0") hideFadeOverlay();
-      if (respawnOverlay && respawnOverlay.style.display !== "none") hideRespawn();
+
+      if (fadeOverlay && fadeOverlay.style.opacity !== "0") {
+        hideFadeOverlay();
+      }
+      if (respawnOverlay && respawnOverlay.style.display !== "none") {
+        hideRespawn();
+      }
+
       const cross = document.getElementById("crosshair");
       if (cross) cross.style.display = "block";
     }
@@ -2407,6 +2373,7 @@ export function animate(timestamp) {
     for (let i = activeTracers.length - 1; i >= 0; i--) {
       const tracer = activeTracers[i];
       tracer.update(delta);
+
       if (tracer.remove) {
         tracer.dispose();
         activeTracers.splice(i, 1);
@@ -2531,21 +2498,17 @@ class SimpleCanvasRenderer {
     this.domElement = this.canvas;
     this.clearColor = opts.clearColor || '#000000';
     this.autoClear = opts.autoClear !== undefined ? opts.autoClear : true;
-
-    // Use painter's algorithm by default for performance; set to false to force z-buffer raster.
     this.usePainter = opts.usePainter !== undefined ? opts.usePainter : true;
 
-    // sizes
     this.setSize(opts.width || window.innerWidth, opts.height || window.innerHeight);
 
-    // reusable temporaries to avoid per-triangle allocations
+    // temporaries
     this._vA = new THREE.Vector3();
     this._vB = new THREE.Vector3();
     this._vC = new THREE.Vector3();
     this._wA = new THREE.Vector3();
     this._wB = new THREE.Vector3();
     this._wC = new THREE.Vector3();
-
     this._e1 = new THREE.Vector3();
     this._e2 = new THREE.Vector3();
     this._faceNormal = new THREE.Vector3();
@@ -2560,10 +2523,15 @@ class SimpleCanvasRenderer {
     this._viewProj = new THREE.Matrix4();
     this._worldMatrix = new THREE.Matrix4();
 
-    // lighting
     this.lightDir = new THREE.Vector3(0.5, 0.8, 0.2).normalize();
     this.ambientFactor = 0.22;
     this.diffuseFactor = 0.78;
+
+    // debugging hook
+    this.debug = {
+      showWireframe: false,
+      maxTriangles: 200000 // safety cap
+    };
   }
 
   setSize(w, h) {
@@ -2599,41 +2567,39 @@ class SimpleCanvasRenderer {
     }
   }
 
-  // core render
+  // ---- improved render ----
   render(scene, camera) {
     try {
       if (!scene || !camera) return;
 
-      // prepare matrices
+      // matrices
       camera.updateMatrixWorld(true);
       camera.updateProjectionMatrix();
-      this._viewMatrix.copy(camera.matrixWorld).invert();
+      this._viewMatrix.copy(camera.matrixWorld).invert(); // world -> camera
       this._viewProj.multiplyMatrices(camera.projectionMatrix, this._viewMatrix);
 
       const w = this.width, h = this.height;
-
-      // allocate ImageData once per-frame
       const imageData = this.ctx.createImageData(w, h);
       if (this.autoClear) this._clearToBackground(scene, imageData);
 
-      // get camera world pos
+      // camera world pos (for centroid distance sort)
       const camPos = new THREE.Vector3();
       camera.getWorldPosition(camPos);
 
-      // collect triangles (minimal allocations, numbers instead of objects where possible)
+      // gather triangles
       const triangles = [];
-
-      const addTriangle = (sx0, sy0, sz0, sx1, sy1, sz1, sx2, sy2, sz2, colorArr, depthAvg) => {
+      const addTriangle = (sx0, sy0, sz0, sx1, sy1, sz1, sx2, sy2, sz2, colorArr, depthMetric, viewZ0, viewZ1, viewZ2) => {
+        if (triangles.length >= this.debug.maxTriangles) return;
         triangles.push({
           sx0, sy0, sz0,
           sx1, sy1, sz1,
           sx2, sy2, sz2,
           colorArr,
-          depthAvg
+          depthMetric,     // used for painter sorting (centroid distance sq)
+          viewZ0, viewZ1, viewZ2 // used for z-buffer (view-space z)
         });
       };
 
-      // traverse scene
       scene.traverse(obj => {
         if (!obj.visible || !obj.isMesh) return;
         const mesh = obj;
@@ -2646,10 +2612,12 @@ class SimpleCanvasRenderer {
         // positions & indices
         let positions = null;
         let indices = null;
+        let itemSize = 3;
         if (geometry.isBufferGeometry) {
           const posAttr = geometry.attributes.position;
           if (!posAttr) return;
           positions = posAttr.array;
+          itemSize = posAttr.itemSize || 3;
           if (geometry.index) indices = geometry.index.array;
         } else if (geometry.isGeometry) {
           positions = new Float32Array(geometry.vertices.length * 3);
@@ -2664,18 +2632,19 @@ class SimpleCanvasRenderer {
             indices[i * 3 + 1] = geometry.faces[i].b;
             indices[i * 3 + 2] = geometry.faces[i].c;
           }
+          itemSize = 3;
         } else {
           return;
         }
 
         const getVertex = (idx, outVec3) => {
-          const i3 = idx * 3;
+          const i3 = idx * itemSize;
           outVec3.set(positions[i3], positions[i3 + 1], positions[i3 + 2]);
         };
 
-        const triCount = indices ? (indices.length / 3) : (positions.length / 9);
+        const triCount = indices ? (indices.length / 3) : (positions.length / (itemSize * 3));
 
-        // material
+        // material color fallback
         const mat = Array.isArray(mesh.material) ? mesh.material[0] : mesh.material;
         let baseColor = new THREE.Color(0x888888);
         if (mat) {
@@ -2695,42 +2664,41 @@ class SimpleCanvasRenderer {
             cIdx = t * 3 + 2;
           }
 
-          // object-space vertices
+          // object-space -> world
           getVertex(aIdx, this._vA);
           getVertex(bIdx, this._vB);
           getVertex(cIdx, this._vC);
 
-          // transform to world (reuse vectors)
           this._wA.copy(this._vA).applyMatrix4(this._worldMatrix);
           this._wB.copy(this._vB).applyMatrix4(this._worldMatrix);
           this._wC.copy(this._vC).applyMatrix4(this._worldMatrix);
 
-          // face normal (reused)
+          // face normal (world space)
           this._e1.subVectors(this._wB, this._wA);
           this._e2.subVectors(this._wC, this._wA);
           this._faceNormal.crossVectors(this._e1, this._e2);
-          // degenerate tri guard
           if (this._faceNormal.lengthSq() < 1e-12) continue;
           this._faceNormal.normalize();
 
-          // centroid
+          // centroid (world space)
           this._centroid.copy(this._wA).add(this._wB).add(this._wC).multiplyScalar(1 / 3);
 
-          // culling based on material side
+          // material side culling
           this._viewVec.subVectors(camPos, this._centroid);
           const frontFacing = this._faceNormal.dot(this._viewVec) > 0;
           const side = mat && mat.side !== undefined ? mat.side : THREE.FrontSide;
           if (side === THREE.FrontSide && !frontFacing) continue;
           if (side === THREE.BackSide && frontFacing) continue;
+          // DoubleSide: no culling
 
-          // project to clip
+          // project to clip (NDC)
           const clipA = this._clipA.set(this._wA.x, this._wA.y, this._wA.z, 1).applyMatrix4(this._viewProj);
           const clipB = this._clipB.set(this._wB.x, this._wB.y, this._wB.z, 1).applyMatrix4(this._viewProj);
           const clipC = this._clipC.set(this._wC.x, this._wC.y, this._wC.z, 1).applyMatrix4(this._viewProj);
 
           if (Math.abs(clipA.w) < 1e-9 || Math.abs(clipB.w) < 1e-9 || Math.abs(clipC.w) < 1e-9) continue;
 
-          // NDC
+          // NDC coords
           const ndcAx = clipA.x / clipA.w, ndcAy = clipA.y / clipA.w, ndcAz = clipA.z / clipA.w;
           const ndcBx = clipB.x / clipB.w, ndcBy = clipB.y / clipB.w, ndcBz = clipB.z / clipB.w;
           const ndcCx = clipC.x / clipC.w, ndcCy = clipC.y / clipC.w, ndcCz = clipC.z / clipC.w;
@@ -2753,7 +2721,7 @@ class SimpleCanvasRenderer {
           const sCx = ndcCx * this.halfWidth + this.halfWidth;
           const sCy = -ndcCy * this.halfHeight + this.halfHeight;
 
-          // shading (flat)
+          // shading
           const lambert = Math.max(0, this._faceNormal.dot(this.lightDir));
           const shade = this.ambientFactor + this.diffuseFactor * lambert;
           const rr = Math.min(1, baseColor.r * shade);
@@ -2761,43 +2729,66 @@ class SimpleCanvasRenderer {
           const bb = Math.min(1, baseColor.b * shade);
           const colorArr = [Math.round(rr * 255), Math.round(gg * 255), Math.round(bb * 255)];
 
-          const depthAvg = (ndcAz + ndcBz + ndcCz) / 3;
+          // Use centroid distance squared (world-space) as robust painter depth metric
+          const depthMetric = camPos.distanceToSquared(this._centroid);
 
-          addTriangle(sAx, sAy, ndcAz, sBx, sBy, ndcBz, sCx, sCy, ndcCz, colorArr, depthAvg);
+          // For z-buffer path: compute view-space z for each vertex (transform world->camera)
+          const vA_view = this._wA.clone().applyMatrix4(this._viewMatrix);
+          const vB_view = this._wB.clone().applyMatrix4(this._viewMatrix);
+          const vC_view = this._wC.clone().applyMatrix4(this._viewMatrix);
+          const viewZ0 = vA_view.z, viewZ1 = vB_view.z, viewZ2 = vC_view.z;
+
+          addTriangle(sAx, sAy, ndcAz, sBx, sBy, ndcBz, sCx, sCy, ndcCz, colorArr, depthMetric, viewZ0, viewZ1, viewZ2);
         } // tri loop
       }); // traverse
 
-      // If no triangles, just blit background
+      // if no triangles, blit background and return
       if (triangles.length === 0) {
         this.ctx.putImageData(imageData, 0, 0);
         return;
       }
 
-      // Choose painter's algorithm (fast) or z-buffer (slower but exact)
+      // Painter's algorithm: sort far -> near using centroid distance
       if (this.usePainter) {
-        // draw triangles back-to-front
-        triangles.sort((a, b) => b.depthAvg - a.depthAvg); // far -> near (ndc: larger z is farther)
-        const ctx = this.ctx;
-        // optional: clear canvas to background pixels (we already populated imageData)
-        ctx.putImageData(imageData, 0, 0);
+        triangles.sort((a, b) => b.depthMetric - a.depthMetric); // far (large distance) first
 
-        // draw using 2D canvas polygon fill (native optimized)
-        for (let i = 0; i < triangles.length; i++) {
-          const tri = triangles[i];
-          ctx.beginPath();
-          ctx.moveTo(tri.sx0, tri.sy0);
-          ctx.lineTo(tri.sx1, tri.sy1);
-          ctx.lineTo(tri.sx2, tri.sy2);
-          ctx.closePath();
-          ctx.fillStyle = `rgb(${tri.colorArr[0]},${tri.colorArr[1]},${tri.colorArr[2]})`;
-          ctx.fill();
+        // draw background
+        this.ctx.putImageData(imageData, 0, 0);
+
+        // optionally draw wireframe overlay for debugging
+        const ctx = this.ctx;
+        if (this.debug.showWireframe) {
+          ctx.save();
+          ctx.lineWidth = 0.5;
+          for (let i = 0; i < triangles.length; i++) {
+            const tri = triangles[i];
+            ctx.beginPath();
+            ctx.moveTo(tri.sx0, tri.sy0);
+            ctx.lineTo(tri.sx1, tri.sy1);
+            ctx.lineTo(tri.sx2, tri.sy2);
+            ctx.closePath();
+            ctx.strokeStyle = `rgba(0,0,0,0.08)`;
+            ctx.stroke();
+            ctx.fillStyle = `rgb(${tri.colorArr[0]},${tri.colorArr[1]},${tri.colorArr[2]})`;
+            ctx.fill();
+          }
+          ctx.restore();
+        } else {
+          for (let i = 0; i < triangles.length; i++) {
+            const tri = triangles[i];
+            ctx.beginPath();
+            ctx.moveTo(tri.sx0, tri.sy0);
+            ctx.lineTo(tri.sx1, tri.sy1);
+            ctx.lineTo(tri.sx2, tri.sy2);
+            ctx.closePath();
+            ctx.fillStyle = `rgb(${tri.colorArr[0]},${tri.colorArr[1]},${tri.colorArr[2]})`;
+            ctx.fill();
+          }
         }
         return;
       }
 
-      // ----------------------
-      // Z-buffer raster (legacy, slower)
-      // ----------------------
+      // Z-buffer raster (slower, uses view-space z for correct ordering)
       const zBuffer = new Float32Array(w * h);
       for (let i = 0; i < zBuffer.length; i++) zBuffer[i] = Infinity;
       const data = imageData.data;
@@ -2831,10 +2822,14 @@ class SimpleCanvasRenderer {
             const w2 = edge(p0x, p0y, p1x, p1y, px, py) / denom;
             if (w0 < -1e-6 || w1 < -1e-6 || w2 < -1e-6) continue;
 
-            const z = w0 * tri.sz0 + w1 * tri.sz1 + w2 * tri.sz2;
+            // Interpolate view-space Z using the stored viewZs (these are camera-space z's).
+            const viewZ = w0 * tri.viewZ0 + w1 * tri.viewZ1 + w2 * tri.viewZ2;
+            // Use viewZ directly as depth (remember camera-space z is negative in front of camera).
+            // We'll convert to a monotonic value for zBuffer comparison:
+            const depthValue = -viewZ; // larger depthValue == farther away (positive)
             const idx = y * w + x;
-            if (z < zBuffer[idx]) {
-              zBuffer[idx] = z;
+            if (depthValue < zBuffer[idx]) {
+              zBuffer[idx] = depthValue;
               const di = idx * 4;
               data[di] = tri.colorArr[0];
               data[di + 1] = tri.colorArr[1];
@@ -2845,7 +2840,6 @@ class SimpleCanvasRenderer {
         }
       }
 
-      // blit final pixels
       this.ctx.putImageData(imageData, 0, 0);
 
     } catch (e) {
@@ -2862,13 +2856,12 @@ window.SimpleCanvasRenderer = SimpleCanvasRenderer;
 // -----------------------------
 async function tryLoadLegacyCanvasRenderer() {
   try {
+    // If you have packed SimpleCanvasRenderer locally (above) use it.
     if (typeof window.SimpleCanvasRenderer === 'function') {
-      // create using display size first; internal buffer will be set to same values
-      const w = window.innerWidth || 1280;
-      const h = window.innerHeight || 720;
-      window.renderer = new window.SimpleCanvasRenderer({ width: w, height: h });
+      window.renderer = new window.SimpleCanvasRenderer({ width: window.innerWidth, height: window.innerHeight });
       console.log("SimpleCanvasRenderer (local CPU fallback) created.");
     } else {
+      // Fallback: create WebGLRenderer as last resort
       console.warn("SimpleCanvasRenderer not found, using WebGLRenderer fallback.");
       window.renderer = new THREE.WebGLRenderer({ antialias: false });
     }
@@ -2877,34 +2870,16 @@ async function tryLoadLegacyCanvasRenderer() {
     window.renderer = new THREE.WebGLRenderer({ antialias: false });
   }
 
-  // ensure size / domElement appended - append only to #game-container if present
+  // ensure size / domElement appended
   try {
     if (typeof window.renderer.setSize === 'function') {
-      // set internal buffer to initial window size
-      window.renderer.setSize(window.innerWidth || 1280, window.innerHeight || 720);
-    } else if (window.renderer && 'canvas' in window.renderer && window.renderer.canvas.setAttribute) {
-      // fallback for weird renderer shapes
-      window.renderer.canvas.width = window.innerWidth || 1280;
-      window.renderer.canvas.height = window.innerHeight || 720;
+      window.renderer.setSize(window.innerWidth, window.innerHeight);
     }
-
-    const container = document.getElementById("game-container") || document.body;
     if (window.renderer && window.renderer.domElement) {
       // avoid multiple appends
-      if (!container.contains(window.renderer.domElement)) {
-        container.appendChild(window.renderer.domElement);
-      } else {
-        // ensure correct parent: if it's in body but a #game-container exists, move it
-        if (container !== document.body && document.body.contains(window.renderer.domElement) && !container.contains(window.renderer.domElement)) {
-          document.body.removeChild(window.renderer.domElement);
-          container.appendChild(window.renderer.domElement);
-        }
+      if (!document.body.contains(window.renderer.domElement)) {
+        document.body.appendChild(window.renderer.domElement);
       }
-      // make sure canvas fills CSS area
-      window.renderer.domElement.style.display = 'block';
-      window.renderer.domElement.style.position = 'relative';
-      window.renderer.domElement.style.width = '100%';
-      window.renderer.domElement.style.height = '100%';
     } else {
       console.warn("Renderer created but no domElement found.");
     }
@@ -2939,27 +2914,6 @@ function inspectObjectOncePerSecond(name, obj) {
   }
 }
 
-function ensureRendererSizeMatchesDisplay(renderer) {
-  // Try to keep internal canvas buffer in sync with visual size. Only touch if renderer exposes setSize.
-  try {
-    const container = document.getElementById("game-container") || document.body;
-    const displayWidth = Math.max(1, Math.floor(container.clientWidth || window.innerWidth));
-    const displayHeight = Math.max(1, Math.floor(container.clientHeight || window.innerHeight));
-    if (renderer && typeof renderer.setSize === "function") {
-      // Use same pixel buffer as display for crisp CPU rendering
-      renderer.setSize(displayWidth, displayHeight, false);
-      // If composer exists, it will need resizing by callers (we keep composer resizing where it exists)
-    } else if (renderer && renderer.domElement && renderer.domElement.width !== displayWidth) {
-      renderer.domElement.width = displayWidth;
-      renderer.domElement.height = displayHeight;
-      renderer.domElement.style.width = displayWidth + "px";
-      renderer.domElement.style.height = displayHeight + "px";
-    }
-  } catch (e) {
-    // ignore sizing errors
-  }
-}
-
 function safeRender() {
   try {
     if (!window.scene || !window.camera) {
@@ -2977,6 +2931,13 @@ function safeRender() {
     inspectObjectOncePerSecond('window.scene', window.scene);
     inspectObjectOncePerSecond('window.camera', window.camera);
     inspectObjectOncePerSecond('window.renderer', window.renderer);
+    if (window.composer && performance.now() - __lastSafeRenderDiag > 1000) {
+      console.log('window.composer detected:', {
+        hasRender: typeof window.composer.render === 'function',
+        constructor: window.composer.constructor?.name
+      });
+      __lastSafeRenderDiag = performance.now();
+    }
 
     if (!isThreeScene(window.scene)) {
       console.error("safeRender: window.scene is not a THREE.Scene. Aborting render to avoid crash.");
@@ -2987,28 +2948,33 @@ function safeRender() {
       return;
     }
 
-    // if we have the CPU fallback, ensure buffer size matches CSS display size
-    if (window.renderer && window.renderer.domElement && window.SimpleCanvasRenderer && window.renderer instanceof window.SimpleCanvasRenderer) {
-      ensureRendererSizeMatchesDisplay(window.renderer);
+    const isCanvasRenderer =
+      typeof window.THREE !== "undefined" &&
+      typeof window.THREE.CanvasRenderer === "function" &&
+      window.renderer instanceof window.THREE.CanvasRenderer;
+
+    // Debugging flag: set true temporarily if you want to bypass composer and test direct renderer.render
+    const forceDirectRenderer = false;
+
+    if (isCanvasRenderer) {
+      try { window.renderer.render(window.scene, window.camera); } catch (e) { console.error("CanvasRenderer render threw:", e); }
+      return;
     }
 
-    // prefer composer if available and configured
-    if (window.composer && typeof window.composer.render === "function") {
+    if (window.composer && typeof window.composer.render === "function" && !forceDirectRenderer) {
       try {
         window.composer.render();
-        return;
       } catch (e) {
-        console.error("composer.render() threw — falling back to direct renderer.render.", e);
-        // fall through to direct render
+        console.error("composer.render() threw — falling back to direct renderer.render. Composer details:", e);
+        if (window.renderer && typeof window.renderer.render === "function") {
+          try { window.renderer.render(window.scene, window.camera); } catch (err) { console.error("Fallback renderer.render threw:", err); }
+        }
       }
+      return;
     }
 
     if (window.renderer && typeof window.renderer.render === "function") {
-      try {
-        window.renderer.render(window.scene, window.camera);
-      } catch (e) {
-        console.error("Renderer.render threw:", e);
-      }
+      try { window.renderer.render(window.scene, window.camera); } catch (e) { console.error("Renderer.render threw:", e); }
     } else {
       if (performance.now() - __lastSafeRenderDiag > 1000) {
         console.warn("safeRender: no composer or renderer available to render");
@@ -3620,8 +3586,6 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
-
-
 
 
 
