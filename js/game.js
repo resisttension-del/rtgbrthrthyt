@@ -849,7 +849,7 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
       fillQuads: true,            // fill quads (set false to only stroke)
 
       // new options:
-      maxVerticesPerGeometry: 100,        // extra safety cap when scanning vertex lists
+      maxVerticesPerGeometry: 10000,        // extra safety cap when scanning vertex lists
       isolatedConnect: true,                // enable connecting isolated vertices to nearest neighbor
       isolatedConnectMaxPerGeom: 200,       // maximum isolated connections to create per geometry
       isolatedConnectMaxDistance: Infinity, // maximum distance (in local space) to connect an isolated vertex
@@ -3531,6 +3531,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
