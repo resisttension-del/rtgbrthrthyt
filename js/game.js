@@ -2376,7 +2376,7 @@ export function animate(timestamp) {
         }
 
         // Render the scene
-        composer.render();
+        renderer.render();
     } catch (err) {
         console.error("Error in animate:", err);
     } finally {
@@ -2970,6 +2970,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
