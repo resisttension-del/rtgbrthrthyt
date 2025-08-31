@@ -2356,7 +2356,7 @@ export function animate(timestamp) {
         }
 
         // Render the scene using safeRender()
-          window.renderer.render(scene, camera);
+          safeRender();
     } catch (err) {
         console.error("Error in animate:", err);
     } finally {
@@ -3014,6 +3014,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
