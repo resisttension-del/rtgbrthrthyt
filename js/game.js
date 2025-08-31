@@ -819,12 +819,14 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
   canvas.height = height;
   const ctx = canvas.getContext('2d');
 
-  // scratch helpers
+  // scratch vars
   const proj = new THREE.Vector3();
   const tmpPos = new THREE.Vector3();
   const tmpVec = new THREE.Vector3();
   const tmpMat = new THREE.Matrix4();
+  const tmpMat2 = new THREE.Matrix4();
 
+  // API + options
   const api = {
     domElement: canvas,
     setSize(w, h, updateStyle = true) {
@@ -836,36 +838,41 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
       }
     },
 
-    setClearColor(hex, alpha = 1) {
-      api._clearColor = { hex, alpha };
-    },
+    setClearColor(hex, alpha = 1) { api._clearColor = { hex, alpha }; },
     _clearColor: { hex: 0x000000, alpha: 1 },
 
-    // controls for vertex-box rendering
+    // quad detection / perf options
     options: {
-      useVertexBoxes: true,          // global default: render vertex boxes for meshes when possible
-      vertexSampleCap: 2000,         // max vertex boxes per object (sampling cap)
-      vertexBaseSizePx: 6,           // default box size in px (scaled with distance)
-      maxScreenSizePx: 2048          // clamp extreme screen sizes
+      detectQuads: true,           // enable quad detection
+      maxQuadsPerObject: 5000,    // cap quads processed per object (tweak for perf)
+      projectSkipBehind: true,    // skip quads fully behind near/far clip
+      fillQuads: true             // fill quads (set false to only stroke)
     },
-    setOptions(opts = {}) { Object.assign(api.options, opts); },
+    setOptions(o = {}) { Object.assign(api.options, o); },
 
-    // max render distance (world units)
+    // distance culling
     setMaxRenderDistance(d) { api._maxRenderDistance = Number.isFinite(d) ? d : Infinity; },
     _maxRenderDistance: Infinity,
 
+    // internal helper: project 3D world pos to screen (returns {x,y,z} or null if clipping)
+    _projectToScreen(worldVec, camera) {
+      proj.copy(worldVec).project(camera);
+      // z outside clip range -> consider clipped
+      if (proj.z > 1 || proj.z < -1) return null;
+      return { x: (proj.x * 0.5 + 0.5) * canvas.width, y: (-proj.y * 0.5 + 0.5) * canvas.height, z: proj.z };
+    },
+
     render(scene, camera) {
-      // prepare frustum
       camera.updateMatrixWorld && camera.updateMatrixWorld();
+
+      // prepare frustum for quick culling
       const projScreenMatrix = new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
       const frustum = new THREE.Frustum();
       frustum.setFromProjectionMatrix(projScreenMatrix);
 
-      // clear canvas
+      // clear
       const c = api._clearColor;
-      const r = (c.hex >> 16) & 0xff;
-      const g = (c.hex >> 8) & 0xff;
-      const b = c.hex & 0xff;
+      const r = (c.hex >> 16) & 0xff, g = (c.hex >> 8) & 0xff, b = c.hex & 0xff;
       ctx.save();
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.fillStyle = `rgba(${r},${g},${b},${c.alpha})`;
@@ -874,122 +881,251 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
 
       const drawables = [];
 
-      // helper: project a world-space vector to screen (returns null if behind clip)
-      function projectToScreen(v) {
-        proj.copy(v).project(camera);
-        if (proj.z > 1 || proj.z < -1) return null;
-        return {
-          x: (proj.x * 0.5 + 0.5) * canvas.width,
-          y: (-proj.y * 0.5 + 0.5) * canvas.height,
-          z: proj.z,
-        };
-      }
+      // Build triangle / edge adjacency for geometry once per geometry and cache it.
+      function buildQuadCacheForGeometry(geom) {
+        if (!geom || !geom.attributes || !geom.attributes.position) return null;
+        if (geom._quadCache) return geom._quadCache; // reuse if present
 
-      // sample vertex positions for a geometry (returns array of THREE.Vector3 world-space)
-      function sampleVertexWorldPoints(geom, worldMatrix, sampleLimit) {
-        const pts = [];
-        if (!geom || !geom.attributes || !geom.attributes.position) return pts;
         const posAttr = geom.attributes.position;
-        const count = posAttr.count;
-        if (count === 0) return pts;
+        const idxAttr = geom.index;
+        const triIndices = []; // array of triangles [a,b,c]
 
-        // sampling step
-        const cap = Math.max(1, Math.floor(sampleLimit || api.options.vertexSampleCap));
-        const step = Math.max(1, Math.floor(count / Math.min(count, cap)));
-
-        for (let i = 0, taken = 0; i < count && taken < cap; i += step, taken++) {
-          tmpVec.set(posAttr.getX(i), posAttr.getY(i), posAttr.getZ(i)).applyMatrix4(worldMatrix);
-          pts.push(tmpVec.clone());
+        if (idxAttr && idxAttr.count >= 3) {
+          const ia = idxAttr.array;
+          for (let i = 0; i < ia.length; i += 3) {
+            triIndices.push([ia[i], ia[i + 1], ia[i + 2]]);
+          }
+        } else {
+          // non-indexed: sequential triangles
+          for (let i = 0; i + 2 < posAttr.count; i += 3) {
+            triIndices.push([i, i + 1, i + 2]);
+          }
         }
-        return pts;
+
+        // edge -> triangles map
+        const edgeMap = Object.create(null);
+        function edgeKey(a, b) { return a < b ? `${a}_${b}` : `${b}_${a}`; }
+
+        for (let t = 0; t < triIndices.length; t++) {
+          const tri = triIndices[t];
+          const [a, b, c] = tri;
+          const edges = [[a, b], [b, c], [c, a]];
+          for (let e of edges) {
+            const k = edgeKey(e[0], e[1]);
+            if (!edgeMap[k]) edgeMap[k] = [];
+            edgeMap[k].push(t);
+          }
+        }
+
+        // find quads: an edge with exactly two adjacent triangles -> union vertices of those two triangles may form a quad
+        const quadSet = new Set(); // unique by sorted vertex indices
+        const quads = []; // store as [i0,i1,i2,i3] (indices into position attribute)
+        for (const k in edgeMap) {
+          const tris = edgeMap[k];
+          if (tris.length !== 2) continue; // only shared-edge triangles
+          const tA = triIndices[tris[0]];
+          const tB = triIndices[tris[1]];
+          // union vertices
+          const s = new Set([...tA, ...tB]);
+          if (s.size !== 4) continue; // not a quad (could be bowtie or shared vertex)
+          const arr = Array.from(s).sort((x, y) => x - y);
+          const key = arr.join(',');
+          if (quadSet.has(key)) continue;
+          quadSet.add(key);
+          quads.push(arr); // store the 4 vertex indices
+        }
+
+        const cache = { quads, triCount: triIndices.length };
+        geom._quadCache = cache;
+        return cache;
       }
 
-      // scene traverse: collect vertex-box drawables (no triangles anywhere)
+      // For each object, collect quads (or fallback behavior) into drawables
       scene.traverse((obj) => {
         if (!obj.visible) return;
         if (obj.isCamera || obj.isLight) return;
 
-        // compute object/world center and quick distance cull
+        // quick world center cull
         obj.getWorldPosition(tmpPos);
         const center = tmpPos.clone();
-        const distToCenter = camera.position.distanceTo(center);
-        if (distToCenter > (obj.userData?.maxRenderDistance ?? api._maxRenderDistance) && !obj.userData?.alwaysRender) return;
+        const distCenter = camera.position.distanceTo(center);
+        if (distCenter > (obj.userData?.maxRenderDistance ?? api._maxRenderDistance) && !obj.userData?.alwaysRender) return;
 
-        // surface color / alpha
         const color = obj.userData?.color || (obj.material && obj.material.color ? (obj.material.color.getStyle ? obj.material.color.getStyle() : `#${obj.material.color.getHexString()}`) : 'white');
         const alpha = obj.userData?.opacity ?? (obj.material && typeof obj.material.opacity === 'number' ? obj.material.opacity : 1);
 
-        // handle InstancedMesh: sample vertices per-instance
-        if (obj.isInstancedMesh && obj.geometry && api.options.useVertexBoxes) {
+        // InstancedMesh handling: process per-instance quad projection
+        if (obj.isInstancedMesh && obj.geometry && api.options.detectQuads) {
           const geom = obj.geometry;
-          if (!geom.attributes || !geom.attributes.position) {
-            // fallback: treat instance as center marker
-            const mat = new THREE.Matrix4();
-            const instLimit = Math.min(obj.count, obj.userData?.instanceLimit || obj.count);
-            for (let i = 0; i < instLimit; i++) {
-              obj.getMatrixAt(i, mat);
-              tmpMat.copy(obj.matrixWorld).multiply(mat);
-              const worldCenter = new THREE.Vector3().setFromMatrixPosition(tmpMat);
-              const p = projectToScreen(worldCenter);
-              if (!p) continue;
-              // small marker per instance
-              drawables.push({ type: 'rect', x: p.x, y: p.y, z: p.z, size: obj.userData?.markerSizePx ?? 6, color, alpha, obj });
-            }
+          const cache = buildQuadCacheForGeometry(geom);
+          if (!cache || !cache.quads || cache.quads.length === 0) {
+            // no quads for geometry - skip (or optionally fallback)
             return;
           }
-
           const instLimit = Math.min(obj.count, obj.userData?.instanceLimit || obj.count);
-          const perInstanceCap = Math.max(1, Math.floor((obj.userData?.vertexSampleLimit || api.options.vertexSampleCap) / Math.max(1, instLimit)));
-          const localCorners = []; // not used; we'll use actual vertices
+          const quadCapGlobal = obj.userData?.quadMax ?? api.options.maxQuadsPerObject;
+          // per-instance cap (distribute)
+          const perInstanceCap = Math.max(1, Math.floor(Math.min(quadCapGlobal, cache.quads.length) / Math.max(1, instLimit)));
 
+          const mat = new THREE.Matrix4();
           for (let i = 0; i < instLimit; i++) {
-            const mat = new THREE.Matrix4();
             obj.getMatrixAt(i, mat);
-            tmpMat.copy(obj.matrixWorld).multiply(mat); // world transform for instance
-            // sample vertices (transformed by the instance world matrix)
-            const worldPts = sampleVertexWorldPoints(obj.geometry, tmpMat, perInstanceCap);
-            if (worldPts.length === 0) continue;
-            for (let wp of worldPts) {
-              const ps = projectToScreen(wp);
-              if (!ps) continue;
-              // size scaling: user override, else based on distance to camera
-              const base = obj.userData?.vertexBoxSizePx ?? api.options.vertexBaseSizePx;
-              // distance = world distance from camera to wp
-              const d = camera.position.distanceTo(wp);
-              const size = Math.max(1, Math.min(obj.userData?.maxScreenSizePx ?? api.options.maxScreenSizePx, Math.round(base * (1 / Math.max(0.05, d * 0.025)))));
-              drawables.push({ type: 'vbox', x: ps.x, y: ps.y, z: ps.z, size, color, alpha, obj });
+            // instance world matrix = obj.matrixWorld * instanceMatrix
+            tmpMat.copy(obj.matrixWorld).multiply(mat);
+
+            // quickly cull instance by bounding sphere if available
+            if (geom.boundingSphere) {
+              const bs = geom.boundingSphere;
+              const worldCenter = bs.center.clone().applyMatrix4(tmpMat);
+              const scale = tmpMat.getMaxScaleOnAxis ? tmpMat.getMaxScaleOnAxis() : 1;
+              const r = bs.radius * scale;
+              if (!frustum.intersectsSphere(new THREE.Sphere(worldCenter, r)) && !obj.userData?.alwaysRender) continue;
             }
-          }
-          return;
-        }
 
-        // non-instanced meshes
-        if (obj.isMesh && obj.geometry && api.options.useVertexBoxes && ((obj.userData?.useVertexBoxes !== undefined) ? obj.userData.useVertexBoxes : true)) {
+            const quadsToProcess = cache.quads.slice(0, perInstanceCap);
+            for (let qi = 0; qi < quadsToProcess.length; qi++) {
+              const quad = quadsToProcess[qi]; // [i0,i1,i2,i3]
+              // world positions for quad vertices
+              const worldPts = quad.map(vi => {
+                tmpVec.set(
+                  geom.attributes.position.getX(vi),
+                  geom.attributes.position.getY(vi),
+                  geom.attributes.position.getZ(vi)
+                ).applyMatrix4(tmpMat).clone();
+                return worldPts ? worldPts : tmpVec; // (we'll actually return below)
+              });
+              // Actually build worldPts properly to avoid reuse issues:
+              const wp0 = new THREE.Vector3(
+                geom.attributes.position.getX(quad[0]),
+                geom.attributes.position.getY(quad[0]),
+                geom.attributes.position.getZ(quad[0])
+              ).applyMatrix4(tmpMat);
+              const wp1 = new THREE.Vector3(
+                geom.attributes.position.getX(quad[1]),
+                geom.attributes.position.getY(quad[1]),
+                geom.attributes.position.getZ(quad[1])
+              ).applyMatrix4(tmpMat);
+              const wp2 = new THREE.Vector3(
+                geom.attributes.position.getX(quad[2]),
+                geom.attributes.position.getY(quad[2]),
+                geom.attributes.position.getZ(quad[2])
+              ).applyMatrix4(tmpMat);
+              const wp3 = new THREE.Vector3(
+                geom.attributes.position.getX(quad[3]),
+                geom.attributes.position.getY(quad[3]),
+                geom.attributes.position.getZ(quad[3])
+              ).applyMatrix4(tmpMat);
+
+              const worldArr = [wp0, wp1, wp2, wp3];
+
+              // frustum / clip test: skip if all outside
+              let anyInside = false;
+              for (let wpt of worldArr) if (frustum.containsPoint(wpt)) { anyInside = true; break; }
+              if (!anyInside && !obj.userData?.alwaysRender) continue;
+
+              // project to screen
+              const projPts = [];
+              let allClipped = true, avgZ = 0;
+              for (let wpt of worldArr) {
+                const ps = api._projectToScreen(wpt, camera);
+                if (ps) { projPts.push(ps); avgZ += ps.z; allClipped = false; } else {
+                  // if projection skipped, still push approximate projected fallback by projecting center
+                  projPts.push(null);
+                }
+              }
+              if (api.options.projectSkipBehind && allClipped) continue;
+              // if some points null, we'll compute approximate screen positions by projecting 3D points without clipping check
+              for (let idx = 0; idx < projPts.length; idx++) {
+                if (!projPts[idx]) {
+                  const p = worldArr[idx].clone().project(camera);
+                  projPts[idx] = { x: (p.x * 0.5 + 0.5) * canvas.width, y: (-p.y * 0.5 + 0.5) * canvas.height, z: p.z };
+                }
+              }
+              avgZ = projPts.reduce((s, p) => s + (p.z || 0), 0) / projPts.length;
+
+              // order vertices into a correct loop: compute centroid in screen-space and sort by angle
+              const cx = projPts.reduce((s, p) => s + p.x, 0) / projPts.length;
+              const cy = projPts.reduce((s, p) => s + p.y, 0) / projPts.length;
+              projPts.sort((a, b) => Math.atan2(a.y - cy, a.x - cx) - Math.atan2(b.y - cy, b.x - cx));
+
+              drawables.push({
+                type: 'quad',
+                pts: projPts.map(p => ({ x: p.x, y: p.y })),
+                avgZ,
+                obj,
+                color,
+                alpha,
+                fill: (obj.userData?.quadFill !== undefined) ? obj.userData.quadFill : api.options.fillQuads,
+                strokeWidth: obj.userData?.quadStrokeWidth ?? 1
+              });
+            } // quad loop
+          } // instance loop
+          return;
+        } // end instanced path
+
+        // Non-instanced: per-mesh quad extraction
+        if (obj.isMesh && obj.geometry && api.options.detectQuads) {
           const geom = obj.geometry;
-          // world matrix for object
-          const worldM = obj.matrixWorld;
-          const sampleLimit = obj.userData?.vertexSampleLimit ?? api.options.vertexSampleCap;
-          const worldPts = sampleVertexWorldPoints(geom, worldM, sampleLimit);
-          if (worldPts.length === 0) return;
+          const cache = buildQuadCacheForGeometry(geom);
+          if (cache && cache.quads && cache.quads.length > 0) {
+            const quadCap = obj.userData?.quadMax ?? api.options.maxQuadsPerObject;
+            const quads = cache.quads.slice(0, quadCap);
+            for (let quad of quads) {
+              // world positions
+              const wp0 = new THREE.Vector3(geom.attributes.position.getX(quad[0]), geom.attributes.position.getY(quad[0]), geom.attributes.position.getZ(quad[0])).applyMatrix4(obj.matrixWorld);
+              const wp1 = new THREE.Vector3(geom.attributes.position.getX(quad[1]), geom.attributes.position.getY(quad[1]), geom.attributes.position.getZ(quad[1])).applyMatrix4(obj.matrixWorld);
+              const wp2 = new THREE.Vector3(geom.attributes.position.getX(quad[2]), geom.attributes.position.getY(quad[2]), geom.attributes.position.getZ(quad[2])).applyMatrix4(obj.matrixWorld);
+              const wp3 = new THREE.Vector3(geom.attributes.position.getX(quad[3]), geom.attributes.position.getY(quad[3]), geom.attributes.position.getZ(quad[3])).applyMatrix4(obj.matrixWorld);
+              const worldArr = [wp0, wp1, wp2, wp3];
 
-          for (let wp of worldPts) {
-            // distance cull per-vertex (in case vertices are far)
-            const d = camera.position.distanceTo(wp);
-            if (d > (obj.userData?.maxRenderDistance ?? api._maxRenderDistance) && !obj.userData?.alwaysRender) continue;
-            const p = projectToScreen(wp);
-            if (!p) continue;
-            const base = obj.userData?.vertexBoxSizePx ?? api.options.vertexBaseSizePx;
-            const size = Math.max(1, Math.min(obj.userData?.maxScreenSizePx ?? api.options.maxScreenSizePx, Math.round(base * (1 / Math.max(0.05, d * 0.025)))));
-            drawables.push({ type: 'vbox', x: p.x, y: p.y, z: p.z, size, color, alpha, obj });
-          }
-          return;
-        }
+              // frustum test: require at least one vertex in frustum unless alwaysRender
+              let anyIn = false;
+              for (let wpt of worldArr) if (frustum.containsPoint(wpt)) { anyIn = true; break; }
+              if (!anyIn && !obj.userData?.alwaysRender) continue;
 
-        // if not using vertex boxes (or mesh lacks positions), fallback to previous image/polygon/marker behaviour
-        // TEXTURED SPRITES / MESHES: draw projected image rect if texture present and user didn't request vertex boxes
+              // project
+              const projPts = [];
+              let allClipped = true, avgZ = 0;
+              for (let wpt of worldArr) {
+                const ps = api._projectToScreen(wpt, camera);
+                if (ps) { projPts.push(ps); avgZ += ps.z; allClipped = false; } else {
+                  projPts.push(null);
+                }
+              }
+              if (api.options.projectSkipBehind && allClipped) continue;
+              for (let idx = 0; idx < projPts.length; idx++) {
+                if (!projPts[idx]) {
+                  const p = worldArr[idx].clone().project(camera);
+                  projPts[idx] = { x: (p.x * 0.5 + 0.5) * canvas.width, y: (-p.y * 0.5 + 0.5) * canvas.height, z: p.z };
+                }
+              }
+              avgZ = projPts.reduce((s, p) => s + (p.z || 0), 0) / projPts.length;
+
+              // order vertices by center angle (screen-space)
+              const cx = projPts.reduce((s, p) => s + p.x, 0) / projPts.length;
+              const cy = projPts.reduce((s, p) => s + p.y, 0) / projPts.length;
+              projPts.sort((a, b) => Math.atan2(a.y - cy, a.x - cx) - Math.atan2(b.y - cy, b.x - cx));
+
+              drawables.push({
+                type: 'quad',
+                pts: projPts.map(p => ({ x: p.x, y: p.y })),
+                avgZ,
+                obj,
+                color,
+                alpha,
+                fill: (obj.userData?.quadFill !== undefined) ? obj.userData.quadFill : api.options.fillQuads,
+                strokeWidth: obj.userData?.quadStrokeWidth ?? 1
+              });
+            } // quads loop
+            return;
+          } // end if cache.quads
+        } // end mesh quad detection
+
+        // Fallback: texture / rect / marker if no quads detected or detection disabled
+        // TEXTURED SPRITES / MESHES: draw projected image rect if texture present and user didn't request quads
         const mapImage = obj.material && obj.material.map && obj.material.map.image ? obj.material.map.image : null;
         if (mapImage) {
-          // compute projected rectangle using bounding box or center
+          // approximate using bounding box corners
           let sampleWorldPts = [];
           if (obj.geometry && obj.geometry.boundingBox) {
             const bb = obj.geometry.boundingBox;
@@ -1010,63 +1146,71 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
             sampleWorldPts.push(tmpPos.clone());
           }
 
-          // project sample pts
           const projPts = [];
           for (let wp of sampleWorldPts) {
-            const p = projectToScreen(wp);
+            const p = api._projectToScreen(wp, camera);
             if (p) projPts.push(p);
           }
           if (projPts.length === 0) return;
           let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, avgZ = 0;
           for (let p of projPts) { minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x); minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y); avgZ += p.z; }
           avgZ /= projPts.length;
-          drawables.push({ type: 'imageRect', rect: { minX, minY, width: maxX - minX, height: maxY - minY, avgZ }, mapImage, color, alpha, obj });
+          drawables.push({ type: 'imageRect', rect: { minX, minY, width: maxX - minX, height: maxY - minY, avgZ }, mapImage, obj, color, alpha });
           return;
         }
 
-        // fallback: center marker
-        const pc = projectToScreen(center);
+        // final fallback marker center
+        const pc = api._projectToScreen(center, camera);
         if (!pc) return;
-        drawables.push({ type: 'rect', x: pc.x, y: pc.y, z: pc.z, size: obj.userData?.markerSizePx ?? 6, color, alpha, obj });
-      });
+        drawables.push({ type: 'rect', x: pc.x, y: pc.y, z: pc.z, size: obj.userData?.markerSizePx ?? 6, obj, color, alpha });
+      }); // scene traverse end
 
-      // depth sort by projected z (far -> near)
+      // depth sort back->front using avgZ
       drawables.sort((a, b) => {
-        const za = (typeof a.z === 'number') ? a.z : (a.rect ? a.rect.avgZ : 0);
-        const zb = (typeof b.z === 'number') ? b.z : (b.rect ? b.rect.avgZ : 0);
+        const za = (typeof a.avgZ === 'number') ? a.avgZ : (typeof a.z === 'number' ? a.z : 0);
+        const zb = (typeof b.avgZ === 'number') ? b.avgZ : (typeof b.z === 'number' ? b.z : 0);
         return zb - za;
       });
 
-      // draw loop (only vbox, imageRect, rect)
+      // draw quads/images/rects
       for (let d of drawables) {
-        if (d.type === 'vbox') {
+        if (d.type === 'quad') {
           ctx.save();
-          ctx.globalAlpha = Math.max(0.05, Math.min(1, d.alpha));
-          ctx.fillStyle = d.color;
-          // axis-aligned rectangle centered at (x,y)
-          const s = d.size;
-          // optionally, draw as filled rect or outline depending on user preference
-          if (d.obj.userData?.vertexBoxOutline) {
-            ctx.lineWidth = d.obj.userData?.vertexBoxOutlineWidth ?? 1;
-            ctx.strokeStyle = d.color;
-            ctx.strokeRect(d.x - s / 2, d.y - s / 2, s, s);
-          } else {
-            ctx.fillRect(d.x - s / 2, d.y - s / 2, s, s);
+          if (d.fill) {
+            ctx.globalAlpha = Math.max(0.02, Math.min(1, d.alpha));
+            ctx.fillStyle = d.color;
+            ctx.beginPath();
+            ctx.moveTo(d.pts[0].x, d.pts[0].y);
+            for (let i = 1; i < d.pts.length; i++) ctx.lineTo(d.pts[i].x, d.pts[i].y);
+            ctx.closePath();
+            ctx.fill();
+          }
+          // stroke always (if strokeWidth > 0)
+          if (d.strokeWidth > 0) {
+            ctx.globalAlpha = Math.min(1, d.alpha);
+            ctx.lineWidth = d.strokeWidth;
+            ctx.strokeStyle = 'rgba(0,0,0,0.6)';
+            ctx.beginPath();
+            ctx.moveTo(d.pts[0].x, d.pts[0].y);
+            for (let i = 1; i < d.pts.length; i++) ctx.lineTo(d.pts[i].x, d.pts[i].y);
+            ctx.closePath();
+            ctx.stroke();
           }
           ctx.restore();
           continue;
         }
 
         if (d.type === 'imageRect' && d.mapImage) {
+          const r = d.rect;
           ctx.save();
-          ctx.globalAlpha = Math.max(0, Math.min(1, d.alpha));
-          let w = Math.max(1, d.rect.width), h = Math.max(1, d.rect.height);
-          const maxScreen = Math.max(256, Math.min(8192, d.obj.userData?.maxScreenSizePx ?? api.options.maxScreenSizePx));
+          ctx.globalAlpha = d.alpha;
+          const maxScreen = Math.max(256, Math.min(8192, d.obj.userData?.maxScreenSizePx ?? 4096));
+          let w = Math.max(1, r.width), h = Math.max(1, r.height);
           if (w > maxScreen || h > maxScreen) {
             const sc = maxScreen / Math.max(w, h);
             w *= sc; h *= sc;
           }
-          ctx.drawImage(d.mapImage, d.rect.minX, d.rect.minY, w, h);
+          ctx.drawImage(d.mapImage, r.minX, r.minY, w, h);
           ctx.restore();
           continue;
         }
@@ -1078,13 +1222,15 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
           const s = d.size;
           ctx.fillRect(d.x - s / 2, d.y - s / 2, s, s);
           ctx.restore();
+          continue;
         }
-      }
+      } // draw loop end
     } // render end
   }; // api end
 
   return api;
 }
+
 
 
 
