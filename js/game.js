@@ -819,15 +819,86 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
   canvas.height = height;
   const ctx = canvas.getContext('2d');
 
-  // Scratch vars for projections & temp math
+  // Scratch vars
   const proj = new THREE.Vector3();
   const tmpPos = new THREE.Vector3();
   const tmpVec = new THREE.Vector3();
-  const tmpVec2 = new THREE.Vector3();
 
-  // helper: build convex hull (Andrew monotone chain) of 2D points
+  // config / debug toggles
+  const CONFIG = {
+    maxFillAreaRatio: 0.35, // don't fill polygons larger than this fraction of canvas area (safety)
+    ndcToleranceZ: 2,       // looser tolerance when projecting points
+    debug: !!window.canvasRendererDebug
+  };
+
+  // small helpers
+  function isFiniteNumber(v) { return typeof v === 'number' && isFinite(v); }
+
+  function clamp(val, a, b) { return Math.max(a, Math.min(b, val)); }
+
+  function sanitizePoint(p) {
+    if (!isFiniteNumber(p.x) || !isFiniteNumber(p.y)) return null;
+    // clamp to a little beyond the viewport to keep hull sane
+    const padX = canvas.width * 0.2;
+    const padY = canvas.height * 0.2;
+    return { x: clamp(p.x, -padX, canvas.width + padX), y: clamp(p.y, -padY, canvas.height + padY) };
+  }
+
+  // convert various color forms to CSS rgba string. Safe fallback to white.
+  function cssColorFrom(obj, alphaOverride = null) {
+    try {
+      const udColor = obj?.userData?.color;
+      if (udColor) {
+        if (typeof udColor === 'string') {
+          // if string includes alpha, leave it; otherwise we'll set via ctx.globalAlpha
+          return udColor;
+        } else if (typeof udColor === 'number') {
+          const hex = udColor >>> 0;
+          const r = (hex >> 16) & 0xff, g = (hex >> 8) & 0xff, b = hex & 0xff;
+          return `rgba(${r},${g},${b},${alphaOverride ?? 1})`;
+        } else if (udColor instanceof THREE.Color) {
+          const c = udColor;
+          const r = Math.round(c.r * 255), g = Math.round(c.g * 255), b = Math.round(c.b * 255);
+          return `rgba(${r},${g},${b},${alphaOverride ?? 1})`;
+        }
+      }
+
+      if (obj && obj.material && obj.material.color) {
+        const matColor = obj.material.color;
+        if (matColor instanceof THREE.Color) {
+          const r = Math.round(matColor.r * 255), g = Math.round(matColor.g * 255), b = Math.round(matColor.b * 255);
+          return `rgba(${r},${g},${b},${alphaOverride ?? (obj.material.opacity ?? 1)})`;
+        } else if (typeof matColor === 'number') {
+          const hex = matColor >>> 0;
+          const r = (hex >> 16) & 0xff, g = (hex >> 8) & 0xff, b = hex & 0xff;
+          return `rgba(${r},${g},${b},${alphaOverride ?? (obj.material.opacity ?? 1)})`;
+        } else if (typeof matColor === 'string') {
+          return matColor;
+        }
+      }
+
+      // final fallback
+      return `rgba(255,255,255,${alphaOverride ?? 1})`;
+    } catch (e) {
+      return 'rgba(255,255,255,1)';
+    }
+  }
+
+  // polygon area (shoelace)
+  function polygonArea(pts) {
+    if (!pts || pts.length < 3) return 0;
+    let area = 0;
+    for (let i = 0, n = pts.length; i < n; i++) {
+      const a = pts[i];
+      const b = pts[(i + 1) % n];
+      area += a.x * b.y - b.x * a.y;
+    }
+    return Math.abs(area) * 0.5;
+  }
+
+  // convex hull (Andrew monotone chain) for screen points
   function convexHull(points) {
-    if (points.length <= 1) return points.slice();
+    if (!points || points.length <= 1) return points ? points.slice() : [];
     const pts = points.slice().sort((a, b) => (a.x === b.x ? a.y - b.y : a.x - b.x));
     const cross = (o, a, b) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
     const lower = [];
@@ -841,8 +912,7 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
       while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop();
       upper.push(p);
     }
-    lower.pop();
-    upper.pop();
+    lower.pop(); upper.pop();
     return lower.concat(upper);
   }
 
@@ -862,15 +932,13 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
     _clearColor: { hex: 0x000000, alpha: 1 },
 
     render(scene, camera) {
-      // Ensure world matrices are up-to-date (fixes many vanishing/invisible issues)
+      // update matrices to remove stale transform issues
       if (scene && typeof scene.updateMatrixWorld === 'function') scene.updateMatrixWorld(true);
       if (camera && typeof camera.updateMatrixWorld === 'function') camera.updateMatrixWorld(true);
 
-      // Clear
+      // clear canvas
       const c = api._clearColor;
-      const r = (c.hex >> 16) & 0xff;
-      const g = (c.hex >> 8) & 0xff;
-      const b = c.hex & 0xff;
+      const r = (c.hex >> 16) & 0xff, g = (c.hex >> 8) & 0xff, b = c.hex & 0xff;
       ctx.save();
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.fillStyle = `rgba(${r},${g},${b},${c.alpha})`;
@@ -878,61 +946,46 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
       ctx.restore();
 
       const drawables = [];
-
-      // Traverse scene and build drawables. NOTE: no early cull by object center.
+      // gather drawables WITHOUT early center-culling
       scene.traverse((obj) => {
         if (!obj.visible) return;
         if (obj.isCamera || obj.isLight) return;
 
-        // compute a reliable world center
+        // world center
         obj.getWorldPosition(tmpPos);
-
-        // screen center projection (used as fallback coords)
         proj.copy(tmpPos).project(camera);
         const centerSx = (proj.x * 0.5 + 0.5) * canvas.width;
         const centerSy = (-proj.y * 0.5 + 0.5) * canvas.height;
         const centerProjZ = proj.z;
-
         const dist = camera.position.distanceTo(tmpPos);
         const mapImage = obj.material && obj.material.map && obj.material.map.image ? obj.material.map.image : null;
 
-        // If it's a sprite/image, keep it
+        // image sprites pass through
         if (mapImage) {
           drawables.push({ type: 'image', obj, sx: centerSx, sy: centerSy, dist, mapImage });
           return;
         }
 
-        // If it's a Mesh with geometry: try to project geometry samples / bounding box
+        // meshes: sample bounding box / sphere / vertices
         if (obj.isMesh && obj.geometry) {
           const geom = obj.geometry;
-
-          // ensure bounding data - compute only if missing
           if (!geom.boundingBox && geom.computeBoundingBox) geom.computeBoundingBox();
           if (!geom.boundingSphere && geom.computeBoundingSphere) geom.computeBoundingSphere();
 
           const worldPoints = [];
 
-          // Prefer boundingBox corners (local space) transformed to world
           if (geom.boundingBox) {
             const bb = geom.boundingBox;
-            const min = bb.min;
-            const max = bb.max;
+            const min = bb.min, max = bb.max;
             const corners = [
-              [min.x, min.y, min.z],
-              [min.x, min.y, max.z],
-              [min.x, max.y, min.z],
-              [min.x, max.y, max.z],
-              [max.x, min.y, min.z],
-              [max.x, min.y, max.z],
-              [max.x, max.y, min.z],
-              [max.x, max.y, max.z],
+              [min.x, min.y, min.z],[min.x, min.y, max.z],[min.x, max.y, min.z],[min.x, max.y, max.z],
+              [max.x, min.y, min.z],[max.x, min.y, max.z],[max.x, max.y, min.z],[max.x, max.y, max.z]
             ];
             for (let c of corners) {
               tmpVec.set(c[0], c[1], c[2]).applyMatrix4(obj.matrixWorld);
               worldPoints.push(tmpVec.clone());
             }
           } else if (geom.boundingSphere) {
-            // fallback: sphere sample points
             const bs = geom.boundingSphere;
             const center = bs.center.clone().applyMatrix4(obj.matrixWorld);
             const r = bs.radius * (obj.matrixWorld.getMaxScaleOnAxis ? obj.matrixWorld.getMaxScaleOnAxis() : 1);
@@ -944,10 +997,9 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
             worldPoints.push(center.clone().add(new THREE.Vector3(0, 0, r)));
             worldPoints.push(center.clone().add(new THREE.Vector3(0, 0, -r)));
           } else {
-            // cheap vertex sampling (if positions exist)
             const posAttr = geom.attributes && geom.attributes.position;
             if (posAttr && posAttr.count > 0) {
-              const sampleCount = Math.min(16, posAttr.count);
+              const sampleCount = Math.min(12, posAttr.count);
               const step = Math.max(1, Math.floor(posAttr.count / sampleCount));
               for (let i = 0; i < posAttr.count; i += step) {
                 tmpVec.set(posAttr.getX(i), posAttr.getY(i), posAttr.getZ(i)).applyMatrix4(obj.matrixWorld);
@@ -955,160 +1007,209 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
                 if (worldPoints.length >= sampleCount) break;
               }
             } else {
-              // last resort: use world position
               worldPoints.push(tmpPos.clone());
             }
           }
 
-          // Project those points and keep ones within a tolerance of the NDC range.
-          // Use a looser tolerance so large objects near the edge aren't culled.
+          // project points and sanitize
           const pts2d = [];
           for (let wp of worldPoints) {
             proj.copy(wp).project(camera);
-            // Accept any point within this looser z tolerance (helps partial near-plane visibility)
-            if (proj.z > 2 || proj.z < -2) continue;
+            // looser z tolerance
+            if (proj.z > CONFIG.ndcToleranceZ || proj.z < -CONFIG.ndcToleranceZ) continue;
             const px = (proj.x * 0.5 + 0.5) * canvas.width;
             const py = (-proj.y * 0.5 + 0.5) * canvas.height;
-            pts2d.push({ x: px, y: py, ndcZ: proj.z });
+            const p = sanitizePoint({ x: px, y: py });
+            if (p) pts2d.push(p);
           }
 
           if (pts2d.length > 0) {
-            // compute hull & render polygon silhouette
             const hull = convexHull(pts2d);
-            if (hull.length >= 3) {
-              drawables.push({ type: 'poly', obj, pts: hull, dist, projZ: centerProjZ });
+            // ensure all hull points are finite
+            if (hull && hull.length >= 3) {
+              let invalid = false;
+              for (let hp of hull) { if (!isFiniteNumber(hp.x) || !isFiniteNumber(hp.y)) invalid = true; }
+              if (!invalid) {
+                // area check
+                const area = polygonArea(hull);
+                const canvasArea = canvas.width * canvas.height;
+                if (!isFiniteNumber(area) || area <= 0) {
+                  if (CONFIG.debug) console.warn('skip zero-area hull', obj);
+                } else if (area > canvasArea * CONFIG.maxFillAreaRatio) {
+                  // suspiciously large polygon -> skip unless forced
+                  if (obj.userData?.forceHugeDraw) {
+                    drawables.push({ type: 'poly', obj, pts: hull, dist, debugArea: area });
+                  } else {
+                    if (CONFIG.debug) console.warn('skipping huge polygon (safety)', { obj, area, canvasArea });
+                    // instead of drawing, optionally mark bounding rect if user asked
+                    if (obj.userData?.forceMarker) drawables.push({ type: 'rect', obj, sx: centerSx, sy: centerSy, dist, sizePx: 10 });
+                  }
+                } else {
+                  drawables.push({ type: 'poly', obj, pts: hull, dist });
+                }
+              } else {
+                if (obj.userData?.forceMarker) drawables.push({ type: 'rect', obj, sx: centerSx, sy: centerSy, dist, sizePx: 8 });
+              }
             } else if (hull.length === 2) {
               drawables.push({ type: 'line', obj, pts: hull, dist });
+            } else if (hull.length === 1 && obj.userData?.forceMarker) {
+              drawables.push({ type: 'rect', obj, sx: hull[0].x, sy: hull[0].y, dist, sizePx: 8 });
             } else {
-              // single projected point (rare)
-              if (obj.userData?.forceMarker) {
-                drawables.push({ type: 'rect', obj, sx: pts2d[0].x, sy: pts2d[0].y, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
-              }
+              // nothing projected meaningful
+              if (obj.userData?.forceMarker) drawables.push({ type: 'rect', obj, sx: centerSx, sy: centerSy, dist, sizePx: 8 });
             }
             return;
           }
 
-          // If we got no projected points, try a conservative bounding-sphere fallback so big objects don't vanish.
-          // Only apply fallback when the object's boundingSphere exists or user explicitly allows it.
+          // no projected points -> conservatively draw marker when boundingSphere exists & center is reasonable
           if (geom.boundingSphere) {
             const bs = geom.boundingSphere;
             const centerWorld = bs.center.clone().applyMatrix4(obj.matrixWorld);
-            const worldR = bs.radius * (obj.matrixWorld.getMaxScaleOnAxis ? obj.matrixWorld.getMaxScaleOnAxis() : 1);
             const pCenter = centerWorld.clone().project(camera);
-            // only draw fallback if center isn't *extremely* far behind/far in front
-            if (pCenter.z <= 2 && pCenter.z >= -2) {
+            if (pCenter.z <= CONFIG.ndcToleranceZ && pCenter.z >= -CONFIG.ndcToleranceZ) {
               const cx = (pCenter.x * 0.5 + 0.5) * canvas.width;
               const cy = (-pCenter.y * 0.5 + 0.5) * canvas.height;
-              // Derive radius in px by projecting a radial offset
-              const edge = centerWorld.clone().add(new THREE.Vector3(worldR, 0, 0)).project(camera);
-              const ex = (edge.x * 0.5 + 0.5) * canvas.width;
-              const ey = (-edge.y * 0.5 + 0.5) * canvas.height;
-              const radiusPx = Math.hypot(ex - cx, ey - cy);
-              // Instead of drawing a sphere/circle (you asked to remove spheres), draw a small rectangle sized to radiusPx (clamped)
-              const fallbackSize = Math.max(6, Math.min(120, radiusPx));
-              drawables.push({ type: 'rect', obj, sx: cx, sy: cy, dist, sizePx: fallbackSize });
-              return;
+              // draw small marker only if forced by user or debug
+              if (obj.userData?.forceMarker || CONFIG.debug) {
+                drawables.push({ type: 'rect', obj, sx: cx, sy: cy, dist, sizePx: 10 });
+              }
             }
           }
 
-          // else: nothing visible and no fallback allowed => skip rendering this object
-          return;
-        } // end isMesh
+          return; // mesh processed
+        }
 
-        // If we reach here (non-mesh, non-image) draw only when explicitly flagged
+        // non-mesh: only draw if user forces it (prevents noise)
         if (obj.userData?.forceMarker) {
-          drawables.push({ type: 'rect', obj, sx: centerSx, sy: centerSy, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
+          drawables.push({ type: 'rect', obj, sx: centerSx, sy: centerSy, dist, sizePx: obj.userData?.markerSizePx ?? 8 });
         }
       }); // end traverse
 
-      // Painter's order: furthest first
+      // sort back-to-front
       drawables.sort((a, b) => b.dist - a.dist);
 
-      // draw
-      for (let i = 0; i < drawables.length; i++) {
-        const d = drawables[i];
-        const { obj, dist } = d;
+      // actually draw
+      for (let d of drawables) {
+        const obj = d.obj;
+        // reset context compositing/alpha to safe defaults
+        ctx.globalCompositeOperation = 'source-over';
+        ctx.globalAlpha = 1;
 
-        // color selection
-        let color = obj.userData?.color;
-        if (!color && obj.material && obj.material.color) {
-          try {
-            color = obj.material.color.getStyle ? obj.material.color.getStyle() : (`#${obj.material.color.getHexString()}`);
-          } catch (e) {
-            color = obj.userData?.color || 'white';
-          }
-        }
-        color = color || obj.userData?.color || 'white';
+        const colorCss = cssColorFrom(obj, 1);
 
         if (d.type === 'image' && d.mapImage && d.mapImage.width) {
-          let size;
+          // image sprite - keep previous heuristics but clamp size and guard against NaN
+          let size = obj.userData?.sizePx ?? 64;
           if (obj.geometry && obj.geometry.boundingBox) {
             const bb = obj.geometry.boundingBox;
-            const corners = [
-              [bb.min.x, bb.min.y, bb.min.z],
-              [bb.max.x, bb.max.y, bb.max.z]
-            ];
+            const corners = [[bb.min.x, bb.min.y, bb.min.z],[bb.max.x, bb.max.y, bb.max.z]];
             const screenPts = [];
-            for (let c of corners) {
-              tmpVec.set(c[0], c[1], c[2]).applyMatrix4(obj.matrixWorld);
-              const p = tmpVec.project(camera);
-              screenPts.push({ x: (p.x * 0.5 + 0.5) * canvas.width, y: (-p.y * 0.5 + 0.5) * canvas.height });
-            }
+            for (let c of corners) { tmpVec.set(c[0], c[1], c[2]).applyMatrix4(obj.matrixWorld); const p = tmpVec.project(camera); screenPts.push({ x: (p.x * 0.5 + 0.5) * canvas.width, y: (-p.y * 0.5 + 0.5) * canvas.height }); }
             const wPx = Math.abs(screenPts[0].x - screenPts[1].x);
             const hPx = Math.abs(screenPts[0].y - screenPts[1].y);
-            size = Math.max(8, obj.userData?.sizePx ?? Math.max(wPx, hPx, 32));
-          } else {
-            const baseSize = obj.userData?.sizePx ?? 300;
-            size = Math.max(8, baseSize * (1 / Math.max(0.1, dist * 0.05)));
+            size = Math.max(8, Math.min(1024, obj.userData?.sizePx ?? Math.max(wPx, hPx, 32)));
           }
+          // draw safely
           ctx.save();
           ctx.translate(d.sx, d.sy);
           const rot = obj.userData?.rotation ?? (obj.rotation?.z ?? 0);
           if (rot) ctx.rotate(rot);
           ctx.globalAlpha = obj.userData?.opacity ?? (obj.material?.opacity ?? 1);
-          ctx.drawImage(d.mapImage, -size / 2, -size / 2, size, size);
+          try {
+            ctx.drawImage(d.mapImage, -size / 2, -size / 2, size, size);
+          } catch (e) {
+            if (CONFIG.debug) console.warn('drawImage failed', e, obj);
+          }
           ctx.restore();
         } else if (d.type === 'poly' && d.pts) {
+          // guard again against bad pts
+          if (!d.pts || d.pts.length < 3) continue;
+          let anyInvalid = false;
+          for (let p of d.pts) if (!isFiniteNumber(p.x) || !isFiniteNumber(p.y)) anyInvalid = true;
+          if (anyInvalid) {
+            if (CONFIG.debug) console.warn('skip poly with invalid pts', obj);
+            continue;
+          }
+          const area = polygonArea(d.pts);
+          const canvasArea = canvas.width * canvas.height;
+          if (!isFiniteNumber(area) || area <= 0) continue;
+          if (area > canvasArea * CONFIG.maxFillAreaRatio && !obj.userData?.forceHugeDraw) {
+            if (CONFIG.debug) {
+              console.warn('skipping poly due to large area', { area, canvasArea, ratio: area / canvasArea, obj });
+              // optionally draw outline to see where it would have been
+              ctx.save();
+              ctx.beginPath();
+              ctx.moveTo(d.pts[0].x, d.pts[0].y);
+              for (let i = 1; i < d.pts.length; i++) ctx.lineTo(d.pts[i].x, d.pts[i].y);
+              ctx.closePath();
+              ctx.strokeStyle = 'rgba(255,0,0,0.9)';
+              ctx.lineWidth = 2;
+              ctx.stroke();
+              ctx.restore();
+            }
+            continue;
+          }
+          // draw the polygon
           ctx.save();
           ctx.beginPath();
           ctx.moveTo(d.pts[0].x, d.pts[0].y);
-          for (let j = 1; j < d.pts.length; j++) ctx.lineTo(d.pts[j].x, d.pts[j].y);
+          for (let i = 1; i < d.pts.length; i++) ctx.lineTo(d.pts[i].x, d.pts[i].y);
           ctx.closePath();
-          ctx.globalAlpha = Math.max(0.2, Math.min(1, 1 - (dist * 0.002)));
-          ctx.fillStyle = color;
+          // alpha falls off with distance but stays visible
+          ctx.globalAlpha = Math.max(0.25, Math.min(1, 1 - (d.dist * 0.0015)));
+          ctx.fillStyle = colorCss;
           ctx.fill();
-          ctx.globalAlpha = 0.6;
-          ctx.lineWidth = Math.max(1, 2 - (dist * 0.001));
+          ctx.globalAlpha = 0.75;
+          ctx.lineWidth = Math.max(1, 1.5 - (d.dist * 0.0005));
           ctx.strokeStyle = 'rgba(0,0,0,0.6)';
           ctx.stroke();
           ctx.restore();
+
+          if (CONFIG.debug && d.debugArea) {
+            console.info('drew forced huge poly', { area: d.debugArea, obj });
+          }
         } else if (d.type === 'line' && d.pts && d.pts.length === 2) {
+          ctx.save();
           ctx.beginPath();
           ctx.moveTo(d.pts[0].x, d.pts[0].y);
           ctx.lineTo(d.pts[1].x, d.pts[1].y);
-          ctx.strokeStyle = color;
-          ctx.lineWidth = obj.userData?.lineWidth ?? 3;
-          ctx.globalAlpha = 1 - Math.min(0.9, dist * 0.002);
+          ctx.globalAlpha = 1;
+          ctx.strokeStyle = cssColorFrom(obj, 1);
+          ctx.lineWidth = obj.userData?.lineWidth ?? 2;
           ctx.stroke();
+          ctx.restore();
         } else if (d.type === 'rect') {
-          const size = d.sizePx ?? Math.max(4, Math.round(12 * (1 / Math.max(0.1, dist * 0.05))));
-          const x = (d.sx || d.sx === 0) ? d.sx : 0;
-          const y = (d.sy || d.sy === 0) ? d.sy : 0;
           ctx.save();
-          ctx.globalAlpha = Math.max(0.5, Math.min(1, 1 - (dist * 0.002)));
-          ctx.fillStyle = color;
+          const size = d.sizePx ?? 8;
+          ctx.globalAlpha = Math.max(0.45, Math.min(1, 1 - (d.dist * 0.0015)));
+          ctx.fillStyle = cssColorFrom(obj, 1);
+          const x = d.sx || 0, y = d.sy || 0;
           ctx.fillRect(x - size / 2, y - size / 2, size, size);
           ctx.restore();
-        } else {
-          // intentionally draw nothing for other types
         }
+      } // end draw loop
+
+      // debugging overlay: quickly show count if debug enabled
+      if (CONFIG.debug) {
+        ctx.save();
+        ctx.fillStyle = 'rgba(0,0,0,0.6)';
+        ctx.fillRect(6, 6, 120, 24);
+        ctx.fillStyle = '#fff';
+        ctx.font = '12px monospace';
+        ctx.fillText(`drawables: ${drawables.length}`, 10, 22);
+        ctx.restore();
       }
-    }
-  };
+    } // render
+  }; // api
+
+  // expose debug toggles to runtime
+  Object.defineProperty(window, 'canvasRendererDebug', {
+    get() { return CONFIG.debug; },
+    set(v) { CONFIG.debug = !!v; window.canvasRendererDebug = CONFIG.debug; }
+  });
 
   return api;
 }
-
 
 /* ---------- Updated scene initializers (CPU renderer) ---------- */
 
@@ -3210,6 +3311,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
