@@ -825,6 +825,8 @@ export async function initSceneCrocodilosConstruction() {
   const skyColor = new THREE.Color(0x111122);
   scene.background = skyColor;
   skyMesh = new THREE.Mesh(skyGeo, skyMat);
+  // mark sky so autoFitScene ignores it
+  skyMesh.userData._isSky = true;
   scene.add(skyMesh);
   window.scene = scene;
 
@@ -846,6 +848,10 @@ export async function initSceneCrocodilosConstruction() {
     console.error("initSceneCrocodilosConstruction: renderer was not created by tryLoadLegacyCanvasRenderer().");
     return;
   }
+
+  // Prefer z-buffer for CPU fallback and disable diagnostic overlays by default
+  if (typeof renderer.usePainter !== 'undefined') renderer.usePainter = false;
+  if (renderer.debug) renderer.debug.showWireframe = false;
 
   // DOM element styling
   if (renderer.domElement) {
@@ -910,6 +916,19 @@ export async function initSceneCrocodilosConstruction() {
   spawnPoints = await createCrocodilosConstruction(scene, physicsController);
   window.spawnPoints = spawnPoints;
 
+  // --- NEW: Auto-fit & recenter the loaded map so it renders correctly ---
+  try {
+    const fitInfo = await autoFitScene(scene, window.camera, { targetSize: 140, preferFlat: true });
+    if (fitInfo) {
+      console.log('autoFitScene applied (CrocodilosConstruction):', fitInfo);
+      window._lastMapFit = fitInfo;
+    } else {
+      console.warn('autoFitScene: no mesh data found to fit for CrocodilosConstruction.');
+    }
+  } catch (e) {
+    console.warn('autoFitScene failed for CrocodilosConstruction:', e);
+  }
+
   const initialSpawnPoint = findFurthestSpawn();
   physicsController.setPlayerPosition(initialSpawnPoint);
 
@@ -924,8 +943,8 @@ export async function initSceneCrocodilosConstruction() {
   // --- Window Resize Handling ---
   function onWindowResize() {
     const container = document.getElementById("game-container");
-    const displayWidth  = container.clientWidth;
-    const displayHeight = container.clientHeight;
+    const displayWidth  = container ? container.clientWidth : window.innerWidth;
+    const displayHeight = container ? container.clientHeight : window.innerHeight;
 
     // 1) Render & post-process at fixed 1280×720
     if (typeof renderer.setSize === 'function') {
@@ -988,6 +1007,7 @@ export async function initSceneSigmaCity() {
     fog: false
   });
   skyMesh = new THREE.Mesh(skyGeo, skyMat);
+  skyMesh.userData._isSky = true;
   scene.add(skyMesh);
   window.scene = scene;
 
@@ -1007,6 +1027,10 @@ export async function initSceneSigmaCity() {
     console.error("initSceneSigmaCity: renderer was not created by tryLoadLegacyCanvasRenderer().");
     return;
   }
+
+  // prefer z-buffer & turn off diagnostics by default
+  if (typeof renderer.usePainter !== 'undefined') renderer.usePainter = false;
+  if (renderer.debug) renderer.debug.showWireframe = false;
 
   if (renderer.domElement) {
     renderer.domElement.style.position = "relative";
@@ -1064,6 +1088,19 @@ export async function initSceneSigmaCity() {
   spawnPoints = await createSigmaCity(scene, physicsController);
   window.spawnPoints = spawnPoints;
 
+  // --- NEW: Auto-fit & recenter the loaded map so it renders correctly ---
+  try {
+    const fitInfo = await autoFitScene(scene, window.camera, { targetSize: 140, preferFlat: true });
+    if (fitInfo) {
+      console.log('autoFitScene applied (SigmaCity):', fitInfo);
+      window._lastMapFit = fitInfo;
+    } else {
+      console.warn('autoFitScene: no mesh data found to fit for SigmaCity.');
+    }
+  } catch (e) {
+    console.warn('autoFitScene failed for SigmaCity:', e);
+  }
+
   const initialSpawnPoint = findFurthestSpawn();
   physicsController.setPlayerPosition(initialSpawnPoint);
 
@@ -1079,8 +1116,8 @@ export async function initSceneSigmaCity() {
   // --- Window Resize Handling ---
   function onWindowResize() {
     const container = document.getElementById("game-container");
-    const displayWidth  = container.clientWidth;
-    const displayHeight = container.clientHeight;
+    const displayWidth  = container ? container.clientWidth : window.innerWidth;
+    const displayHeight = container ? container.clientHeight : window.innerHeight;
 
     if (typeof renderer.setSize === 'function') {
       renderer.setSize(FIXED_WIDTH, FIXED_HEIGHT, false);
@@ -1137,6 +1174,7 @@ export async function initSceneDiddyDunes() {
     fog: false
   });
   skyMesh = new THREE.Mesh(skyGeo, skyMat);
+  skyMesh.userData._isSky = true;
   scene.add(skyMesh);
   window.scene = scene;
 
@@ -1156,6 +1194,9 @@ export async function initSceneDiddyDunes() {
     console.error("initSceneDiddyDunes: renderer was not created by tryLoadLegacyCanvasRenderer().");
     return;
   }
+
+  if (typeof renderer.usePainter !== 'undefined') renderer.usePainter = false;
+  if (renderer.debug) renderer.debug.showWireframe = false;
 
   if (renderer.domElement) {
     renderer.domElement.style.position = "relative";
@@ -1213,6 +1254,19 @@ export async function initSceneDiddyDunes() {
   spawnPoints = await createDiddyDunes(scene, physicsController);
   window.spawnPoints = spawnPoints;
 
+  // --- NEW: Auto-fit & recenter the loaded map so it renders correctly ---
+  try {
+    const fitInfo = await autoFitScene(scene, window.camera, { targetSize: 140, preferFlat: true });
+    if (fitInfo) {
+      console.log('autoFitScene applied (DiddyDunes):', fitInfo);
+      window._lastMapFit = fitInfo;
+    } else {
+      console.warn('autoFitScene: no mesh data found to fit for DiddyDunes.');
+    }
+  } catch (e) {
+    console.warn('autoFitScene failed for DiddyDunes:', e);
+  }
+
   const initialSpawnPoint = findFurthestSpawn();
   physicsController.setPlayerPosition(initialSpawnPoint);
 
@@ -1228,8 +1282,8 @@ export async function initSceneDiddyDunes() {
   // --- Window Resize Handling ---
   function onWindowResize() {
     const container = document.getElementById("game-container");
-    const displayWidth  = container.clientWidth;
-    const displayHeight = container.clientHeight;
+    const displayWidth  = container ? container.clientWidth : window.innerWidth;
+    const displayHeight = container ? container.clientHeight : window.innerHeight;
 
     if (typeof renderer.setSize === 'function') {
       renderer.setSize(FIXED_WIDTH, FIXED_HEIGHT, false);
@@ -2810,40 +2864,103 @@ window.THREE = THREE;
 // expose
 window.SimpleCanvasRenderer = SimpleCanvasRenderer;
 
+
+function autoFitScene(scene, camera, opts = {}) {
+  opts = Object.assign({ targetSize: 140, preferFlat: true }, opts);
+  if (!scene || !camera) return null;
+
+  // collect bbox for all meshes except sky
+  const bbox = new THREE.Box3();
+  let any = false;
+  scene.traverse(o => {
+    if (!o.isMesh) return;
+    if (o.userData && o.userData._isSky) return;
+    bbox.expandByObject(o);
+    any = true;
+  });
+  if (!any) return null;
+
+  // center geometry to origin
+  const center = bbox.getCenter(new THREE.Vector3());
+  scene.traverse(o => {
+    if (!o.isMesh) return;
+    if (o.userData && o.userData._isSky) return;
+    o.position.sub(center);
+    o.updateMatrixWorld(true);
+  });
+
+  // recompute bbox + size
+  let box = new THREE.Box3().setFromObject(scene);
+  let size = box.getSize(new THREE.Vector3());
+
+  // rotation heuristics: if Y >> X,Z then lay flat; if X >> Z rotate Y
+  if (opts.preferFlat && size.y > Math.max(size.x, size.z) * 3.5) {
+    scene.traverse(o => { if (o.isMesh && !(o.userData && o.userData._isSky)) { o.rotateX(-Math.PI/2); o.updateMatrixWorld(true); }});
+  } else if (opts.preferFlat && size.x > size.z * 3.5) {
+    scene.traverse(o => { if (o.isMesh && !(o.userData && o.userData._isSky)) { o.rotateY(Math.PI/2); o.updateMatrixWorld(true); }});
+  }
+
+  // final bbox/size and optional scale to targetSize
+  box = new THREE.Box3().setFromObject(scene);
+  size = box.getSize(new THREE.Vector3());
+  const largest = Math.max(size.x, size.y, size.z);
+  if (largest > 0) {
+    const scaleFactor = opts.targetSize / largest;
+    if (isFinite(scaleFactor) && scaleFactor > 0 && scaleFactor < 10) {
+      scene.traverse(o => { if (o.isMesh && !(o.userData && o.userData._isSky)) { o.scale.multiplyScalar(scaleFactor); o.updateMatrixWorld(true); }});
+    }
+  }
+
+  // re-center after scaling
+  box = new THREE.Box3().setFromObject(scene);
+  const centerFinal = box.getCenter(new THREE.Vector3());
+  scene.traverse(o => { if (o.isMesh && !(o.userData && o.userData._isSky)) { o.position.sub(centerFinal); o.updateMatrixWorld(true); }});
+
+  // place camera: diagonal offset relative to bounding sphere
+  const bs = box.getBoundingSphere(new THREE.Sphere());
+  const radius = bs.radius || Math.max(size.x, size.y, size.z) * 0.5 || 50;
+  const cameraDistance = Math.max(radius * 1.8, 80);
+  camera.position.set(cameraDistance * 0.8, radius * 0.7, cameraDistance * 0.8);
+  camera.lookAt(new THREE.Vector3(0, (size.y * 0.25) || 0, 0));
+  camera.updateMatrixWorld(true);
+  if (camera.isPerspectiveCamera) camera.updateProjectionMatrix();
+
+  return { size: box.getSize(new THREE.Vector3()), center: box.getCenter(new THREE.Vector3()), radius, cameraDistance };
+}
 // -----------------------------
 // tryLoadLegacyCanvasRenderer() -> now uses local CPU fallback instead of fetching r110
 // -----------------------------
 async function tryLoadLegacyCanvasRenderer() {
   try {
-    // If you have packed SimpleCanvasRenderer locally (above) use it.
     if (typeof window.SimpleCanvasRenderer === 'function') {
-      window.renderer = new window.SimpleCanvasRenderer({ width: window.innerWidth, height: window.innerHeight });
-      console.log("SimpleCanvasRenderer (local CPU fallback) created.");
+      // prefer z-buffer renderer for correctness (usePainter = false)
+      window.renderer = new window.SimpleCanvasRenderer({ width: window.innerWidth, height: window.innerHeight, usePainter: false });
+      // diagnostic defaults (toggle later if you want)
+      if (window.renderer.debug) {
+        window.renderer.debug.showWireframe = false; // set false by default; enable only when diagnosing
+        window.renderer.debug.maxTriangles = 400000;
+      }
+      console.log("SimpleCanvasRenderer created (z-buffer).");
     } else {
-      // Fallback: create WebGLRenderer as last resort
-      console.warn("SimpleCanvasRenderer not found, using WebGLRenderer fallback.");
+      console.warn("SimpleCanvasRenderer not found, falling back to THREE.WebGLRenderer.");
       window.renderer = new THREE.WebGLRenderer({ antialias: false });
     }
   } catch (err) {
-    console.error("Failed to create SimpleCanvasRenderer, falling back to WebGLRenderer", err);
+    console.error("tryLoadLegacyCanvasRenderer error — falling back to WebGLRenderer:", err);
     window.renderer = new THREE.WebGLRenderer({ antialias: false });
   }
 
-  // ensure size / domElement appended
+  // final setup: size + append
   try {
     if (typeof window.renderer.setSize === 'function') {
       window.renderer.setSize(window.innerWidth, window.innerHeight);
     }
-    if (window.renderer && window.renderer.domElement) {
-      // avoid multiple appends
-      if (!document.body.contains(window.renderer.domElement)) {
-        document.body.appendChild(window.renderer.domElement);
-      }
-    } else {
-      console.warn("Renderer created but no domElement found.");
+    const container = document.getElementById('game-container') || document.body;
+    if (window.renderer && window.renderer.domElement && !container.contains(window.renderer.domElement)) {
+      container.appendChild(window.renderer.domElement);
     }
   } catch (e) {
-    console.error("Error while finalizing renderer setup:", e);
+    console.error("Error finalizing renderer setup:", e);
   }
 }
 
@@ -3545,6 +3662,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
