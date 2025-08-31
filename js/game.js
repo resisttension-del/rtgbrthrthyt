@@ -899,7 +899,7 @@ _safeProjectToScreen(worldVec, camera) {
   sy = Math.max(-pad, Math.min(canvas.height + pad, sy));
 
   return { x: sx, y: sy, z: p.z };
-}
+},
 
     // internal helper: project 3D world pos to screen (returns {x,y,z} or null if clipping)
     _projectToScreen(worldVec, camera) {
@@ -3519,6 +3519,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
