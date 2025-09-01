@@ -877,15 +877,19 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
         initBuffers(W,H);
       }
       self.postMessage({ type: 'log', msg: 'resize W=' + W + ' H=' + H });
-    } else if (msg.type === 'frame') {
+} else if (msg.type === 'frame') {
+  try {
+    // defensive check
+    if (!msg.camera || !msg.camera.proj || !msg.camera.view) {
+      self.postMessage({ type: 'log', msg: 'frame skipped: missing camera.proj/view' });
+    } else {
       renderFrame(msg.camera, msg.transforms || []);
-    } else if (msg.type === 'clearScene') {
-      sceneMeshes.length = 0;
-      self.postMessage({ type: 'log', msg: 'clearScene' });
-    } else if (msg.type === 'setCulling') {
-      disableCulling = !!msg.disable;
-      self.postMessage({ type: 'log', msg: 'setCulling disable=' + disableCulling });
     }
+  } catch (err) {
+    // ensure worker exceptions are reported
+    self.postMessage({ type: 'error', msg: 'renderFrame threw: ' + (err && err.stack ? err.stack : String(err)) });
+  }
+}
   };
 
   function initBuffers(w,h) {
@@ -929,15 +933,24 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
     return (cx - ax) * (by - ay) - (cy - ay) * (bx - ax);
   }
 
-  function renderFrame(camera, transforms) {
-    if (!ctx) return;
+function renderFrame(camera, transforms) {
+  if (!ctx) return;
+  try {
+    const startMs = performance.now();
+    if (!W || !H) {
+      self.postMessage({ type: 'log', msg: 'renderFrame: zero canvas dims W=' + W + ' H=' + H });
+      return;
+    }
+
     const proj = camera.proj;
     const view = camera.view;
     const viewProj = new Float32Array(16);
     multiplyMat4(proj, view, viewProj);
     const tmap = new Map();
     for (let t of transforms) tmap.set(t.id, t.model);
+
     const clear = camera.clearColor || [0,0,0];
+    // fill with clear color
     for (let i = 0, p=0; i < W*H; ++i, p+=4) {
       pixelBuf[p] = clear[0];
       pixelBuf[p+1] = clear[1];
@@ -947,6 +960,10 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
     }
 
     const vClip = new Float32Array(4);
+    let totalTriangles = 0;
+    let trianglesRasterized = 0;
+    let pixelWrites = 0;
+
     for (let mesh of sceneMeshes) {
       const pos = mesh.positions;
       const idx = mesh.indices;
@@ -967,7 +984,16 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
       }
 
       for (let t = 0; t < idx.length; t += 3) {
+        totalTriangles++;
         const i0 = idx[t], i1 = idx[t+1], i2 = idx[t+2];
+
+        // defensive index checks
+        if (i0 < 0 || i1 < 0 || i2 < 0 || i0 >= sx.length || i1 >= sx.length || i2 >= sx.length) {
+          // skip malformed triangle but log once
+          if ((t % 300) === 0) self.postMessage({ type: 'log', msg: 'skipping malformed tri index set at mesh ' + mesh.id + ' t=' + t });
+          continue;
+        }
+
         const x0 = sx[i0], y0 = sy[i0], z0 = sz[i0];
         const x1 = sx[i1], y1 = sy[i1], z1 = sz[i1];
         const x2 = sx[i2], y2 = sy[i2], z2 = sz[i2];
@@ -984,8 +1010,10 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
         if (!disableCulling && cross >= 0) continue;
 
         const area = edgeFunc(x0,y0,x1,y1,x2,y2);
-        if (Math.abs(area) < 1e-6) continue;
+        if (!isFinite(area) || Math.abs(area) < 1e-6) continue;
 
+        // rasterize
+        trianglesRasterized++;
         for (let py = minY; py <= maxY; ++py) {
           const rowBase = py * W;
           for (let px = minX; px <= maxX; ++px) {
@@ -996,6 +1024,7 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
             if ((w0 >= 0 && w1 >= 0 && w2 >= 0) || (w0 <= 0 && w1 <= 0 && w2 <= 0)) {
               const b0 = w0 / area, b1 = w1 / area, b2 = w2 / area;
               const zInterp = b0*z0 + b1*z1 + b2*z2;
+              if (!isFinite(zInterp)) continue;
               const depth = (zInterp + 1) * 0.5;
               const idxBuf = rowBase + px;
               if (depth < zBuffer[idxBuf]) {
@@ -1005,6 +1034,7 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
                 pixelBuf[p+2] = color[2];
                 pixelBuf[p+3] = 255;
                 zBuffer[idxBuf] = depth;
+                pixelWrites++;
               }
             }
           }
@@ -1012,8 +1042,39 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
       }
     }
 
-    ctx.putImageData(imageData, 0, 0);
+    // report and draw to canvas
+    try {
+      ctx.putImageData(imageData, 0, 0);
+    } catch (errPut) {
+      self.postMessage({ type: 'error', msg: 'putImageData failed: ' + (errPut && errPut.stack ? errPut.stack : String(errPut)) });
+    }
+
+    // If nothing was written, draw a visible debug rectangle so developer sees worker output
+    if (pixelWrites === 0) {
+      try {
+        ctx.fillStyle = 'magenta';
+        ctx.fillRect(Math.max(0, Math.floor(W*0.1)), Math.max(0, Math.floor(H*0.1)), Math.max(4, Math.floor(W*0.1)), Math.max(4, Math.floor(H*0.1)));
+        // also draw a small white pixel at center
+        ctx.fillStyle = 'white';
+        ctx.fillRect(Math.floor(W/2), Math.floor(H/2), 2, 2);
+      } catch (dbgErr) {
+        // ignore
+      }
+    }
+
+    const elapsed = Math.round(performance.now() - startMs);
+    self.postMessage({
+      type: 'log',
+      msg: 'renderFrame done meshes=' + sceneMeshes.length +
+           ' tris_total=' + totalTriangles +
+           ' tris_rast=' + trianglesRasterized +
+           ' pixels=' + pixelWrites +
+           ' timeMs=' + elapsed
+    });
+  } catch (err) {
+    self.postMessage({ type: 'error', msg: 'renderFrame outer threw: ' + (err && err.stack ? err.stack : String(err)) });
   }
+}
 
   function identityMat4() {
     const I = new Float32Array(16);
@@ -3503,6 +3564,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
