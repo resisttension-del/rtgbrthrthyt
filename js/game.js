@@ -811,26 +811,38 @@ function setupDetailToggle() {
 
 
 function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
-  // IMPORTANT: create a real <canvas> element (not a custom tag)
-  const canvas = document.createElement('gameCanvas');
+  // --- DOM: wrapper div + real canvas ---
+  const wrapper = document.createElement('div');
+  wrapper.id = 'gameCanvas';
+  Object.assign(wrapper.style, {
+    position: 'absolute',
+    top: '0px',
+    left: '0px',
+    width: `${width}px`,
+    height: `${height}px`,
+    zIndex: '999',
+    overflow: 'hidden',
+    pointerEvents: 'auto'
+  });
 
-  // make it absolutely positioned and visible on top so CSS overlays won't hide it
-  canvas.style.position = 'absolute';
-  canvas.style.top = '0';
-  canvas.style.left = '0';
-  canvas.style.zIndex = '999';
-  canvas.style.display = 'block';
-  canvas.style.width = `${width}px`;
-  canvas.style.height = `${height}px`;
+  const canvas = document.createElement('canvas');
+  canvas.setAttribute('aria-hidden', 'true');
+  Object.assign(canvas.style, {
+    position: 'absolute',
+    top: '0px',
+    left: '0px',
+    display: 'block',
+    width: `${width}px`,
+    height: `${height}px`,
+    backgroundColor: 'black',
+    border: '1px solid rgba(255,255,255,0.04)',
+    visibility: 'visible'
+  });
   canvas.width = width;
   canvas.height = height;
-  // default visible background so "blank" will be obvious (set to black)
-  canvas.style.backgroundColor = 'black';
-  // subtle default border to notice it
-  canvas.style.border = '1px solid rgba(255,255,255,0.04)';
-  canvas.style.visibility = 'visible';
+  wrapper.appendChild(canvas);
 
-  // Full worker script (inlined) - this MUST be the real implementation (no placeholders)
+  // --- Worker script (inlined) ---
   const workerScript = `
   // ---- raster-worker (inlined) ----
   let canvas = null;
@@ -839,7 +851,7 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
   let zBuffer = null;
   let imageData = null;
   let pixelBuf = null;
-  let sceneMeshes = []; // {id, positions(Float32Array), indices(Uint32Array), color:[r,g,b], cpuStatic}
+  let sceneMeshes = []; // {id, positions, indices, color, cpuStatic}
   let disableCulling = false;
 
   self.onmessage = (e) => {
@@ -851,21 +863,14 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
       W = msg.width || 0; H = msg.height || 0;
       if (off) {
         canvas = off;
-        try {
-          ctx = canvas.getContext('2d');
-        } catch (err) {
-          ctx = null;
-        }
+        try { ctx = canvas.getContext('2d'); } catch (err) { ctx = null; }
       } else {
-        // No offscreen canvas provided — don't treat this as a fatal worker error.
-        // This allows the main thread fallback renderer to be used without
-        // the worker loudly failing and coloring the DOM magenta.
         self.postMessage({ type: 'log', msg: 'worker init: no OffscreenCanvas provided; worker will remain idle.' });
         return;
       }
 
       if (!ctx) {
-        self.postMessage({ type: 'error', msg: 'canvas.getContext("2d") returned null or offscreen canvas invalid in worker init' });
+        self.postMessage({ type: 'error', msg: 'canvas.getContext(\"2d\") returned null or offscreen invalid in worker init' });
         return;
       } else {
         self.postMessage({ type: 'log', msg: 'worker init: got 2d context, W=' + W + ' H=' + H });
@@ -894,21 +899,16 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
       self.postMessage({ type: 'log', msg: 'setCulling disable=' + disableCulling });
     } else if (msg.type === 'resize') {
       W = msg.width; H = msg.height;
-      if (canvas) {
-        canvas.width = W; canvas.height = H;
-        initBuffers(W,H);
-      }
+      if (canvas) { canvas.width = W; canvas.height = H; initBuffers(W,H); }
       self.postMessage({ type: 'log', msg: 'resize W=' + W + ' H=' + H });
     } else if (msg.type === 'frame') {
       try {
-        // defensive check
         if (!msg.camera || !msg.camera.proj || !msg.camera.view) {
           self.postMessage({ type: 'log', msg: 'frame skipped: missing camera.proj/view' });
         } else {
           renderFrame(msg.camera, msg.transforms || []);
         }
       } catch (err) {
-        // ensure worker exceptions are reported
         self.postMessage({ type: 'error', msg: 'renderFrame threw: ' + (err && err.stack ? err.stack : String(err)) });
       }
     }
@@ -918,7 +918,7 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
     zBuffer = new Float32Array(w * h);
     imageData = new ImageData(w, h);
     pixelBuf = imageData.data;
-    for (let i = 0, p=0; i < w*h; ++i, p+=4) {
+    for (let i = 0, p = 0; i < w*h; ++i, p += 4) {
       pixelBuf[p] = 0; pixelBuf[p+1] = 0; pixelBuf[p+2] = 0; pixelBuf[p+3] = 255;
       zBuffer[i] = Infinity;
     }
@@ -929,8 +929,8 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
       const ai0 = a[i], ai1 = a[i+4], ai2 = a[i+8], ai3 = a[i+12];
       out[i] = ai0*b[0] + ai1*b[1] + ai2*b[2] + ai3*b[3];
       out[i+4] = ai0*b[4] + ai1*b[5] + ai2*b[6] + ai3*b[7];
-      out[i+8] = ai0*b[8] + ai1*b[9] + ai2*b[10]+ ai3*b[11];
-      out[i+12]= ai0*b[12]+ ai1*b[13]+ ai2*b[14]+ ai3*b[15];
+      out[i+8] = ai0*b[8] + ai1*b[9] + ai2*b[10] + ai3*b[11];
+      out[i+12] = ai0*b[12] + ai1*b[13] + ai2*b[14] + ai3*b[15];
     }
     return out;
   }
@@ -959,10 +959,7 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
     if (!ctx) return;
     try {
       const startMs = performance.now();
-      if (!W || !H) {
-        self.postMessage({ type: 'log', msg: 'renderFrame: zero canvas dims W=' + W + ' H=' + H });
-        return;
-      }
+      if (!W || !H) { self.postMessage({ type: 'log', msg: 'renderFrame: zero canvas dims W=' + W + ' H=' + H }); return; }
 
       const proj = camera.proj;
       const view = camera.view;
@@ -972,8 +969,7 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
       for (let t of transforms) tmap.set(t.id, t.model);
 
       const clear = camera.clearColor || [0,0,0];
-      // fill with clear color
-      for (let i = 0, p=0; i < W*H; ++i, p+=4) {
+      for (let i = 0, p = 0; i < W*H; ++i, p += 4) {
         pixelBuf[p] = clear[0];
         pixelBuf[p+1] = clear[1];
         pixelBuf[p+2] = clear[2];
@@ -1008,8 +1004,6 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
         for (let t = 0; t < idx.length; t += 3) {
           totalTriangles++;
           const i0 = idx[t], i1 = idx[t+1], i2 = idx[t+2];
-
-          // defensive index checks
           if (i0 < 0 || i1 < 0 || i2 < 0 || i0 >= sx.length || i1 >= sx.length || i2 >= sx.length) {
             if ((t % 300) === 0) self.postMessage({ type: 'log', msg: 'skipping malformed tri index set at mesh ' + mesh.id + ' t=' + t });
             continue;
@@ -1033,7 +1027,6 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
           const area = edgeFunc(x0,y0,x1,y1,x2,y2);
           if (!isFinite(area) || Math.abs(area) < 1e-6) continue;
 
-          // rasterize
           trianglesRasterized++;
           for (let py = minY; py <= maxY; ++py) {
             const rowBase = py * W;
@@ -1063,23 +1056,19 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
         }
       }
 
-      // report and draw to canvas
       try {
         ctx.putImageData(imageData, 0, 0);
       } catch (errPut) {
         self.postMessage({ type: 'error', msg: 'putImageData failed: ' + (errPut && errPut.stack ? errPut.stack : String(errPut)) });
       }
 
-      // If nothing was written, draw a visible debug rectangle so developer sees worker output
       if (pixelWrites === 0) {
         try {
           ctx.fillStyle = 'magenta';
           ctx.fillRect(Math.max(0, Math.floor(W*0.1)), Math.max(0, Math.floor(H*0.1)), Math.max(4, Math.floor(W*0.1)), Math.max(4, Math.floor(H*0.1)));
           ctx.fillStyle = 'white';
           ctx.fillRect(Math.floor(W/2), Math.floor(H/2), 2, 2);
-        } catch (dbgErr) {
-          // ignore
-        }
+        } catch (dbgErr) {}
       }
 
       const elapsed = Math.round(performance.now() - startMs);
@@ -1115,7 +1104,7 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
       console.log('[worker]', m.msg, m.payload || '');
       try {
         const s = String(m.msg || '');
-        const match = s.match(/pixels=(\\d+)/);
+        const match = s.match(/pixels=(\d+)/);
         if (match) {
           const pixels = Number(match[1]);
           if (pixels > 0) {
@@ -1128,7 +1117,7 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
             canvas.style.zIndex = '9999';
           }
         }
-      } catch (e) { /* ignore parse errors */ }
+      } catch (e) {}
     }
     if (m && m.type === 'error') {
       console.error('[worker-error]', m.msg);
@@ -1137,6 +1126,7 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
       canvas.style.zIndex = '9999';
     }
   };
+
   let off = null;
   try {
     if (typeof canvas.transferControlToOffscreen === 'function') {
@@ -1149,7 +1139,7 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
         off = null;
       }
     } else {
-      console.warn('transferControlToOffscreen not available in this environment; worker may not be able to draw to DOM canvas.');
+      console.warn('transferControlToOffscreen not available; worker may not draw to DOM canvas.');
       try { worker.postMessage({ type: 'init', width, height }); } catch (e) {}
     }
   } catch (e) {
@@ -1161,14 +1151,13 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
   const uploaded = new Map();
   let transferred = !!off;
 
-  // main-thread fallback renderer (copy of worker's raster implementation)
+  // main-thread fallback renderer
   let mainRaster = null;
   if (!transferred) {
     try {
       const mainCtx = canvas.getContext('2d');
       if (!mainCtx) throw new Error('2D context unavailable for main-thread fallback');
 
-      // replicate worker helper functions and raster code in main thread
       (function createMainRaster() {
         let W = width, H = height;
         let zBuffer = null;
@@ -1182,9 +1171,9 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
           zBuffer = new Float32Array(w*h);
           imageData = mainCtx.createImageData(w,h);
           pixelBuf = imageData.data;
-          for (let i = 0, p=0; i < w*h; ++i, p+=4) {
-            pixelBuf[p]=0; pixelBuf[p+1]=0; pixelBuf[p+2]=0; pixelBuf[p+3]=255;
-            zBuffer[i]=Infinity;
+          for (let i = 0, p = 0; i < w*h; ++i, p += 4) {
+            pixelBuf[p] = 0; pixelBuf[p+1] = 0; pixelBuf[p+2] = 0; pixelBuf[p+3] = 255;
+            zBuffer[i] = Infinity;
           }
         }
 
@@ -1193,8 +1182,8 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
             const ai0 = a[i], ai1 = a[i+4], ai2 = a[i+8], ai3 = a[i+12];
             out[i] = ai0*b[0] + ai1*b[1] + ai2*b[2] + ai3*b[3];
             out[i+4] = ai0*b[4] + ai1*b[5] + ai2*b[6] + ai3*b[7];
-            out[i+8] = ai0*b[8] + ai1*b[9] + ai2*b[10]+ ai3*b[11];
-            out[i+12]= ai0*b[12]+ ai1*b[13]+ ai2*b[14]+ ai3*b[15];
+            out[i+8] = ai0*b[8] + ai1*b[9] + ai2*b[10] + ai3*b[11];
+            out[i+12] = ai0*b[12] + ai1*b[13] + ai2*b[14] + ai3*b[15];
           }
           return out;
         }
@@ -1234,7 +1223,8 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
           const tmap = new Map();
           for (let t of transforms) tmap.set(t.id, t.model);
           const clear = camera.clearColor || [0,0,0];
-          for (let i = 0, p=0; i < W*H; ++i, p+=4) {
+
+          for (let i = 0, p = 0; i < W*H; ++i, p += 4) {
             pixelBuf[p] = clear[0];
             pixelBuf[p+1] = clear[1];
             pixelBuf[p+2] = clear[2];
@@ -1307,7 +1297,6 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
               }
             }
           }
-
           mainCtx.putImageData(imageData, 0, 0);
         }
 
@@ -1337,27 +1326,25 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
     }
   }
 
+  // --- API ---
   const api = {
     domElement: canvas,
+    domWrapper: wrapper,
 
     setSize(w, h, updateStyle = true) {
+      wrapper.style.width = `${w}px`;
+      wrapper.style.height = `${h}px`;
       canvas.style.width = `${w}px`;
       canvas.style.height = `${h}px`;
       if (updateStyle && canvas.parentElement) {
         const parent = canvas.parentElement;
-        if (getComputedStyle(parent).position === 'static') {
-          parent.style.position = 'relative';
-        }
+        if (getComputedStyle(parent).position === 'static') parent.style.position = 'relative';
       }
       if (!transferred) {
         canvas.width = w;
         canvas.height = h;
       }
-      try {
-        worker.postMessage({ type: 'resize', width: w, height: h });
-      } catch (e) {
-        console.warn('Failed to post resize to worker:', e);
-      }
+      try { worker.postMessage({ type: 'resize', width: w, height: h }); } catch (e) { console.warn('Failed to post resize to worker:', e); }
     },
 
     setClearColor(hex, alpha = 1) {
@@ -1366,20 +1353,17 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
 
     _clearColor: { hex: 0x000000, alpha: 1 },
 
+    // non-recursive setCulling (for both worker and fallback)
     setCulling(disable) {
       if (transferred) {
-        try {
-          worker.postMessage({ type: 'setCulling', disable: !!disable });
-        } catch (e) { console.warn('Failed to send setCulling to worker:', e); }
+        try { worker.postMessage({ type: 'setCulling', disable: !!disable }); } catch (e) { console.warn('Failed to send setCulling to worker:', e); }
       } else {
         if (mainRaster && typeof mainRaster.setCulling === 'function') mainRaster.setCulling(disable);
       }
     },
 
     async scanAndUploadScene(scene) {
-      try {
-        if (transferred) worker.postMessage({ type: 'clearScene' });
-      } catch(e) {}
+      try { if (transferred) worker.postMessage({ type: 'clearScene' }); } catch(e) {}
       if (mainRaster && typeof mainRaster.clearScene === 'function') mainRaster.clearScene();
       uploaded.clear();
 
@@ -1387,7 +1371,6 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
         if (!obj.isMesh || obj.userData?.cpuRenderable === false) return;
         const geom = obj.geometry;
         if (!geom || !geom.attributes || !geom.attributes.position) return;
-
         if (uploaded.has(obj.uuid)) return;
 
         const posAttr = geom.attributes.position;
@@ -1402,7 +1385,7 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
           for (let i = 0; i < triCount; ++i) indicesCopy[i] = i;
         }
 
-        let col = [180, 180, 180];
+        let col = [180,180,180];
         try {
           if (obj.material && obj.material.color) {
             col = [
@@ -1428,19 +1411,11 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
               cpuStatic
             }, [positionsCopy.buffer, indicesCopy.buffer]);
           } else if (mainRaster) {
-            mainRaster.uploadMesh({
-              id: obj.uuid,
-              positions: positionsCopy,
-              indices: indicesCopy,
-              color: col,
-              cpuStatic
-            });
+            mainRaster.uploadMesh({ id: obj.uuid, positions: positionsCopy, indices: indicesCopy, color: col, cpuStatic });
           }
         } catch (err) {
-          console.error("Failed to postMessage/upload mesh:", err);
-          try {
-            if (transferred) worker.postMessage({ type: 'uploadMesh', id: obj.uuid, positions: positionsCopy, indices: indicesCopy, color: col, cpuStatic });
-          } catch (_) {}
+          console.error('Failed to postMessage/upload mesh:', err);
+          try { if (transferred) worker.postMessage({ type: 'uploadMesh', id: obj.uuid, positions: positionsCopy, indices: indicesCopy, color: col, cpuStatic }); } catch (_) {}
         }
 
         uploaded.set(obj.uuid, { id: obj.uuid, cpuStatic });
@@ -1465,10 +1440,7 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
         const info = uploaded.get(obj.uuid);
         if (!info) return;
         if (info.cpuStatic) return;
-        transforms.push({
-          id: obj.uuid,
-          model: new Float32Array(obj.matrixWorld.elements)
-        });
+        transforms.push({ id: obj.uuid, model: new Float32Array(obj.matrixWorld.elements) });
       });
       const c = api._clearColor;
       const r = (c.hex >> 16) & 0xff;
@@ -1500,31 +1472,27 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
     },
 
     dispose() {
-      worker.terminate();
+      try { worker.terminate(); } catch (e) {}
       try { URL.revokeObjectURL(workerUrl); } catch (e) {}
     },
 
+    // debug helpers
     _debugUploaded: uploaded,
-    setCulling: (disable) => api.setCulling(disable),
-    debugDrawTestTriangle: function() {
+    debugDrawTestTriangle() {
       const pos = new Float32Array([ -0.5, -0.5, 0,  0.5, -0.5, 0,  0, 0.5, 0 ]);
       const idx = new Uint32Array([0,1,2]);
       if (transferred) {
         try {
-          worker.postMessage({ type:'uploadMesh', id: 'test-tri', positions: pos, indices: idx, color: [255, 0, 0], cpuStatic: false }, [pos.buffer, idx.buffer]);
-        } catch (e) {
-          console.warn('Failed to upload test triangle to worker:', e);
-        }
+          worker.postMessage({ type:'uploadMesh', id: 'test-tri', positions: pos, indices: idx, color: [255,0,0], cpuStatic: false }, [pos.buffer, idx.buffer]);
+        } catch (e) { console.warn('Failed to upload test triangle to worker:', e); }
       } else if (mainRaster) {
         mainRaster.uploadMesh({ id: 'test-tri', positions: pos, indices: idx, color: [255,0,0], cpuStatic: false });
       }
+      uploaded.set('test-tri', { id: 'test-tri', cpuStatic: false });
     }
   };
 
-  if (transferred) {
-    api.setSize(width, height, false);
-  }
-
+  if (transferred) api.setSize(width, height, false);
   api.setClearColor(0x000000, 1);
   return api;
 }
@@ -3604,6 +3572,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
