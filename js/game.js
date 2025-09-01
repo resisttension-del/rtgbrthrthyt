@@ -1130,7 +1130,6 @@ function renderFrame(camera, transforms) {
       canvas.style.zIndex = '9999';
     }
   };
-    const offscreen = canvas.transferControlToOffscreen();
   let off = null;
   try {
     if (typeof canvas.transferControlToOffscreen === 'function') {
@@ -3613,6 +3612,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
