@@ -1076,22 +1076,21 @@ async scanAndUploadScene(scene) {
     if (!obj.isMesh || obj.userData?.cpuRenderable === false) return;
     const geom = obj.geometry;
     if (!geom || !geom.attributes || !geom.attributes.position) return;
+    
+    // Check if this geometry has already been processed and uploaded
+    if (uploaded.has(obj.uuid)) return;
 
-    const id = obj.uuid;
-    if (uploaded.has(id)) return;
-
-    // Correctly get data from THREE.js geometry attributes
+    // Create FRESH copies of the data for safe transfer
     const posAttr = geom.attributes.position;
-    const positions = posAttr.array; // Direct reference to the Float32Array
+    const positionsCopy = new Float32Array(posAttr.array);
 
-    let indices;
+    let indicesCopy;
     if (geom.index) {
-      indices = geom.index.array; // Direct reference to the Uint32Array
+      indicesCopy = new Uint32Array(geom.index.array);
     } else {
-      // Create indices for non-indexed geometry (e.g., 3-vertex triangles)
-      const triCount = Math.floor(positions.length / 3) * 3;
-      indices = new Uint32Array(triCount);
-      for (let i = 0; i < triCount; ++i) indices[i] = i;
+      const triCount = Math.floor(positionsCopy.length / 3) * 3;
+      indicesCopy = new Uint32Array(triCount);
+      for (let i = 0; i < triCount; ++i) indicesCopy[i] = i;
     }
 
     let col = [180, 180, 180];
@@ -1110,29 +1109,21 @@ async scanAndUploadScene(scene) {
     const cpuStatic = !!obj.userData?.cpuStatic;
 
     try {
-      // Transfer the typed array buffers directly for efficiency
+      // Attempt to transfer the *copies* of the data
       worker.postMessage({
         type: 'uploadMesh',
-        id,
-        positions,
-        indices,
+        id: obj.uuid,
+        positions: positionsCopy,
+        indices: indicesCopy,
         color: col,
         cpuStatic
-      }, [positions.buffer, indices.buffer]);
+      }, [positionsCopy.buffer, indicesCopy.buffer]);
     } catch (err) {
-      // Fallback: This is less efficient but ensures data is sent
-      console.warn("Failed to transfer buffers, copying instead.", err);
-      worker.postMessage({
-        type: 'uploadMesh',
-        id,
-        positions,
-        indices,
-        color: col,
-        cpuStatic
-      });
+      // Fallback is no longer necessary, since we're already copying.
+      console.error("Failed to postMessage to worker:", err);
     }
 
-    uploaded.set(id, { id, cpuStatic });
+    uploaded.set(obj.uuid, { id: obj.uuid, cpuStatic });
   });
 },
 
@@ -3256,6 +3247,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
