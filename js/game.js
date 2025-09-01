@@ -823,15 +823,192 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
   canvas.style.width = `${width}px`;
   canvas.style.height = `${height}px`;
 
-  // Worker script (inlined)
-  const workerScript = `/* ... same worker script as before ... */`;
+  // Full worker script (inlined) - this MUST be the real implementation (no placeholders)
+  const workerScript = `
+  // ---- raster-worker (inlined) ----
+  let canvas = null;
+  let ctx = null;
+  let W = 0, H = 0;
+  let zBuffer = null;
+  let imageData = null;
+  let pixelBuf = null;
+  let sceneMeshes = []; // {id, positions(Float32Array), indices(Uint32Array), color:[r,g,b], cpuStatic}
+
+  self.onmessage = (e) => {
+    const msg = e.data;
+    if (msg.type === 'init') {
+      const off = msg.canvas;
+      canvas = off;
+      W = msg.width; H = msg.height;
+      canvas.width = W; canvas.height = H;
+      ctx = canvas.getContext('2d');
+      initBuffers(W, H);
+    } else if (msg.type === 'uploadMesh') {
+      sceneMeshes.push({
+        id: msg.id,
+        positions: msg.positions,
+        indices: msg.indices,
+        color: msg.color || [180,180,180],
+        cpuStatic: !!msg.cpuStatic
+      });
+    } else if (msg.type === 'removeMesh') {
+      const id = msg.id;
+      for (let i = 0; i < sceneMeshes.length; ++i) {
+        if (sceneMeshes[i].id === id) { sceneMeshes.splice(i,1); break; }
+      }
+    } else if (msg.type === 'resize') {
+      W = msg.width; H = msg.height;
+      if (canvas) {
+        canvas.width = W; canvas.height = H;
+        initBuffers(W,H);
+      }
+    } else if (msg.type === 'frame') {
+      renderFrame(msg.camera, msg.transforms || []);
+    } else if (msg.type === 'clearScene') {
+      sceneMeshes.length = 0;
+    }
+  };
+
+  function initBuffers(w,h) {
+    zBuffer = new Float32Array(w * h);
+    imageData = new ImageData(w, h);
+    pixelBuf = imageData.data;
+    // clear
+    for (let i = 0, p=0; i < w*h; ++i, p+=4) {
+      pixelBuf[p] = 0; pixelBuf[p+1] = 0; pixelBuf[p+2] = 0; pixelBuf[p+3] = 255;
+      zBuffer[i] = Infinity;
+    }
+  }
+
+  function multiplyMat4(a,b,out) {
+    for (let i = 0; i < 4; ++i) {
+      const ai0 = a[i], ai1 = a[i+4], ai2 = a[i+8], ai3 = a[i+12];
+      out[i]   = ai0*b[0] + ai1*b[1] + ai2*b[2] + ai3*b[3];
+      out[i+4] = ai0*b[4] + ai1*b[5] + ai2*b[6] + ai3*b[7];
+      out[i+8] = ai0*b[8] + ai1*b[9] + ai2*b[10]+ ai3*b[11];
+      out[i+12]= ai0*b[12]+ ai1*b[13]+ ai2*b[14]+ ai3*b[15];
+    }
+    return out;
+  }
+
+  function transformVec3(mat, vx, vy, vz, out) {
+    const x = mat[0]*vx + mat[4]*vy + mat[8]*vz + mat[12];
+    const y = mat[1]*vx + mat[5]*vy + mat[9]*vz + mat[13];
+    const z = mat[2]*vx + mat[6]*vy + mat[10]*vz + mat[14];
+    const w = mat[3]*vx + mat[7]*vy + mat[11]*vz + mat[15];
+    out[0] = x / w; out[1] = y / w; out[2] = z / w; out[3] = w;
+  }
+
+  function ndcToScreen(ndcX, ndcY) {
+    return [(ndcX * 0.5 + 0.5) * W, (-ndcY * 0.5 + 0.5) * H];
+  }
+
+  function edgeFunc(ax,ay,bx,by,cx,cy) {
+    return (cx - ax) * (by - ay) - (cy - ay) * (bx - ax);
+  }
+
+  function renderFrame(camera, transforms) {
+    if (!ctx) return;
+    const proj = camera.proj;
+    const view = camera.view;
+    const viewProj = new Float32Array(16);
+    multiplyMat4(proj, view, viewProj);
+
+    const tmap = new Map();
+    for (let t of transforms) tmap.set(t.id, t.model);
+
+    const clear = camera.clearColor || [0,0,0];
+    for (let i = 0, p=0; i < W*H; ++i, p+=4) {
+      pixelBuf[p] = clear[0];
+      pixelBuf[p+1] = clear[1];
+      pixelBuf[p+2] = clear[2];
+      pixelBuf[p+3] = 255;
+      zBuffer[i] = Infinity;
+    }
+
+    const vClip = new Float32Array(4);
+    for (let mesh of sceneMeshes) {
+      const pos = mesh.positions;
+      const idx = mesh.indices;
+      const color = mesh.color;
+      const model = tmap.get(mesh.id) || identityMat4();
+
+      const mvp = new Float32Array(16);
+      multiplyMat4(viewProj, model, mvp);
+
+      const vcount = pos.length / 3;
+      const sx = new Float32Array(vcount);
+      const sy = new Float32Array(vcount);
+      const sz = new Float32Array(vcount);
+      for (let vi = 0; vi < vcount; ++vi) {
+        transformVec3(mvp, pos[vi*3], pos[vi*3+1], pos[vi*3+2], vClip);
+        const sc = ndcToScreen(vClip[0], vClip[1]);
+        sx[vi] = sc[0]; sy[vi] = sc[1]; sz[vi] = vClip[2];
+      }
+
+      for (let t = 0; t < idx.length; t += 3) {
+        const i0 = idx[t], i1 = idx[t+1], i2 = idx[t+2];
+        const x0 = sx[i0], y0 = sy[i0], z0 = sz[i0];
+        const x1 = sx[i1], y1 = sy[i1], z1 = sz[i1];
+        const x2 = sx[i2], y2 = sy[i2], z2 = sz[i2];
+
+        const minX = Math.max(0, Math.floor(Math.min(x0,x1,x2)));
+        const maxX = Math.min(W-1, Math.ceil(Math.max(x0,x1,x2)));
+        const minY = Math.max(0, Math.floor(Math.min(y0,y1,y2)));
+        const maxY = Math.min(H-1, Math.ceil(Math.max(y0,y1,y2)));
+        if (maxX < 0 || maxY < 0 || minX >= W || minY >= H) continue;
+
+        const ux = x1 - x0, uy = y1 - y0;
+        const vx = x2 - x0, vy = y2 - y0;
+        const cross = ux*vy - uy*vx;
+        if (cross >= 0) continue;
+
+        const area = edgeFunc(x0,y0,x1,y1,x2,y2);
+        if (Math.abs(area) < 1e-6) continue;
+
+        for (let py = minY; py <= maxY; ++py) {
+          const rowBase = py * W;
+          for (let px = minX; px <= maxX; ++px) {
+            const cx = px + 0.5, cy = py + 0.5;
+            const w0 = edgeFunc(x1,y1,x2,y2,cx,cy);
+            const w1 = edgeFunc(x2,y2,x0,y0,cx,cy);
+            const w2 = edgeFunc(x0,y0,x1,y1,cx,cy);
+            if ((w0 >= 0 && w1 >= 0 && w2 >= 0) || (w0 <= 0 && w1 <= 0 && w2 <= 0)) {
+              const b0 = w0 / area, b1 = w1 / area, b2 = w2 / area;
+              const zInterp = b0*z0 + b1*z1 + b2*z2;
+              const depth = (zInterp + 1) * 0.5;
+              const idxBuf = rowBase + px;
+              if (depth < zBuffer[idxBuf]) {
+                const p = idxBuf * 4;
+                pixelBuf[p] = color[0];
+                pixelBuf[p+1] = color[1];
+                pixelBuf[p+2] = color[2];
+                pixelBuf[p+3] = 255;
+                zBuffer[idxBuf] = depth;
+              }
+            }
+          }
+        }
+      }
+    }
+
+    ctx.putImageData(imageData, 0, 0);
+  }
+
+  function identityMat4() {
+    const I = new Float32Array(16);
+    I[0]=1; I[5]=1; I[10]=1; I[15]=1;
+    return I;
+  }
+  // ---- end worker ----
+  `;
 
   // Create blob URL and start worker
   const blob = new Blob([workerScript], { type: 'application/javascript' });
   const workerUrl = URL.createObjectURL(blob);
   const worker = new Worker(workerUrl);
 
-  // transfer OffscreenCanvas to worker — do this AFTER we set canvas.width/height
+  // transfer OffscreenCanvas to worker
   const off = canvas.transferControlToOffscreen();
   worker.postMessage({ type: 'init', canvas: off, width, height }, [off]);
 
@@ -845,17 +1022,12 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
     domElement: canvas,
 
     setSize(w, h, updateStyle = true) {
-      // If we haven't transferred, we can set canvas.width/height (pixel buffer).
-      // If we've transferred, modifying canvas.width will throw; only update CSS size and tell worker.
-      if (!transferred) {
-        canvas.width = w;
-        canvas.height = h;
-      }
+      // Avoid setting canvas.width after transfer — update CSS and tell worker.
       if (updateStyle) {
         canvas.style.width = `${w}px`;
         canvas.style.height = `${h}px`;
       }
-      // Always notify worker to resize its OffscreenCanvas
+      // Notify worker to resize OffscreenCanvas
       try {
         worker.postMessage({ type: 'resize', width: w, height: h });
       } catch (e) {
@@ -913,7 +1085,6 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
 
         const cpuStatic = !!obj.userData?.cpuStatic;
 
-        // Transfer the buffers to the worker to avoid copies
         try {
           worker.postMessage({
             type: 'uploadMesh',
@@ -924,7 +1095,7 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
             cpuStatic
           }, [positions.buffer, indices.buffer]);
         } catch (err) {
-          // In case transfer fails, fall back to a non-transfering postMessage (will copy)
+          // fallback without transfer (copy)
           worker.postMessage({
             type: 'uploadMesh',
             id,
@@ -981,11 +1152,9 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
     }
   };
 
-  // Do NOT set canvas.width/height again after transfer: we already did before transfer.
-  // But update the worker to the same initial size
+  // Make sure worker knows initial size
   worker.postMessage({ type: 'resize', width, height });
 
-  // No call to api.setSize(width,height) here (would try to write canvas.width if not careful).
   api.setClearColor(0x000000, 1);
   return api;
 }
@@ -2333,11 +2502,12 @@ export function animate(timestamp) {
       if (respawnOverlay) respawnOverlay.style.display = "flex";
 
       // Render final frame
-      if (composer && typeof composer.render === 'function') {
-        composer.render();
-      } else if (renderer && typeof renderer.render === 'function') {
-        renderer.render(scene, window.camera);
-      }
+if (renderer && typeof renderer.render === 'function') {
+  renderer.render(scene, window.camera);
+} else if (composer && typeof composer.render === 'function') {
+  // fallback: composer might be a WebGL composer; only call it if renderer absent.
+  composer.render();
+}
 
       postFrameCleanup();
       return;
@@ -3093,6 +3263,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
