@@ -1099,8 +1099,36 @@ function renderFrame(camera, transforms) {
   worker.onerror = (e) => console.error('Worker error:', e);
   worker.onmessage = (ev) => {
     const m = ev.data;
-    if (m && m.type === 'log') console.log('[worker]', m.msg, m.payload || '');
-    if (m && m.type === 'error') console.error('[worker-error]', m.msg);
+    if (m && m.type === 'log') {
+      console.log('[worker]', m.msg, m.payload || '');
+      // look for the renderFrame summary produced by the instrumented worker
+      try {
+        const s = String(m.msg || '');
+        const match = s.match(/pixels=(\d+)/);
+        if (match) {
+          const pixels = Number(match[1]);
+          if (pixels > 0) {
+            // show green border when frames are actually writing pixels
+            canvas.style.border = '3px solid rgba(0,220,80,0.95)';
+            // ensure it's on top and visible
+            canvas.style.zIndex = '999';
+            canvas.style.visibility = 'visible';
+          } else {
+            // no pixels written — show a loud magenta background to indicate a problem
+            canvas.style.background = 'magenta';
+            canvas.style.border = '3px solid rgba(255,40,40,0.95)';
+            canvas.style.zIndex = '9999';
+          }
+        }
+      } catch (e) { /* ignore parse errors */ }
+    }
+    if (m && m.type === 'error') {
+      console.error('[worker-error]', m.msg);
+      // Visualize worker error
+      canvas.style.background = 'magenta';
+      canvas.style.border = '4px dashed red';
+      canvas.style.zIndex = '9999';
+    }
   };
 
   let off = null;
@@ -1310,21 +1338,26 @@ function renderFrame(camera, transforms) {
     domElement: canvas,
 
     setSize(w, h, updateStyle = true) {
-      if (updateStyle) {
-        canvas.style.width = `${w}px`;
-        canvas.style.height = `${h}px`;
+      // always keep CSS size in sync so the element occupies space in layout
+      canvas.style.width = `${w}px`;
+      canvas.style.height = `${h}px`;
+      if (updateStyle && canvas.parentElement) {
+        // also expand the canvas to fill parent visually
+        // (parent should have position:relative — if not, attempt to set)
+        const parent = canvas.parentElement;
+        if (getComputedStyle(parent).position === 'static') {
+          parent.style.position = 'relative';
+        }
       }
       if (!transferred) {
+        // keep pixel buffer in sync when main-thread rendering
         canvas.width = w;
         canvas.height = h;
-        if (mainRaster && typeof mainRaster.initBuffers === 'function') mainRaster.initBuffers(w,h);
-      } else {
-        // If transferred, the worker owns the offscreen canvas. Tell worker to resize.
-        try {
-          worker.postMessage({ type: 'resize', width: w, height: h });
-        } catch (e) {
-          console.warn('Failed to post resize to worker:', e);
-        }
+      }
+      try {
+        worker.postMessage({ type: 'resize', width: w, height: h });
+      } catch (e) {
+        console.warn('Failed to post resize to worker:', e);
       }
     },
 
@@ -1543,9 +1576,17 @@ export async function initSceneCrocodilosConstruction() {
 
   const container = document.getElementById("game-container");
   if (container) {
+    if (getComputedStyle(container).position === 'static') {
+      container.style.position = 'relative';
+    }
     const prev = container.querySelector('canvas');
     if (prev) container.removeChild(prev);
     container.appendChild(renderer.domElement);
+    // make canvas fill container visually
+    renderer.domElement.style.width = `${container.clientWidth}px`;
+    renderer.domElement.style.height = `${container.clientHeight}px`;
+    renderer.domElement.style.top = '0';
+    renderer.domElement.style.left = '0';
   }
 
   // 4. Hemisphere Light (kept for scene lighting math / potential use)
@@ -3572,6 +3613,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
