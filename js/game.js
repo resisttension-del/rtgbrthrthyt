@@ -836,12 +836,29 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
 
   self.onmessage = (e) => {
     const msg = e.data;
+    if (!msg || typeof msg.type === 'undefined') return;
+
     if (msg.type === 'init') {
       const off = msg.canvas;
-      canvas = off;
-      W = msg.width; H = msg.height;
-      canvas.width = W; canvas.height = H;
-      ctx = canvas.getContext('2d');
+      canvas = off || null;
+      W = msg.width || 0; H = msg.height || 0;
+      if (canvas) {
+        canvas.width = W; canvas.height = H;
+        try {
+          ctx = canvas.getContext('2d');
+        } catch (err) {
+          ctx = null;
+        }
+      }
+
+      if (!ctx) {
+        // Inform main thread that the worker couldn't get a 2D context.
+        self.postMessage({ type: 'error', msg: 'canvas.getContext(\"2d\") returned null or canvas missing in worker init' });
+        return;
+      } else {
+        self.postMessage({ type: 'log', msg: 'worker init: got 2d context, W=' + W + ' H=' + H });
+        try { ctx.fillStyle = 'magenta'; ctx.fillRect(0,0,4,4); } catch(e){ self.postMessage({type:'error', msg:'ctx.fillRect thrown: '+e}); }
+      }
       initBuffers(W, H);
     } else if (msg.type === 'uploadMesh') {
       sceneMeshes.push({
@@ -896,6 +913,13 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
     const y = mat[1]*vx + mat[5]*vy + mat[9]*vz + mat[13];
     const z = mat[2]*vx + mat[6]*vy + mat[10]*vz + mat[14];
     const w = mat[3]*vx + mat[7]*vy + mat[11]*vz + mat[15];
+
+    // guard against w == 0 or non-finite
+    if (!w || !isFinite(w)) {
+      out[0] = 2; out[1] = 2; out[2] = 1; out[3] = w;
+      return;
+    }
+
     out[0] = x / w; out[1] = y / w; out[2] = z / w; out[3] = w;
   }
 
@@ -1006,42 +1030,37 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
   // Create blob URL and start worker
   const blob = new Blob([workerScript], { type: 'application/javascript' });
   const workerUrl = URL.createObjectURL(blob);
-  const worker = new Worker(workerUrl);
+  const worker = new Worker(workerUrl, { name: 'raster-worker' });
 
-worker.onerror = (e) => console.error('Worker error:', e);
-worker.onmessage = (ev) => {
-  const m = ev.data;
-  if (m && m.type === 'log') console.log('[worker]', m.msg, m.payload || '');
-  if (m && m.type === 'error') console.error('[worker-error]', m.msg);
-};
-    
+  worker.onerror = (e) => console.error('Worker error:', e);
+  worker.onmessage = (ev) => {
+    const m = ev.data;
+    if (m && m.type === 'log') console.log('[worker]', m.msg, m.payload || '');
+    if (m && m.type === 'error') console.error('[worker-error]', m.msg);
+  };
+
   // transfer OffscreenCanvas to worker
-  const off = canvas.transferControlToOffscreen();
-  worker.postMessage({ type: 'init', canvas: off, width, height }, [off]);
-
-if (msg.type === 'init') {
-  const off = msg.canvas;
-  canvas = off;
-  W = msg.width; H = msg.height;
-  canvas.width = W; canvas.height = H;
-  ctx = canvas.getContext('2d');
-
-  if (!ctx) {
-    self.postMessage({type:'error', msg:'canvas.getContext(\"2d\") returned null'});
-    return;
-  } else {
-    self.postMessage({type:'log', msg:'worker init: got 2d context, W=' + W + ' H=' + H});
-    // quick visual test: draw a tiny magenta square
-    try { ctx.fillStyle = 'magenta'; ctx.fillRect(0,0,4,4); } catch(e){ self.postMessage({type:'error', msg:'ctx.fillRect thrown: '+e}); }
+  let off = null;
+  try {
+    if (typeof canvas.transferControlToOffscreen === 'function') {
+      off = canvas.transferControlToOffscreen();
+      worker.postMessage({ type: 'init', canvas: off, width, height }, [off]);
+    } else {
+      // Older environments: try to still initialize worker (worker will report error if no canvas)
+      console.warn('transferControlToOffscreen not available in this environment; worker may not be able to draw to DOM canvas.');
+      worker.postMessage({ type: 'init', width, height });
+    }
+  } catch (e) {
+    console.error('Failed to transfer OffscreenCanvas to worker:', e);
+    // still attempt to init without transfer - worker will report inability
+    try { worker.postMessage({ type: 'init', width, height }); } catch (err) {}
   }
-  initBuffers(W, H);
-}
-    
+
   // bookkeeping - map mesh.uuid -> metadata
   const uploaded = new Map(); // uuid -> { id, cpuStatic }
 
   // track that we've transferred the canvas
-  let transferred = true;
+  let transferred = !!off;
 
   const api = {
     domElement: canvas,
@@ -1178,11 +1197,12 @@ if (msg.type === 'init') {
   };
 
   // Make sure worker knows initial size
-  worker.postMessage({ type: 'resize', width, height });
+  try { worker.postMessage({ type: 'resize', width, height }); } catch (e) {}
 
   api.setClearColor(0x000000, 1);
   return api;
 }
+
 
 
 /* ---------- Updated scene initializers (CPU renderer) ---------- */
