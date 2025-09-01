@@ -1068,75 +1068,73 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
 
     _clearColor: { hex: 0x000000, alpha: 1 },
 
-    async scanAndUploadScene(scene) {
-      worker.postMessage({ type: 'clearScene' });
-      uploaded.clear();
+async scanAndUploadScene(scene) {
+  worker.postMessage({ type: 'clearScene' });
+  uploaded.clear();
 
-      scene.traverse((obj) => {
-        if (!obj.isMesh || obj.userData?.cpuRenderable === false) return;
-        const geom = obj.geometry;
-        if (!geom || !geom.attributes || !geom.attributes.position) return;
+  scene.traverse((obj) => {
+    if (!obj.isMesh || obj.userData?.cpuRenderable === false) return;
+    const geom = obj.geometry;
+    if (!geom || !geom.attributes || !geom.attributes.position) return;
 
-        const id = obj.uuid;
-        if (uploaded.has(id)) return;
+    const id = obj.uuid;
+    if (uploaded.has(id)) return;
 
-        const posAttr = geom.attributes.position;
-        const positions = new Float32Array(posAttr.count * 3);
-        for (let i = 0; i < posAttr.count; ++i) {
-          positions[i*3 + 0] = posAttr.getX(i);
-          positions[i*3 + 1] = posAttr.getY(i);
-          positions[i*3 + 2] = posAttr.getZ(i);
-        }
+    // Correctly get data from THREE.js geometry attributes
+    const posAttr = geom.attributes.position;
+    const positions = posAttr.array; // Direct reference to the Float32Array
 
-        let indices;
-        if (geom.index) {
-          const idxAttr = geom.index;
-          indices = new Uint32Array(idxAttr.count);
-          for (let i = 0; i < idxAttr.count; ++i) indices[i] = idxAttr.getX(i);
-        } else {
-          const triCount = Math.floor(posAttr.count / 3) * 3;
-          indices = new Uint32Array(triCount);
-          for (let i = 0; i < triCount; ++i) indices[i] = i;
-        }
+    let indices;
+    if (geom.index) {
+      indices = geom.index.array; // Direct reference to the Uint32Array
+    } else {
+      // Create indices for non-indexed geometry (e.g., 3-vertex triangles)
+      const triCount = Math.floor(positions.length / 3) * 3;
+      indices = new Uint32Array(triCount);
+      for (let i = 0; i < triCount; ++i) indices[i] = i;
+    }
 
-        let col = [180,180,180];
-        try {
-          if (obj.material && obj.material.color) {
-            col = [
-              Math.min(255, Math.round((obj.material.color.r || 1) * 255)),
-              Math.min(255, Math.round((obj.material.color.g || 1) * 255)),
-              Math.min(255, Math.round((obj.material.color.b || 1) * 255))
-            ];
-          } else if (obj.userData?.cpuColor) {
-            col = obj.userData.cpuColor;
-          }
-        } catch(e) {}
+    let col = [180, 180, 180];
+    try {
+      if (obj.material && obj.material.color) {
+        col = [
+          Math.min(255, Math.round((obj.material.color.r || 1) * 255)),
+          Math.min(255, Math.round((obj.material.color.g || 1) * 255)),
+          Math.min(255, Math.round((obj.material.color.b || 1) * 255))
+        ];
+      } else if (obj.userData?.cpuColor) {
+        col = obj.userData.cpuColor;
+      }
+    } catch (e) {}
 
-        const cpuStatic = !!obj.userData?.cpuStatic;
+    const cpuStatic = !!obj.userData?.cpuStatic;
 
-        try {
-          worker.postMessage({
-            type: 'uploadMesh',
-            id,
-            positions,
-            indices,
-            color: col,
-            cpuStatic
-          }, [positions.buffer, indices.buffer]);
-        } catch (err) {
-          worker.postMessage({
-            type: 'uploadMesh',
-            id,
-            positions: Array.from(positions),
-            indices: Array.from(indices),
-            color: col,
-            cpuStatic
-          });
-        }
-
-        uploaded.set(id, { id, cpuStatic });
+    try {
+      // Transfer the typed array buffers directly for efficiency
+      worker.postMessage({
+        type: 'uploadMesh',
+        id,
+        positions,
+        indices,
+        color: col,
+        cpuStatic
+      }, [positions.buffer, indices.buffer]);
+    } catch (err) {
+      // Fallback: This is less efficient but ensures data is sent
+      console.warn("Failed to transfer buffers, copying instead.", err);
+      worker.postMessage({
+        type: 'uploadMesh',
+        id,
+        positions,
+        indices,
+        color: col,
+        cpuStatic
       });
-    },
+    }
+
+    uploaded.set(id, { id, cpuStatic });
+  });
+},
 
     removeMesh(mesh) {
       const id = mesh.uuid;
@@ -3258,6 +3256,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
