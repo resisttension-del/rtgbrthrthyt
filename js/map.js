@@ -157,6 +157,11 @@ export async function createCrocodilosConstruction(scene, physicsController) {
                         if (child.material.map) {
                             child.material.map.anisotropy = 4;
                         }
+                        // Mark for CPU renderer: static environment mesh
+                        child.userData = child.userData || {};
+                        child.userData.cpuStatic = true;
+                        child.userData.cpuRenderable = true;
+
                         window.envMeshes.push(child); // Store reference to environment meshes
                         // Ensure geometries have indices for BVH computation if missing
                         if (child.geometry && !child.geometry.index) {
@@ -216,6 +221,16 @@ export async function createCrocodilosConstruction(scene, physicsController) {
 
     // Wait for the map loading to complete
     await mapLoadPromise;
+
+    // NEW: If a CPU renderer with a scan/upload API exists, upload the scene meshes now.
+    if (window.renderer && typeof window.renderer.scanAndUploadScene === 'function') {
+        try {
+            await window.renderer.scanAndUploadScene(scene);
+            console.log('✔️ Scene scanned and uploaded to CPU renderer.');
+        } catch (e) {
+            console.warn('⚠️ renderer.scanAndUploadScene failed:', e);
+        }
+    }
 
     // When fully done, update readiness status and hide loader UI
     loaderUI.onComplete(() => {
@@ -296,6 +311,11 @@ export async function createSigmaCity(scene, physicsController) {
                         if (child.material.map) {
                             child.material.map.anisotropy = 4;
                         }
+                        // Mark for CPU renderer: static environment mesh
+                        child.userData = child.userData || {};
+                        child.userData.cpuStatic = true;
+                        child.userData.cpuRenderable = true;
+
                         window.envMeshes.push(child); // Store reference to environment meshes
                         // Ensure geometries have indices for BVH computation if missing
                         if (child.geometry && !child.geometry.index) {
@@ -355,6 +375,16 @@ export async function createSigmaCity(scene, physicsController) {
 
     // Wait for the map loading to complete
     await mapLoadPromise;
+
+    // NEW: If a CPU renderer with a scan/upload API exists, upload the scene meshes now.
+    if (window.renderer && typeof window.renderer.scanAndUploadScene === 'function') {
+        try {
+            await window.renderer.scanAndUploadScene(scene);
+            console.log('✔️ Scene scanned and uploaded to CPU renderer.');
+        } catch (e) {
+            console.warn('⚠️ renderer.scanAndUploadScene failed:', e);
+        }
+    }
 
     // When fully done, update readiness status and hide loader UI
     loaderUI.onComplete(() => {
@@ -429,6 +459,11 @@ export async function createDiddyDunes(scene, physicsController) {
                         if (child.material.map) {
                             child.material.map.anisotropy = 4;
                         }
+                        // Mark for CPU renderer: static environment mesh
+                        child.userData = child.userData || {};
+                        child.userData.cpuStatic = true;
+                        child.userData.cpuRenderable = true;
+
                         window.envMeshes.push(child); // Store reference to environment meshes
                         // Ensure geometries have indices for BVH computation if missing
                         if (child.geometry && !child.geometry.index) {
@@ -488,6 +523,16 @@ export async function createDiddyDunes(scene, physicsController) {
 
     // Wait for the map loading to complete
     await mapLoadPromise;
+
+    // NEW: If a CPU renderer with a scan/upload API exists, upload the scene meshes now.
+    if (window.renderer && typeof window.renderer.scanAndUploadScene === 'function') {
+        try {
+            await window.renderer.scanAndUploadScene(scene);
+            console.log('✔️ Scene scanned and uploaded to CPU renderer.');
+        } catch (e) {
+            console.warn('⚠️ renderer.scanAndUploadScene failed:', e);
+        }
+    }
 
     // When fully done, update readiness status and hide loader UI
     loaderUI.onComplete(() => {
