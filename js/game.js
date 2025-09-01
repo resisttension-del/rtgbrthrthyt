@@ -812,13 +812,21 @@ function setupDetailToggle() {
 
 function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
   // DOM canvas (visual)
-  const canvas = document.createElement('canvas');
-  canvas.style.position = 'relative';
-  canvas.style.zIndex = '0';
-  canvas.width = width;
-  canvas.height = height;
+  const canvas = document.createElement('gameCanvas');
+  // make it absolutely positioned and visible on top so CSS overlays won't hide it
+  canvas.style.position = 'absolute';
+  canvas.style.top = '0';
+  canvas.style.left = '0';
+  canvas.style.zIndex = '999';
+  canvas.style.display = 'block';
   canvas.style.width = `${width}px`;
   canvas.style.height = `${height}px`;
+  canvas.width = width;
+  canvas.height = height;
+  // default visible background so "blank" will be obvious (set to black)
+  canvas.style.background = 'black';
+  // subtle default border to notice it
+  canvas.style.border = '1px solid rgba(255,255,255,0.04)';
 
   // Full worker script (inlined) - this MUST be the real implementation (no placeholders)
   const workerScript = `
@@ -3564,6 +3572,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
