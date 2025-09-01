@@ -816,8 +816,6 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
   const canvas = document.createElement('canvas');
   canvas.style.position = 'relative';
   canvas.style.zIndex = '0';
-
-  // IMPORTANT: set initial DOM canvas pixel size BEFORE transfer
   canvas.width = width;
   canvas.height = height;
   canvas.style.width = `${width}px`;
@@ -840,10 +838,9 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
 
     if (msg.type === 'init') {
       const off = msg.canvas;
-      canvas = off || null;
       W = msg.width || 0; H = msg.height || 0;
-      if (canvas) {
-        canvas.width = W; canvas.height = H;
+      if (off) {
+        canvas = off;
         try {
           ctx = canvas.getContext('2d');
         } catch (err) {
@@ -852,12 +849,10 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
       }
 
       if (!ctx) {
-        // Inform main thread that the worker couldn't get a 2D context.
-        self.postMessage({ type: 'error', msg: 'canvas.getContext(\"2d\") returned null or canvas missing in worker init' });
+        self.postMessage({ type: 'error', msg: 'canvas.getContext(\\"2d\\") returned null or canvas missing in worker init' });
         return;
       } else {
         self.postMessage({ type: 'log', msg: 'worker init: got 2d context, W=' + W + ' H=' + H });
-        try { ctx.fillStyle = 'magenta'; ctx.fillRect(0,0,4,4); } catch(e){ self.postMessage({type:'error', msg:'ctx.fillRect thrown: '+e}); }
       }
       initBuffers(W, H);
     } else if (msg.type === 'uploadMesh') {
@@ -890,7 +885,6 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
     zBuffer = new Float32Array(w * h);
     imageData = new ImageData(w, h);
     pixelBuf = imageData.data;
-    // clear
     for (let i = 0, p=0; i < w*h; ++i, p+=4) {
       pixelBuf[p] = 0; pixelBuf[p+1] = 0; pixelBuf[p+2] = 0; pixelBuf[p+3] = 255;
       zBuffer[i] = Infinity;
@@ -900,7 +894,7 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
   function multiplyMat4(a,b,out) {
     for (let i = 0; i < 4; ++i) {
       const ai0 = a[i], ai1 = a[i+4], ai2 = a[i+8], ai3 = a[i+12];
-      out[i]   = ai0*b[0] + ai1*b[1] + ai2*b[2] + ai3*b[3];
+      out[i] = ai0*b[0] + ai1*b[1] + ai2*b[2] + ai3*b[3];
       out[i+4] = ai0*b[4] + ai1*b[5] + ai2*b[6] + ai3*b[7];
       out[i+8] = ai0*b[8] + ai1*b[9] + ai2*b[10]+ ai3*b[11];
       out[i+12]= ai0*b[12]+ ai1*b[13]+ ai2*b[14]+ ai3*b[15];
@@ -913,13 +907,10 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
     const y = mat[1]*vx + mat[5]*vy + mat[9]*vz + mat[13];
     const z = mat[2]*vx + mat[6]*vy + mat[10]*vz + mat[14];
     const w = mat[3]*vx + mat[7]*vy + mat[11]*vz + mat[15];
-
-    // guard against w == 0 or non-finite
     if (!w || !isFinite(w)) {
       out[0] = 2; out[1] = 2; out[2] = 1; out[3] = w;
       return;
     }
-
     out[0] = x / w; out[1] = y / w; out[2] = z / w; out[3] = w;
   }
 
@@ -937,10 +928,8 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
     const view = camera.view;
     const viewProj = new Float32Array(16);
     multiplyMat4(proj, view, viewProj);
-
     const tmap = new Map();
     for (let t of transforms) tmap.set(t.id, t.model);
-
     const clear = camera.clearColor || [0,0,0];
     for (let i = 0, p=0; i < W*H; ++i, p+=4) {
       pixelBuf[p] = clear[0];
@@ -1027,7 +1016,6 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
   // ---- end worker ----
   `;
 
-  // Create blob URL and start worker
   const blob = new Blob([workerScript], { type: 'application/javascript' });
   const workerUrl = URL.createObjectURL(blob);
   const worker = new Worker(workerUrl, { name: 'raster-worker' });
@@ -1039,39 +1027,35 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
     if (m && m.type === 'error') console.error('[worker-error]', m.msg);
   };
 
-  // transfer OffscreenCanvas to worker
   let off = null;
   try {
     if (typeof canvas.transferControlToOffscreen === 'function') {
       off = canvas.transferControlToOffscreen();
       worker.postMessage({ type: 'init', canvas: off, width, height }, [off]);
     } else {
-      // Older environments: try to still initialize worker (worker will report error if no canvas)
       console.warn('transferControlToOffscreen not available in this environment; worker may not be able to draw to DOM canvas.');
       worker.postMessage({ type: 'init', width, height });
     }
   } catch (e) {
     console.error('Failed to transfer OffscreenCanvas to worker:', e);
-    // still attempt to init without transfer - worker will report inability
     try { worker.postMessage({ type: 'init', width, height }); } catch (err) {}
   }
 
-  // bookkeeping - map mesh.uuid -> metadata
-  const uploaded = new Map(); // uuid -> { id, cpuStatic }
-
-  // track that we've transferred the canvas
+  const uploaded = new Map();
   let transferred = !!off;
 
   const api = {
     domElement: canvas,
 
     setSize(w, h, updateStyle = true) {
-      // Avoid setting canvas.width after transfer — update CSS and tell worker.
       if (updateStyle) {
         canvas.style.width = `${w}px`;
         canvas.style.height = `${h}px`;
       }
-      // Notify worker to resize OffscreenCanvas
+      if (!transferred) {
+        canvas.width = w;
+        canvas.height = h;
+      }
       try {
         worker.postMessage({ type: 'resize', width: w, height: h });
       } catch (e) {
@@ -1086,9 +1070,11 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
     _clearColor: { hex: 0x000000, alpha: 1 },
 
     async scanAndUploadScene(scene) {
+      worker.postMessage({ type: 'clearScene' });
+      uploaded.clear();
+
       scene.traverse((obj) => {
-        if (!obj.isMesh) return;
-        if (obj.userData?.cpuRenderable === false) return;
+        if (!obj.isMesh || obj.userData?.cpuRenderable === false) return;
         const geom = obj.geometry;
         if (!geom || !geom.attributes || !geom.attributes.position) return;
 
@@ -1139,12 +1125,11 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
             cpuStatic
           }, [positions.buffer, indices.buffer]);
         } catch (err) {
-          // fallback without transfer (copy)
           worker.postMessage({
             type: 'uploadMesh',
             id,
-            positions,
-            indices,
+            positions: Array.from(positions),
+            indices: Array.from(indices),
             color: col,
             cpuStatic
           });
@@ -1163,9 +1148,13 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
     },
 
     render(scene, camera) {
+      if (!transferred) {
+        // Fallback for non-OffscreenCanvas environments
+        console.warn('Skipping render call because OffscreenCanvas was not transferred.');
+        return;
+      }
       const proj = new Float32Array(camera.projectionMatrix.elements);
       const view = new Float32Array(camera.matrixWorldInverse.elements);
-
       const transforms = [];
       scene.traverse((obj) => {
         if (!obj.isMesh) return;
@@ -1177,7 +1166,6 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
           model: new Float32Array(obj.matrixWorld.elements)
         });
       });
-
       const c = api._clearColor;
       const r = (c.hex >> 16) & 0xff;
       const g = (c.hex >> 8) & 0xff;
@@ -1196,8 +1184,9 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
     }
   };
 
-  // Make sure worker knows initial size
-  try { worker.postMessage({ type: 'resize', width, height }); } catch (e) {}
+  if (transferred) {
+    api.setSize(width, height, false);
+  }
 
   api.setClearColor(0x000000, 1);
   return api;
@@ -2494,44 +2483,30 @@ function round2(n) {
 
 
 export function animate(timestamp) {
-  // Schedule the next frame first
   requestAnimationFrame(animate);
 
-  // --- Disconnection/Pause Logic ---
+  // --- Pre-animation checks and disconnection/pause logic ---
   if (localPlayerId === null || window.isGamePaused) {
     return;
   }
 
-  // Frame throttling ~60fps
-  const FRAME_INTERVAL = 1000 / 60;
+  // Use a simple, reliable delta time calculation
   if (!animate.lastTime) animate.lastTime = timestamp;
   const deltaMs = timestamp - animate.lastTime;
-  if (deltaMs < FRAME_INTERVAL) return;
-  animate.lastTime = timestamp - (deltaMs % FRAME_INTERVAL);
+  animate.lastTime = timestamp;
   const delta = deltaMs / 1000;
 
-  // Pre-animation checks
-  if (!physicsController || !weaponController) {
-    console.warn("Skipping animate(): controllers not yet initialized");
-    postFrameCleanup();
-    return;
-  }
-  if (!window.mapReady) {
-    postFrameCleanup();
-    return;
-  }
-  if (!window.localPlayer) {
-    console.warn("Skipping animate(): window.localPlayer is not initialized.");
+  if (!physicsController || !weaponController || !window.mapReady || !window.localPlayer) {
+    console.warn("Skipping animate(): one or more controllers or data structures are not initialized.");
     postFrameCleanup();
     return;
   }
 
   try {
-    // Death screen handling
+    // --- Death screen handling ---
     if (window.localPlayer.isDead) {
       const cross = document.getElementById("crosshair");
       if (cross) cross.style.display = "none";
-
       if (windSound && !windSound.paused) windSound.pause();
       if (forestNoise && !forestNoise.paused) forestNoise.pause();
       if (dessertWindSound && !dessertWindSound.paused) dessertWindSound.pause();
@@ -2539,177 +2514,160 @@ export function animate(timestamp) {
         deathTheme.currentTime = 0;
         deathTheme.play().catch(e => console.error("Error playing death theme:", e));
       }
-
       if (fadeOverlay) {
         fadeOverlay.style.pointerEvents = "auto";
         fadeOverlay.style.opacity = "1";
       }
       if (respawnOverlay) respawnOverlay.style.display = "flex";
-
-      // Render final frame
-if (renderer && typeof renderer.render === 'function') {
-  renderer.render(scene, window.camera);
-} else if (composer && typeof composer.render === 'function') {
-  // fallback: composer might be a WebGL composer; only call it if renderer absent.
-  composer.render();
-}
-
-      postFrameCleanup();
-      return;
     } else {
       if (fadeOverlay && fadeOverlay.style.opacity !== "0") hideFadeOverlay();
       if (respawnOverlay && respawnOverlay.style.display !== "none") hideRespawn();
       const cross = document.getElementById("crosshair");
       if (cross) cross.style.display = "block";
-    }
 
-    // Normal game updates
-    checkForDamagePulse();
-
-    if (weaponController.stats.speedModifier != null) {
-      physicsController.setSpeedModifier(weaponController.stats.speedModifier);
-    }
-
-    // Remote players falling
-    const GRAVITY = 9.8;
-    Object.values(window.remotePlayers).forEach(rp => {
-      const g = rp.group;
-      if (g?.userData.isFalling) {
-        g.userData.velocityY = (g.userData.velocityY || 0) + GRAVITY * delta;
-        g.position.y -= g.userData.velocityY * delta;
-        if (g.position.y < -20) {
-          g.userData.isFalling = false;
-          g.userData.velocityY = 0;
-          g.visible = false;
-        }
+      // Normal game updates
+      checkForDamagePulse();
+      if (weaponController.stats.speedModifier != null) {
+        physicsController.setSpeedModifier(weaponController.stats.speedModifier);
       }
-    });
 
-    if (skyMesh) skyMesh.rotation.x += 0.0001 * deltaMs;
-    if (starField) starField.rotation.x += 0.00008 * deltaMs;
+      // Remote players falling
+      const GRAVITY = 9.8;
+      Object.values(window.remotePlayers).forEach(rp => {
+        const g = rp.group;
+        if (g?.userData.isFalling) {
+          g.userData.velocityY = (g.userData.velocityY || 0) + GRAVITY * delta;
+          g.position.y -= g.userData.velocityY * delta;
+          if (g.position.y < -20) {
+            g.userData.isFalling = false;
+            g.userData.velocityY = 0;
+            g.visible = false;
+          }
+        }
+      });
 
-    if (window.worldFog) {
-      window.worldFog.rotation.y += delta * 0.005;
-      const nowMs = performance.now();
-      window.worldFog.position.x += Math.sin(nowMs * 0.0001) * delta * 2;
-      window.worldFog.position.z += Math.cos(nowMs * 0.0001) * delta * 2;
-    }
+      // Environment effects
+      if (skyMesh) skyMesh.rotation.x += 0.0001 * deltaMs;
+      if (starField) starField.rotation.x += 0.00008 * deltaMs;
+      if (window.worldFog) {
+        window.worldFog.rotation.y += delta * 0.005;
+        const nowMs = performance.now();
+        window.worldFog.position.x += Math.sin(nowMs * 0.0001) * delta * 2;
+        window.worldFog.position.z += Math.cos(nowMs * 0.0001) * delta * 2;
+      }
 
-    // Physics & Input Update
-    const physState = physicsController.update(delta, inputState, window.collidables);
+      // Physics & Input Update
+      const physState = physicsController.update(delta, inputState, window.collidables);
 
-    // Weapon Update
-    weaponController.update(
-      inputState,
-      delta, {
+      // Weapon Update
+      weaponController.update(inputState, delta, {
         velocity: physState.velocity,
         isCrouched: inputState.crouch,
         physicsController,
         collidables: window.collidables,
         stats: weaponController.stats
-      }
-    );
-
-    // Active Tracers Update
-    for (let i = activeTracers.length - 1; i >= 0; i--) {
-      const tracer = activeTracers[i];
-      tracer.update(delta);
-      if (tracer.remove) {
-        tracer.dispose();
-        activeTracers.splice(i, 1);
-      }
-    }
-
-    // Network Sync
-    if (dbRefs && dbRefs.playersRef && localPlayerId) {
-      sendPlayerUpdate({
-        x: physState.x,
-        y: physState.y,
-        z: physState.z,
-        rotY: round2(physState.rotY),
-        rotX: round2(window.camera.rotation.x),
-        rotZ: round2(window.camera.rotation.z),
-        weapon: window.localPlayer.weapon,
-        knifeSwing: window.localPlayer.knifeSwing || false,
-        knifeHeavy: window.localPlayer.knifeHeavy || false
       });
-      window.localPlayer.knifeSwing = false;
-      window.localPlayer.knifeHeavy = false;
-    } else {
-      console.warn("Skipping sendPlayerUpdate: dbRefs, dbRefs.playersRef or localPlayerId is null.");
-    }
 
-    // Remote avatars update
-    for (const id in window.remotePlayers) {
-      const rp = window.remotePlayers[id];
-      if (rp.data) updateRemotePlayer(rp.data);
-    }
+      // Active Tracers Update
+      for (let i = activeTracers.length - 1; i >= 0; i--) {
+        const tracer = activeTracers[i];
+        tracer.update(delta);
+        if (tracer.remove) {
+          tracer.dispose();
+          activeTracers.splice(i, 1);
+        }
+      }
 
-    // Weapon switching
-    if (inputState.weaponSwitch) {
-      const oldW = window.localPlayer.weapon;
-      weaponAmmo[oldW] = weaponController.getCurrentAmmo();
-      const newW = inputState.weaponSwitch;
-      window.localPlayer.weapon = newW;
-
+      // Network Sync
       if (dbRefs && dbRefs.playersRef && localPlayerId) {
-        try {
-          dbRefs.playersRef.child(localPlayerId).update({ weapon: newW });
-        } catch (error) {
-          console.error("Failed to update local player weapon in Firebase:", error);
-        }
+        sendPlayerUpdate({
+          x: physState.x,
+          y: physState.y,
+          z: physState.z,
+          rotY: round2(physState.rotY),
+          rotX: round2(window.camera.rotation.x),
+          rotZ: round2(window.camera.rotation.z),
+          weapon: window.localPlayer.weapon,
+          knifeSwing: window.localPlayer.knifeSwing || false,
+          knifeHeavy: window.localPlayer.knifeHeavy || false
+        });
+        window.localPlayer.knifeSwing = false;
+        window.localPlayer.knifeHeavy = false;
       } else {
-        console.warn("Cannot update local player weapon in Firebase: dbRefs or localPlayerId is null.");
+        console.warn("Skipping sendPlayerUpdate: dbRefs, dbRefs.playersRef or localPlayerId is null.");
       }
 
-      weaponController.equipWeapon(newW);
-      weaponController.ammoInMagazine = weaponAmmo[newW] ?? weaponController.stats.magazineSize;
-      updateInventory(newW);
-      updateAmmoDisplay(weaponController.ammoInMagazine, weaponController.stats.magazineSize);
-      inputState.weaponSwitch = null;
-      if (newW === "knife") activeRecoils.length = 0;
-    }
+      // Remote avatars update
+      for (const id in window.remotePlayers) {
+        const rp = window.remotePlayers[id];
+        if (rp.data) updateRemotePlayer(rp.data);
+      }
 
-    // Mouse look + recoil
-    const baseSens = parseFloat(localStorage.getItem("sensitivity") || "5.00");
-    const aimMul = inputState.aim ? (window.localPlayer.weapon === "marshal" ? 0.15 : 0.5) : 1;
-    const finalSens = baseSens * aimMul;
+      // Weapon switching
+      if (inputState.weaponSwitch) {
+        const oldW = window.localPlayer.weapon;
+        weaponAmmo[oldW] = weaponController.getCurrentAmmo();
+        const newW = inputState.weaponSwitch;
+        window.localPlayer.weapon = newW;
 
-    window.camera.rotation.y -= inputState.mouseDX * finalSens * 0.002;
-    let newPitch = window.camera.rotation.x - inputState.mouseDY * finalSens * 0.002;
-    window.camera.rotation.x = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, newPitch));
-
-    // Recoil
-    {
-      const now = performance.now() / 1000;
-      let totalOffset = 0;
-      for (let i = activeRecoils.length - 1; i >= 0; i--) {
-        const r = activeRecoils[i];
-        const t = (now - r.start) / r.duration;
-        if (t >= 1) {
-          activeRecoils.splice(i, 1);
-          continue;
+        if (dbRefs && dbRefs.playersRef && localPlayerId) {
+          try {
+            dbRefs.playersRef.child(localPlayerId).update({ weapon: newW });
+          } catch (error) {
+            console.error("Failed to update local player weapon in Firebase:", error);
+          }
+        } else {
+          console.warn("Cannot update local player weapon in Firebase: dbRefs or localPlayerId is null.");
         }
-        totalOffset += r.angle * (1 - t);
-      }
-      window.camera.rotation.x += totalOffset;
-    }
 
-    // Rebuild collidables
-    if (window.mapReady) {
-      window.collidables = [...window.envMeshes];
-      for (const otherId in window.remotePlayers) {
-        if (otherId === window.localPlayer.id) continue;
-        const other = window.remotePlayers[otherId];
-        if (other.group?.visible) {
-          other.group.traverse(child => {
-            if (child.isMesh && child.userData?.isPlayerBodyPart) window.collidables.push(child);
-          });
+        weaponController.equipWeapon(newW);
+        weaponController.ammoInMagazine = weaponAmmo[newW] ?? weaponController.stats.magazineSize;
+        updateInventory(newW);
+        updateAmmoDisplay(weaponController.ammoInMagazine, weaponController.stats.magazineSize);
+        inputState.weaponSwitch = null;
+        if (newW === "knife") activeRecoils.length = 0;
+      }
+
+      // Mouse look + recoil
+      const baseSens = parseFloat(localStorage.getItem("sensitivity") || "5.00");
+      const aimMul = inputState.aim ? (window.localPlayer.weapon === "marshal" ? 0.15 : 0.5) : 1;
+      const finalSens = baseSens * aimMul;
+      window.camera.rotation.y -= inputState.mouseDX * finalSens * 0.002;
+      let newPitch = window.camera.rotation.x - inputState.mouseDY * finalSens * 0.002;
+      window.camera.rotation.x = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, newPitch));
+
+      // Recoil
+      {
+        const now = performance.now() / 1000;
+        let totalOffset = 0;
+        for (let i = activeRecoils.length - 1; i >= 0; i--) {
+          const r = activeRecoils[i];
+          const t = (now - r.start) / r.duration;
+          if (t >= 1) {
+            activeRecoils.splice(i, 1);
+            continue;
+          }
+          totalOffset += r.angle * (1 - t);
+        }
+        window.camera.rotation.x += totalOffset;
+      }
+
+      // Rebuild collidables
+      if (window.mapReady) {
+        window.collidables = [...window.envMeshes];
+        for (const otherId in window.remotePlayers) {
+          if (otherId === window.localPlayer.id) continue;
+          const other = window.remotePlayers[otherId];
+          if (other.group?.visible) {
+            other.group.traverse(child => {
+              if (child.isMesh && child.userData?.isPlayerBodyPart) window.collidables.push(child);
+            });
+          }
         }
       }
     }
 
-    // Render
+    // --- Single, consolidated render call ---
     if (composer && typeof composer.render === 'function') {
       composer.render();
     } else if (renderer && typeof renderer.render === 'function') {
