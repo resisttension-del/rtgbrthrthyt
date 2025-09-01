@@ -812,7 +812,7 @@ function setupDetailToggle() {
 
 function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
   // IMPORTANT: create a real <canvas> element (not a custom tag)
-  const canvas = document.createElement('canvas');
+  const canvas = document.createElement('gameCanvas');
 
   // make it absolutely positioned and visible on top so CSS overlays won't hide it
   canvas.style.position = 'absolute';
@@ -3604,6 +3604,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
