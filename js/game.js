@@ -1008,10 +1008,35 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
   const workerUrl = URL.createObjectURL(blob);
   const worker = new Worker(workerUrl);
 
+worker.onerror = (e) => console.error('Worker error:', e);
+worker.onmessage = (ev) => {
+  const m = ev.data;
+  if (m && m.type === 'log') console.log('[worker]', m.msg, m.payload || '');
+  if (m && m.type === 'error') console.error('[worker-error]', m.msg);
+};
+    
   // transfer OffscreenCanvas to worker
   const off = canvas.transferControlToOffscreen();
   worker.postMessage({ type: 'init', canvas: off, width, height }, [off]);
 
+if (msg.type === 'init') {
+  const off = msg.canvas;
+  canvas = off;
+  W = msg.width; H = msg.height;
+  canvas.width = W; canvas.height = H;
+  ctx = canvas.getContext('2d');
+
+  if (!ctx) {
+    self.postMessage({type:'error', msg:'canvas.getContext(\"2d\") returned null'});
+    return;
+  } else {
+    self.postMessage({type:'log', msg:'worker init: got 2d context, W=' + W + ' H=' + H});
+    // quick visual test: draw a tiny magenta square
+    try { ctx.fillStyle = 'magenta'; ctx.fillRect(0,0,4,4); } catch(e){ self.postMessage({type:'error', msg:'ctx.fillRect thrown: '+e}); }
+  }
+  initBuffers(W, H);
+}
+    
   // bookkeeping - map mesh.uuid -> metadata
   const uploaded = new Map(); // uuid -> { id, cpuStatic }
 
