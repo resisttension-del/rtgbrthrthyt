@@ -702,7 +702,6 @@ window.localPlayer = {
 
     createRespawnOverlay();
     createFadeOverlay();
-    animate();
     setupPlayersListener(playersRef);
     updateScoreboard(playersRef);
 
@@ -1196,6 +1195,8 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
 
 /* ---------- Updated scene initializers (CPU renderer) ---------- */
 
+/* ---------- Updated scene initializers (CPU renderer) ---------- */
+
 export async function initSceneCrocodilosConstruction() {
   sceneNum = 1;
   console.log("Initializing CrocodilosConstruction scene...");
@@ -1223,13 +1224,11 @@ export async function initSceneCrocodilosConstruction() {
   renderer = cpuRenderer;
   window.renderer = renderer;
 
-      await renderer.scanAndUploadScene(scene);
+  // IMPORTANT: The renderer is only set up here, nothing is drawn yet.
+  await renderer.scanAndUploadScene(scene);
 
   const container = document.getElementById("game-container");
-  // remove any previous renderer DOM element if present
   if (container) {
-    // clear existing children with canvas or WebGLRenderer
-    // (be careful not to remove other unrelated DOM nodes)
     const prev = container.querySelector('canvas');
     if (prev) container.removeChild(prev);
     container.appendChild(renderer.domElement);
@@ -1268,26 +1267,18 @@ export async function initSceneCrocodilosConstruction() {
   function onWindowResize() {
     const displayWidth = container.clientWidth;
     const displayHeight = container.clientHeight;
-
-    // 1) Render at fixed internal resolution
     renderer.setSize(FIXED_WIDTH, FIXED_HEIGHT, false);
-
-    // 2) Stretch the canvas via CSS to fill the container
     renderer.domElement.style.width = `${displayWidth}px`;
     renderer.domElement.style.height = `${displayHeight}px`;
-
-    // 3) Update camera aspect ratio
     window.camera.aspect = displayWidth / displayHeight;
     window.camera.updateProjectionMatrix();
 
-    // 4) Re-attach weapon to local player (if needed)
     if (window.weaponController && window.localPlayer && typeof getWeaponModel === 'function' && typeof attachWeaponToPlayer === 'function') {
       const key = window.localPlayer.weapon.replace(/-/g, "").toLowerCase();
       const proto = getWeaponModel(key);
       if (proto) attachWeaponToPlayer(window.localPlayer.id, key);
     }
 
-    // 5) Re-attach weapons for remote players
     if (window.remotePlayers) {
       Object.values(window.remotePlayers).forEach(({ currentWeapon, weaponRoot }) => {
         if (currentWeapon && weaponRoot && typeof attachWeaponToPlayer === 'function') {
@@ -1296,7 +1287,6 @@ export async function initSceneCrocodilosConstruction() {
       });
     }
 
-    // 6) Resize HUD overlay
     const hud = document.getElementById("hud");
     if (hud) {
       hud.style.width = `${displayWidth}px`;
@@ -1306,6 +1296,8 @@ export async function initSceneCrocodilosConstruction() {
 
   window.addEventListener("resize", onWindowResize, false);
   onWindowResize();
+    
+  animate(performance.now());
 }
 
 export async function initSceneSigmaCity() {
@@ -3266,6 +3258,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
