@@ -810,21 +810,20 @@ function setupDetailToggle() {
 }
 
 
-// createCanvasRendererCustom.js
-// Self-contained CPU canvas rasterizer optimized for low-power devices.
-// Usage: const r = createCanvasRendererCustom({ width:1280, height:720, downscale:0.5 });
-//         r.scanAndUploadScene(scene); r.render(scene, camera);
+// createCanvasRendererCustomV2.js
+export function createCanvasRendererCustom({
+  width = 1280,
+  height = 720,
+  downscale = 0.5,
+  maxTrisPerFrame = 120000, // high default, will throttle if scene too heavy
+  targetMs = 30 // aim for ~30ms/frame (33ms = 30 FPS). If frame > targetMs, increase downscale.
+} = {}) {
 
-export function createCanvasRendererCustom({ width = 1280, height = 720, downscale = 0.5 } = {}) {
-  // Clamp downscale to reasonable range
   downscale = Math.max(0.2, Math.min(1.0, downscale));
-
-  // DOM
   const wrapper = document.createElement('div');
   wrapper.id = 'gameCanvas';
   Object.assign(wrapper.style, {
-    position: 'absolute',
-    top: '0px', left: '0px',
+    position: 'absolute', top: '0px', left: '0px',
     width: `${width}px`, height: `${height}px`,
     zIndex: '999', overflow: 'hidden', pointerEvents: 'auto'
   });
@@ -839,178 +838,208 @@ export function createCanvasRendererCustom({ width = 1280, height = 720, downsca
   canvas.style.height = `${height}px`;
   canvas.style.backgroundColor = 'black';
   canvas.style.border = '1px solid rgba(255,255,255,0.04)';
-  canvas.width = Math.max(1, Math.floor(width * downscale));
-  canvas.height = Math.max(1, Math.floor(height * downscale));
+
+  // internal pixel buffer dims
+  let intW = Math.max(1, Math.floor(width * downscale));
+  let intH = Math.max(1, Math.floor(height * downscale));
+  canvas.width = intW; canvas.height = intH;
   wrapper.appendChild(canvas);
 
-  // Internal buffers (kept across frames to avoid GC churn)
-  let W = canvas.width, H = canvas.height;
-  let imageData = null;
-  let pixelBuf = null; // Uint8ClampedArray via ImageData.data
-  let zBuffer = null;  // Float32Array W*H
-  function initBuffers(w, h) {
-    W = Math.max(1, Math.floor(w));
-    H = Math.max(1, Math.floor(h));
-    canvas.width = W; canvas.height = H;
+  // buffers
+  let imageData = null, pixelBuf = null, zBuffer = null;
+  function initBuffers(w,h) {
+    intW = Math.max(1, Math.floor(w));
+    intH = Math.max(1, Math.floor(h));
+    try { canvas.width = intW; canvas.height = intH; } catch(e){}
+    const ctx = canvas.getContext('2d');
     try {
-      const ctx = canvas.getContext('2d');
-      imageData = ctx.createImageData(W, H);
+      imageData = ctx.createImageData(intW, intH);
       pixelBuf = imageData.data;
-    } catch (e) {
-      // create fallback ImageData if context unavailable (shouldn't happen)
-      imageData = new ImageData(W, H);
+    } catch (err) {
+      // fallback to new ImageData
+      imageData = new ImageData(intW, intH);
       pixelBuf = imageData.data;
     }
-    zBuffer = new Float32Array(W * H);
-    // Initialize
-    for (let i = 0, p = 0; i < W*H; ++i, p += 4) {
-      pixelBuf[p] = 0; pixelBuf[p+1] = 0; pixelBuf[p+2] = 0; pixelBuf[p+3] = 255;
-      zBuffer[i] = Infinity;
-    }
+    zBuffer = new Float32Array(intW * intH);
+    for (let i=0,p=0;i<intW*intH;++i,p+=4){ pixelBuf[p]=0; pixelBuf[p+1]=0; pixelBuf[p+2]=0; pixelBuf[p+3]=255; zBuffer[i]=Infinity; }
   }
-  initBuffers(W, H);
+  initBuffers(intW, intH);
 
-  // Scene mesh store
-  // Each mesh: { id, positions(Float32Array), indices(Uint32Array), color:[r,g,b], cpuStatic, twoSided }
+  // store meshes + bounding spheres for fast frustum culling
+  // map id -> { id, positions, indices, color, cpuStatic, twoSided, bs: {cx,cy,cz,r} }
   const sceneMeshes = new Map();
 
-  // Configuration
+  function computeBoundingSphere(positions) {
+    // quick approximate center = average, radius = max distance to center
+    let cx=0, cy=0, cz=0;
+    const n = positions.length/3;
+    for (let i=0;i<n;i++){ cx += positions[i*3]; cy += positions[i*3+1]; cz += positions[i*3+2]; }
+    cx /= n; cy /= n; cz /= n;
+    let r = 0;
+    for (let i=0;i<n;i++){
+      const dx = positions[i*3] - cx, dy = positions[i*3+1] - cy, dz = positions[i*3+2] - cz;
+      const d2 = dx*dx + dy*dy + dz*dz;
+      if (d2 > r) r = d2;
+    }
+    return { cx, cy, cz, r: Math.sqrt(r) };
+  }
+
+  // config toggles
   let disableCulling = false;
 
-  // Math helpers (Three.js uses column-major Float32Array; we accept camera.projectionMatrix.elements)
-  function multiplyMat4(a, b, out) {
-    // a,b,out are Float32Array(16) column-major
-    for (let i = 0; i < 4; ++i) {
-      const ai0 = a[i], ai1 = a[i+4], ai2 = a[i+8], ai3 = a[i+12];
-      out[i]      = ai0*b[0]  + ai1*b[1]  + ai2*b[2]  + ai3*b[3];
-      out[i+4]    = ai0*b[4]  + ai1*b[5]  + ai2*b[6]  + ai3*b[7];
-      out[i+8]    = ai0*b[8]  + ai1*b[9]  + ai2*b[10] + ai3*b[11];
-      out[i+12]   = ai0*b[12] + ai1*b[13] + ai2*b[14] + ai3*b[15];
+  // simple mat helpers (col-major Float32Array)
+  function multiplyMat4(a,b,out) {
+    for (let i=0;i<4;++i){
+      const ai0=a[i], ai1=a[i+4], ai2=a[i+8], ai3=a[i+12];
+      out[i]=ai0*b[0]+ai1*b[1]+ai2*b[2]+ai3*b[3];
+      out[i+4]=ai0*b[4]+ai1*b[5]+ai2*b[6]+ai3*b[7];
+      out[i+8]=ai0*b[8]+ai1*b[9]+ai2*b[10]+ai3*b[11];
+      out[i+12]=ai0*b[12]+ai1*b[13]+ai2*b[14]+ai3*b[15];
     }
     return out;
   }
-
   function transformVec3(mat, vx, vy, vz, out4) {
     const x = mat[0]*vx + mat[4]*vy + mat[8]*vz + mat[12];
     const y = mat[1]*vx + mat[5]*vy + mat[9]*vz + mat[13];
     const z = mat[2]*vx + mat[6]*vy + mat[10]*vz + mat[14];
     const w = mat[3]*vx + mat[7]*vy + mat[11]*vz + mat[15];
-    if (!w || !isFinite(w)) {
-      out4[0] = 2; out4[1] = 2; out4[2] = 1; out4[3] = w;
-      return;
-    }
-    out4[0] = x / w; out4[1] = y / w; out4[2] = z / w; out4[3] = w;
+    if (!w || !isFinite(w)) { out4[0]=2; out4[1]=2; out4[2]=1; out4[3]=w; return; }
+    out4[0]=x/w; out4[1]=y/w; out4[2]=z/w; out4[3]=w;
   }
 
-  function ndcToScreen(ndcX, ndcY) {
-    return [(ndcX * 0.5 + 0.5) * W, (-ndcY * 0.5 + 0.5) * H];
+  function ndcToScreenX(x) { return (x*0.5 + 0.5) * intW; }
+  function ndcToScreenY(y) { return (-y*0.5 + 0.5) * intH; }
+
+  function edgeCoeffs(x0,y0,x1,y1) { const A=y0-y1, B=x1-x0, C=x0*y1-x1*y0; return [A,B,C]; }
+  function identityMat4(){ const I=new Float32Array(16); I[0]=1;I[5]=1;I[10]=1;I[15]=1;return I; }
+
+  // frustum test using clip-space: transform sphere center by viewProj and test against clip w
+  function sphereInFrustum(bs, modelMat, viewProj) {
+    // transform center by model -> clip: center' = viewProj * model * [cx,cy,cz,1]
+    // we can multiply model * [cx,cy,cz,1] then viewProj * that.
+    const tmp = new Float32Array(4);
+    // model multiplication (col-major)
+    const m = modelMat;
+    const cx = bs.cx, cy = bs.cy, cz = bs.cz;
+    tmp[0] = m[0]*cx + m[4]*cy + m[8]*cz + m[12];
+    tmp[1] = m[1]*cx + m[5]*cy + m[9]*cz + m[13];
+    tmp[2] = m[2]*cx + m[6]*cy + m[10]*cz + m[14];
+    tmp[3] = m[3]*cx + m[7]*cy + m[11]*cz + m[15];
+    // now viewProj * tmp
+    const vp = viewProj;
+    const x = vp[0]*tmp[0] + vp[4]*tmp[1] + vp[8]*tmp[2] + vp[12]*tmp[3];
+    const y = vp[1]*tmp[0] + vp[5]*tmp[1] + vp[9]*tmp[2] + vp[13]*tmp[3];
+    const z = vp[2]*tmp[0] + vp[6]*tmp[1] + vp[10]*tmp[2] + vp[14]*tmp[3];
+    const w = vp[3]*tmp[0] + vp[7]*tmp[1] + vp[11]*tmp[2] + vp[15]*tmp[3];
+    if (!isFinite(w) || w === 0) return true; // conservatively in view
+    // convert to NDC
+    const ndcX = x / w, ndcY = y / w, ndcZ = z / w;
+    // sphere radius in clip space approximately: r_clip = r * scale / w
+    // approximate by projecting one axis: transform center + radius along x
+    // To be conservative, we check NDC range expanded by r/w (approx)
+    const rClip = (bs.r * Math.abs( vp[0] + vp[4] + vp[8] )) / Math.abs(w) || (bs.r/Math.abs(w) );
+    // test against [-1 - rClip, 1 + rClip] in x,y,z
+    if (ndcX < -1 - rClip || ndcX > 1 + rClip) return false;
+    if (ndcY < -1 - rClip || ndcY > 1 + rClip) return false;
+    if (ndcZ < -1 - rClip || ndcZ > 1 + rClip) return false;
+    return true;
   }
 
-  // Edge coefficients E(x,y) = A*x + B*y + C
-  function edgeCoeffs(x0, y0, x1, y1) {
-    const A = y0 - y1;
-    const B = x1 - x0;
-    const C = x0 * y1 - x1 * y0;
-    return [A, B, C];
-  }
-
-  // Main raster loop (single-threaded)
-  function rasterizeFrame(cameraProj, cameraView, transforms, clearColor) {
-    // quick guard
-    if (!cameraProj || !cameraView) return;
-
-    // Clear color fill + reset z
+  // raster function (edge-stepping). returns stats
+  function rasterize(proj, view, transforms, clearColor) {
+    const t0 = performance.now();
+    // clear
     const clearR = clearColor ? clearColor[0] : 0;
     const clearG = clearColor ? clearColor[1] : 0;
     const clearB = clearColor ? clearColor[2] : 0;
-    for (let i = 0, p = 0; i < W*H; ++i, p += 4) {
-      pixelBuf[p] = clearR;
-      pixelBuf[p+1] = clearG;
-      pixelBuf[p+2] = clearB;
-      pixelBuf[p+3] = 255;
-      zBuffer[i] = Infinity;
-    }
+    for (let i=0,p=0;i<intW*intH;++i,p+=4){ pixelBuf[p]=clearR; pixelBuf[p+1]=clearG; pixelBuf[p+2]=clearB; pixelBuf[p+3]=255; zBuffer[i]=Infinity; }
 
     const viewProj = new Float32Array(16);
-    multiplyMat4(cameraProj, cameraView, viewProj);
+    multiplyMat4(proj, view, viewProj);
 
-    // Map transforms by id for quick lookup
+    // transform map
     const tmap = new Map();
-    for (let i = 0; i < transforms.length; ++i) {
-      const t = transforms[i];
-      tmap.set(t.id, t.model);
+    for (let i=0;i<transforms.length;i++) tmap.set(transforms[i].id, transforms[i].model);
+
+    // quick per-mesh decision: build visible mesh list using frustum culling
+    const visibleMeshes = [];
+    let totalTrisInView = 0;
+    for (const [id, mesh] of sceneMeshes) {
+      if (!mesh.indices || !mesh.positions) continue;
+      const model = tmap.has(id) ? tmap.get(id) : identityMat4();
+      if (!disableCulling && mesh.bs) {
+        if (!sphereInFrustum(mesh.bs, model, viewProj)) continue;
+      }
+      // count triangles that are potentially in view (coarse)
+      const triCount = Math.floor(mesh.indices.length / 3);
+      totalTrisInView += triCount;
+      visibleMeshes.push({ mesh, model, triCount });
     }
 
-    // Temporary arrays reused per-mesh
+    // triangle budget - if too heavy, downsample workload (simple strategy: skip some meshes 
+    // or render only first N meshes). We will render until triBudget used.
+    const triBudget = maxTrisPerFrame;
+    let triUsed = 0;
+
+    let stats = { trisTotal:0, trisRaster:0, pixels:0, timeMs:0, meshesRendered:0 };
+
+    // Temporary arrays reused for interpolation
     const vClip = new Float32Array(4);
 
-    // Counters for debugging
-    let trisTotal = 0, trisRaster = 0, pixelsWritten = 0;
-
-    // Iterate meshes
-    for (const [id, mesh] of sceneMeshes) {
-      const pos = mesh.positions;
+    for (let vm of visibleMeshes) {
+      if (triUsed >= triBudget) break;
+      const mesh = vm.mesh;
       const idx = mesh.indices;
-      const color = mesh.color || [180, 180, 180];
+      const pos = mesh.positions;
+      const color = mesh.color || [180,180,180];
       const twoSided = !!mesh.twoSided;
-      const model = tmap.has(id) ? tmap.get(id) : identityMat4();
-
-      // Compute mvp
+      const model = vm.model;
+      // compute mvp
       const mvp = new Float32Array(16);
       multiplyMat4(viewProj, model, mvp);
 
       const vcount = Math.floor(pos.length / 3);
-      // screen-space arrays
+      // project vertices to screen
       const sx = new Float32Array(vcount);
       const sy = new Float32Array(vcount);
       const sz = new Float32Array(vcount);
-
-      for (let vi = 0; vi < vcount; ++vi) {
+      for (let vi=0; vi<vcount; ++vi) {
         transformVec3(mvp, pos[vi*3], pos[vi*3+1], pos[vi*3+2], vClip);
-        const sc = ndcToScreen(vClip[0], vClip[1]);
-        sx[vi] = sc[0];
-        sy[vi] = sc[1];
+        sx[vi] = ndcToScreenX(vClip[0]);
+        sy[vi] = ndcToScreenY(vClip[1]);
         sz[vi] = vClip[2];
       }
 
-      // Triangles
-      for (let t = 0; t < idx.length; t += 3) {
-        trisTotal++;
+      // triangles
+      for (let t=0; t<idx.length; t+=3) {
+        if (triUsed >= triBudget) break;
+        stats.trisTotal++;
         const i0 = idx[t], i1 = idx[t+1], i2 = idx[t+2];
-        if (i0 < 0 || i1 < 0 || i2 < 0 || i0 >= sx.length || i1 >= sx.length || i2 >= sx.length) continue;
-
-        const x0 = sx[i0], y0 = sy[i0], z0 = sz[i0];
-        const x1 = sx[i1], y1 = sy[i1], z1 = sz[i1];
-        const x2 = sx[i2], y2 = sy[i2], z2 = sz[i2];
-
-        // Bounding box
-        const minX = Math.max(0, Math.floor(Math.min(x0, x1, x2)));
-        const maxX = Math.min(W - 1, Math.ceil(Math.max(x0, x1, x2)));
-        const minY = Math.max(0, Math.floor(Math.min(y0, y1, y2)));
-        const maxY = Math.min(H - 1, Math.ceil(Math.max(y0, y1, y2)));
-        if (maxX < 0 || maxY < 0 || minX >= W || minY >= H) continue;
-
-        // Backface culling (screen-space cross)
-        const ux = x1 - x0, uy = y1 - y0;
-        const vx = x2 - x0, vy = y2 - y0;
-        const cross = ux * vy - uy * vx;
+        if (i0<0||i1<0||i2<0||i0>=sx.length||i1>=sx.length||i2>=sx.length) continue;
+        const x0=sx[i0], y0=sy[i0], z0=sz[i0];
+        const x1=sx[i1], y1=sy[i1], z1=sz[i1];
+        const x2=sx[i2], y2=sy[i2], z2=sz[i2];
+        // bbox clamp
+        const minX = Math.max(0, Math.floor(Math.min(x0,x1,x2)));
+        const maxX = Math.min(intW-1, Math.ceil(Math.max(x0,x1,x2)));
+        const minY = Math.max(0, Math.floor(Math.min(y0,y1,y2)));
+        const maxY = Math.min(intH-1, Math.ceil(Math.max(y0,y1,y2)));
+        if (maxX < 0 || maxY < 0 || minX > intW-1 || minY > intH-1) continue;
+        // cull backfaces
+        const ux = x1-x0, uy = y1-y0, vx = x2-x0, vy = y2-y0;
+        const cross = ux*vy - uy*vx;
         if (!disableCulling && !twoSided && cross >= 0) continue;
-
-        // Edge coefficients & area
-        const e0 = edgeCoeffs(x1, y1, x2, y2);
-        const e1 = edgeCoeffs(x2, y2, x0, y0);
-        const e2 = edgeCoeffs(x0, y0, x1, y1);
-        // compute area using E2 evaluated at v2 (or other consistent value)
+        // edge coeffs
+        const e0 = edgeCoeffs(x1,y1,x2,y2);
+        const e1 = edgeCoeffs(x2,y2,x0,y0);
+        const e2 = edgeCoeffs(x0,y0,x1,y1);
         const area = e2[0]*x2 + e2[1]*y2 + e2[2];
         if (!isFinite(area) || Math.abs(area) < 1e-8) continue;
+        stats.trisRaster++;
+        triUsed++;
 
-        trisRaster++;
-
-        // Precompute for barycentric z interpolation
-        const invArea = 1.0 / area;
+        const invArea = 1.0/area;
         const z0v = z0, z1v = z1, z2v = z2;
-
-        // Edge incremental stepping
         const startX = minX, startY = minY;
         const px0 = startX + 0.5, py0 = startY + 0.5;
         let e0row = e0[0]*px0 + e0[1]*py0 + e0[2];
@@ -1022,22 +1051,18 @@ export function createCanvasRendererCustom({ width = 1280, height = 720, downsca
 
         for (let y = startY; y <= maxY; ++y) {
           let e0v = e0row, e1v = e1row, e2v = e2row;
-          const rowBase = y * W;
+          const rowBase = y * intW;
           for (let x = startX; x <= maxX; ++x) {
-            // inclusive fill rule: barycentrics same sign or zero
             if ((e0v >= 0 && e1v >= 0 && e2v >= 0) || (e0v <= 0 && e1v <= 0 && e2v <= 0)) {
-              const zInterp = (e0v * z0v + e1v * z1v + e2v * z2v) * invArea;
+              const zInterp = (e0v*z0v + e1v*z1v + e2v*z2v) * invArea;
               if (isFinite(zInterp)) {
                 const depth = (zInterp + 1) * 0.5;
                 const idxBuf = rowBase + x;
                 if (depth < zBuffer[idxBuf]) {
-                  const p = idxBuf * 4;
-                  pixelBuf[p] = color[0];
-                  pixelBuf[p+1] = color[1];
-                  pixelBuf[p+2] = color[2];
-                  pixelBuf[p+3] = 255;
+                  const p = idxBuf*4;
+                  pixelBuf[p] = color[0]; pixelBuf[p+1] = color[1]; pixelBuf[p+2] = color[2]; pixelBuf[p+3] = 255;
                   zBuffer[idxBuf] = depth;
-                  pixelsWritten++;
+                  stats.pixels++;
                 }
               }
             }
@@ -1046,151 +1071,104 @@ export function createCanvasRendererCustom({ width = 1280, height = 720, downsca
           e0row += e0sy; e1row += e1sy; e2row += e2sy;
         }
       }
-    }
+      stats.meshesRendered++;
+    } // visible meshes loop
 
-    // Put imageData to canvas
+    // put to canvas, safe fallback
+    const ctx = canvas.getContext('2d');
     try {
-      const ctx = canvas.getContext('2d');
       ctx.putImageData(imageData, 0, 0);
     } catch (err) {
-      // If putImageData fails for some reason, fallback: draw small debug rect
       try {
-        const ctx2 = canvas.getContext('2d');
-        ctx2.fillStyle = 'magenta';
-        ctx2.fillRect(Math.max(0, Math.floor(W*0.1)), Math.max(0, Math.floor(H*0.1)), Math.max(4, Math.floor(W*0.1)), Math.max(4, Math.floor(H*0.1)));
+        ctx.fillStyle = `rgb(${clearR},${clearG},${clearB})`;
+        ctx.fillRect(0,0,intW,intH);
       } catch (e) {}
     }
 
-    // Return crude perf stats (useful for debugging)
-    return { trisTotal, trisRaster, pixelsWritten };
+    const t1 = performance.now();
+    stats.timeMs = Math.round(t1 - t0);
+    return stats;
   }
 
-  // Utility identity mat4
-  function identityMat4() {
-    const I = new Float32Array(16);
-    I[0] = 1; I[5] = 1; I[10] = 1; I[15] = 1;
-    return I;
-  }
-
-  // Public API
-  const uploaded = new Map(); // id -> { cpuStatic, twoSided }
+  // API
+  const uploaded = new Map();
 
   const api = {
     domElement: canvas,
     domWrapper: wrapper,
+    _internal: { sceneMeshes, imageData: null, zBuffer },
 
-    setSize(w, h, updateStyle = true) {
-      if (updateStyle) {
-        wrapper.style.width = `${w}px`;
-        wrapper.style.height = `${h}px`;
-        canvas.style.width = `${w}px`;
-        canvas.style.height = `${h}px`;
-      }
-      const iw = Math.max(1, Math.floor(w * downscale));
-      const ih = Math.max(1, Math.floor(h * downscale));
-      initBuffers(iw, ih);
+    setSize(w,h, updateStyle = true) {
+      if (updateStyle) { wrapper.style.width = `${w}px`; wrapper.style.height = `${h}px`; canvas.style.width = `${w}px`; canvas.style.height = `${h}px`; }
+      intW = Math.max(1, Math.floor(w * downscale));
+      intH = Math.max(1, Math.floor(h * downscale));
+      initBuffers(intW, intH);
     },
 
-    setClearColor(hex, alpha = 1) {
-      api._clearColor = { hex, alpha };
-    },
+    setClearColor(hex, alpha = 1) { api._clearColor = { hex, alpha }; },
     _clearColor: { hex: 0x000000, alpha: 1 },
 
-    setCulling(disable) {
-      disableCulling = !!disable;
+    setCulling(disable) { disableCulling = !!disable; },
+    setTwoSided(meshOrId, twoSided) {
+      const id = typeof meshOrId === 'string' ? meshOrId : (meshOrId && meshOrId.uuid);
+      if (!id) return;
+      const m = sceneMeshes.get(id); if (m) m.twoSided = !!twoSided;
+      const info = uploaded.get(id); if (info) info.twoSided = !!twoSided;
     },
 
-    setDownscale(s) {
-      downscale = Math.max(0.2, Math.min(1.0, s));
-      // keep DOM size same, change internal buffer
-      const w = parseInt(wrapper.style.width) || width;
-      const h = parseInt(wrapper.style.height) || height;
-      const iw = Math.max(1, Math.floor(w * downscale));
-      const ih = Math.max(1, Math.floor(h * downscale));
-      initBuffers(iw, ih);
+    uploadMesh({ id, positions, indices, color = [180,180,180], cpuStatic = false, twoSided = false }) {
+      if (!id) throw new Error('id required');
+      const posArr = positions instanceof Float32Array ? positions : new Float32Array(positions);
+      const idxArr = indices instanceof Uint32Array ? indices : new Uint32Array(indices);
+      const bs = computeBoundingSphere(posArr);
+      sceneMeshes.set(id, { id, positions: posArr, indices: idxArr, color, cpuStatic, twoSided, bs });
+      uploaded.set(id, { cpuStatic, twoSided });
     },
 
-    // scan THREE.js scene & upload meshes (copies vertex/index buffers once)
     async scanAndUploadScene(scene) {
-      uploaded.clear();
+      sceneMeshes.clear(); uploaded.clear();
       scene.traverse((obj) => {
         if (!obj.isMesh || obj.userData?.cpuRenderable === false) return;
         const geom = obj.geometry;
         if (!geom || !geom.attributes || !geom.attributes.position) return;
         if (uploaded.has(obj.uuid)) return;
-
         const posAttr = geom.attributes.position;
-        const positionsCopy = new Float32Array(posAttr.array); // copy to freeze
+        const positionsCopy = new Float32Array(posAttr.array);
         let indicesCopy;
-        if (geom.index) {
-          indicesCopy = new Uint32Array(geom.index.array);
-        } else {
-          const triCount = Math.floor(positionsCopy.length / 3) * 3;
+        if (geom.index) indicesCopy = new Uint32Array(geom.index.array);
+        else {
+          const triCount = Math.floor(positionsCopy.length/3)*3;
           indicesCopy = new Uint32Array(triCount);
-          for (let i = 0; i < triCount; ++i) indicesCopy[i] = i;
+          for (let i=0;i<triCount;i++) indicesCopy[i]=i;
         }
-
-        let col = [180, 180, 180];
+        let col = [180,180,180];
         try {
-          if (obj.material && obj.material.color) {
-            col = [
-              Math.min(255, Math.round((obj.material.color.r || 1) * 255)),
-              Math.min(255, Math.round((obj.material.color.g || 1) * 255)),
-              Math.min(255, Math.round((obj.material.color.b || 1) * 255))
-            ];
-          } else if (obj.userData?.cpuColor) {
-            col = obj.userData.cpuColor;
-          }
-        } catch (e) {}
-
+          if (obj.material && obj.material.color) col = [
+            Math.min(255,Math.round((obj.material.color.r||1)*255)),
+            Math.min(255,Math.round((obj.material.color.g||1)*255)),
+            Math.min(255,Math.round((obj.material.color.b||1)*255))
+          ];
+          else if (obj.userData?.cpuColor) col = obj.userData.cpuColor;
+        } catch(e){}
         const cpuStatic = !!obj.userData?.cpuStatic;
         const twoSided = !!obj.userData?.twoSided;
-
-        sceneMeshes.set(obj.uuid, {
-          id: obj.uuid,
-          positions: positionsCopy,
-          indices: indicesCopy,
-          color: col,
-          cpuStatic,
-          twoSided
-        });
+        const bs = computeBoundingSphere(positionsCopy);
+        sceneMeshes.set(obj.uuid, { id: obj.uuid, positions: positionsCopy, indices: indicesCopy, color: col, cpuStatic, twoSided, bs });
         uploaded.set(obj.uuid, { cpuStatic, twoSided });
       });
     },
 
-    // simple uploads for programmatic meshes (id must be unique)
-    uploadMesh({ id, positions, indices, color = [180,180,180], cpuStatic = false, twoSided = false }) {
-      if (!id || !positions || !indices) throw new Error('uploadMesh requires id, positions, indices');
-      const positionsCopy = positions instanceof Float32Array ? positions : new Float32Array(positions);
-      const indicesCopy = indices instanceof Uint32Array ? indices : new Uint32Array(indices);
-      sceneMeshes.set(id, { id, positions: positionsCopy, indices: indicesCopy, color, cpuStatic, twoSided });
-      uploaded.set(id, { cpuStatic, twoSided });
-    },
-
     removeMesh(meshOrId) {
-      const id = (typeof meshOrId === 'string') ? meshOrId : (meshOrId && meshOrId.uuid);
+      const id = typeof meshOrId === 'string' ? meshOrId : (meshOrId && meshOrId.uuid);
       if (!id) return;
-      sceneMeshes.delete(id);
-      uploaded.delete(id);
+      sceneMeshes.delete(id); uploaded.delete(id);
     },
 
-    clearScene() {
-      sceneMeshes.clear();
-      uploaded.clear();
-    },
+    clearScene() { sceneMeshes.clear(); uploaded.clear(); },
 
-    setTwoSided(meshOrId, twoSided) {
-      const id = (typeof meshOrId === 'string') ? meshOrId : (meshOrId && meshOrId.uuid);
-      if (!id) return;
-      const m = sceneMeshes.get(id);
-      if (m) { m.twoSided = !!twoSided; }
-      const info = uploaded.get(id);
-      if (info) info.twoSided = !!twoSided;
-    },
-
-    // Render entry (compatible with Three.js camera)
+    // render entry: adaptive downscale logic applied here
     render(scene, camera) {
-      // build transforms only for non-static meshes
+      // build transforms for non-static items
       const transforms = [];
       scene.traverse((obj) => {
         if (!obj.isMesh) return;
@@ -1200,45 +1178,48 @@ export function createCanvasRendererCustom({ width = 1280, height = 720, downsca
         transforms.push({ id: obj.uuid, model: new Float32Array(obj.matrixWorld.elements) });
       });
 
-      // derive proj/view from three.js camera
       const proj = new Float32Array(camera.projectionMatrix.elements);
       const view = new Float32Array(camera.matrixWorldInverse.elements);
-
       const c = api._clearColor;
-      const r = (c.hex >> 16) & 0xff;
-      const g = (c.hex >> 8) & 0xff;
-      const b = c.hex & 0xff;
+      const r = (c.hex >> 16) & 0xff, g = (c.hex >> 8) & 0xff, b = c.hex & 0xff;
 
-      const stats = rasterizeFrame(proj, view, transforms, [r,g,b]);
+      const stats = rasterize(proj, view, transforms, [r,g,b]);
 
-      // upscaling: draw the internal canvas onto an on-screen quad sized to wrapper
-      // We do this via CSS scaling (canvas.style.width/height already set), so browsers auto-scale.
-      // If you want a sharper upscale with nearest-neighbor, you can copy to an intermediate canvas.
+      // adaptive downscale adjustment: if frame too slow increase downscale (lower res), if very fast and downscale < 1, slowly reduce downscale
+      if (stats.timeMs > targetMs && downscale > 0.25) {
+        downscale = Math.max(0.25, downscale * 0.8); // reduce resolution
+        const newW = Math.max(1, Math.floor(width * downscale));
+        const newH = Math.max(1, Math.floor(height * downscale));
+        initBuffers(newW, newH);
+        console.log('[renderer] Adaptive downscale →', downscale, 'new internal', newW, 'x', newH);
+      } else if (stats.timeMs < targetMs*0.5 && downscale < 1.0) {
+        // slowly increase quality
+        downscale = Math.min(1.0, downscale * 1.02);
+        const newW = Math.max(1, Math.floor(width * downscale));
+        const newH = Math.max(1, Math.floor(height * downscale));
+        initBuffers(newW, newH);
+      }
+
+      // export internals for debugging
+      api._internal.imageData = imageData;
+      api._internal.zBuffer = zBuffer;
+      api._internal.sceneMeshes = sceneMeshes;
       return stats;
     },
 
+    setMaxTris(n) { maxTrisPerFrame = Math.max(1000, n|0); },
+
     debugDrawTestTriangle() {
-      // red triangle centered for quick debugging
-      const id = 'test-tri';
-      const pos = new Float32Array([-0.5, -0.5, 0,  0.5, -0.5, 0,  0, 0.5, 0]);
-      const idx = new Uint32Array([0,1,2]);
-      api.uploadMesh({ id, positions: pos, indices: idx, color: [255,0,0], cpuStatic: false, twoSided: false });
+      api.uploadMesh({ id:'test-tri', positions: new Float32Array([-0.5,-0.5,0, 0.5,-0.5,0, 0,0.5,0]), indices: new Uint32Array([0,1,2]), color:[255,0,0], cpuStatic:false });
     },
 
     dispose() {
-      // clear references
-      sceneMeshes.clear();
-      uploaded.clear();
-      // remove dom if you want
-      try { if (wrapper.parentElement) wrapper.parentElement.removeChild(wrapper); } catch (e) {}
-    },
-
-    // exports for debugging
-    _internal: { sceneMeshes, zBuffer, imageData }
+      sceneMeshes.clear(); uploaded.clear();
+      try { if (wrapper && wrapper.parentElement) wrapper.parentElement.removeChild(wrapper); } catch(e){}
+    }
   };
 
-  // ensure DOM style sizing is applied
-  api.setClearColor(0x000000, 1);
+  api.setClearColor(0x000000,1);
   return api;
 }
 
@@ -3320,6 +3301,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
