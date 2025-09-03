@@ -823,8 +823,9 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
     const proj = new THREE.Vector3();
     const tmpPos = new THREE.Vector3();
     const tmpVec = new THREE.Vector3();
+    const tmpVec2 = new THREE.Vector3();
 
-    // helper: build convex hull (Andrew monotone chain) of 2D points - kept for potential future use, but not used for meshes in this fix
+    // helper: build convex hull (Andrew monotone chain) of 2D points
     function convexHull(points) {
         if (points.length <= 1) return points.slice();
         const pts = points.slice().sort((a, b) => (a.x === b.x ? a.y - b.y : a.x - b.x));
@@ -884,8 +885,9 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
                 obj.getWorldPosition(tmpPos);
                 proj.copy(tmpPos).project(camera); // NDC -1..1
 
-                // A more forgiving culling check to prevent objects from vanishing
-                if (proj.z > 1 || proj.z < -1 || proj.x < -1.5 || proj.x > 1.5 || proj.y < -1.5 || proj.y > 1.5) {
+                // quick NDC cull (if center far off-screen, skip). We allow some slack for large objects.
+                if (proj.z > 1 || proj.z < -1 || proj.x < -2 || proj.x > 2 || proj.y < -2 || proj.y > 2) {
+                    // still allow meshes that have explicit userData.alwaysRender = true
                     if (!obj.userData?.alwaysRender) return;
                 }
 
@@ -903,52 +905,62 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
                 if (mapImage) {
                     drawables.push({ type: 'image', obj, sx, sy, dist, projZ: proj.z, mapImage });
                 } else if (obj.isMesh && obj.geometry) {
-                    // *** FIX: Use a simplified bounding box projection instead of convex hull ***
-                    const bb = obj.geometry.boundingBox;
-                    if (!bb) {
-                        obj.geometry.computeBoundingBox();
+                    // Project a larger sample of vertices to create a better silhouette.
+                    const worldPoints = [];
+                    const geom = obj.geometry;
+                    const posAttr = geom.attributes?.position;
+
+                    if (posAttr && posAttr.count > 0) {
+                        // Sample up to 100 vertices to create a more detailed polygon
+                        const stride = Math.max(1, Math.floor(posAttr.count / 100));
+                        for (let i = 0; i < posAttr.count; i += stride) {
+                            tmpVec.set(
+                                posAttr.getX(i),
+                                posAttr.getY(i),
+                                posAttr.getZ(i)
+                            ).applyMatrix4(obj.matrixWorld);
+                            worldPoints.push(tmpVec.clone());
+                        }
+                    } else {
+                        // Fallback to the object's world position if no geometry points
+                        worldPoints.push(tmpPos.clone());
                     }
 
-                    // Get the corners of the bounding box
-                    const corners = [
-                        new THREE.Vector3(bb.min.x, bb.min.y, bb.min.z),
-                        new THREE.Vector3(bb.max.x, bb.min.y, bb.min.z),
-                        new THREE.Vector3(bb.min.x, bb.max.y, bb.min.z),
-                        new THREE.Vector3(bb.min.x, bb.min.y, bb.max.z),
-                        new THREE.Vector3(bb.max.x, bb.max.y, bb.min.z),
-                        new THREE.Vector3(bb.max.x, bb.min.y, bb.max.z),
-                        new THREE.Vector3(bb.min.x, bb.max.y, bb.max.z),
-                        new THREE.Vector3(bb.max.x, bb.max.y, bb.max.z)
-                    ];
+                    // project worldPoints to screen-space 2D points
+                    const pts2d = [];
+                    for (let wp of worldPoints) {
+                        proj.copy(wp).project(camera);
+                        if (proj.z > 1 || proj.z < -1) continue;
+                        const px = (proj.x * 0.5 + 0.5) * canvas.width;
+                        const py = (-proj.y * 0.5 + 0.5) * canvas.height;
+                        pts2d.push({ x: px, y: py });
+                    }
 
-                    // Project these corners to screen space
-                    const projectedCorners = corners.map(corner => {
-                        const worldCorner = corner.clone().applyMatrix4(obj.matrixWorld);
-                        return worldCorner.project(camera);
-                    });
-
-                    // Filter out points behind the camera
-                    const validPoints = projectedCorners.filter(p => p.z >= -1);
-
-                    if (validPoints.length > 0) {
-                        const minX = Math.min(...validPoints.map(p => p.x));
-                        const maxX = Math.max(...validPoints.map(p => p.x));
-                        const minY = Math.min(...validPoints.map(p => p.y));
-                        const maxY = Math.max(...validPoints.map(p => p.y));
-
-                        const wPx = (maxX - minX) * 0.5 * canvas.width;
-                        const hPx = (maxY - minY) * 0.5 * canvas.height;
-                        const xPx = ((minX + maxX) / 2 * 0.5 + 0.5) * canvas.width;
-                        const yPx = ((minY + maxY) / 2 * 0.5 + 0.5) * canvas.height;
-
-                        drawables.push({ type: 'bbox', obj, x: xPx, y: yPx, width: wPx, height: hPx, dist, projZ: proj.z });
+                    // *** CORRECTED LOGIC: Check the hull length and use a fallback if it's invalid ***
+                    const hull = convexHull(pts2d);
+                    if (hull.length >= 3) {
+                        drawables.push({ type: 'poly', obj, pts: hull, dist, projZ: proj.z });
                     } else {
-                        // Fallback to a small marker if the object is still out of view
-                        if (obj.userData?.forceMarker) {
-                            drawables.push({ type: 'rect', obj, sx, sy, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
+                        // Fallback: If convex hull fails (e.g., all points are collinear or too few),
+                        // use a simple bounding box approximation.
+                        if (obj.geometry.boundingBox) {
+                           const bb = obj.geometry.boundingBox;
+                           const corners = [
+                               new THREE.Vector3(bb.min.x, bb.min.y, bb.min.z),
+                               new THREE.Vector3(bb.max.x, bb.max.y, bb.max.z)
+                           ];
+                           const screenPts = [];
+                           for (let c of corners) {
+                               tmpVec.set(c.x, c.y, c.z).applyMatrix4(obj.matrixWorld);
+                               const p = tmpVec.project(camera);
+                               screenPts.push({ x: (p.x * 0.5 + 0.5) * canvas.width, y: (-p.y * 0.5 + 0.5) * canvas.height });
+                           }
+                           const wPx = Math.abs(screenPts[0].x - screenPts[1].x);
+                           const hPx = Math.abs(screenPts[0].y - screenPts[1].y);
+                           const size = Math.max(wPx, hPx, 32);
+                           drawables.push({ type: 'rect', obj, sx, sy, dist, sizePx: size });
                         }
                     }
-
                 } else {
                     if (obj.userData?.forceMarker) {
                         drawables.push({ type: 'rect', obj, sx, sy, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
@@ -1016,16 +1028,6 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
                     ctx.lineWidth = Math.max(1, 2 - (dist * 0.001));
                     ctx.strokeStyle = 'rgba(0,0,0,0.6)';
                     ctx.stroke();
-                    ctx.restore();
-                } else if (d.type === 'bbox' && d.width && d.height) {
-                    ctx.save();
-                    ctx.globalAlpha = Math.max(0.2, Math.min(1, 1 - (dist * 0.002)));
-                    ctx.fillStyle = color;
-                    ctx.fillRect(d.x - d.width / 2, d.y - d.height / 2, d.width, d.height);
-                    ctx.globalAlpha = 0.6;
-                    ctx.lineWidth = Math.max(1, 2 - (dist * 0.001));
-                    ctx.strokeStyle = 'rgba(0,0,0,0.6)';
-                    ctx.strokeRect(d.x - d.width / 2, d.y - d.height / 2, d.width, d.height);
                     ctx.restore();
                 } else if (d.type === 'line' && d.pts && d.pts.length === 2) {
                     ctx.beginPath();
@@ -3154,6 +3156,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
