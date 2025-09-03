@@ -955,11 +955,10 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
             }
           }
 
-          // project worldPoints to screen-space 2D points
+          // project worldPoints to screen-space 2D points (include all points, do NOT skip based on proj.z)
           const pts2d = [];
           for (let wp of worldPoints) {
             proj.copy(wp).project(camera);
-            if (proj.z > 1 || proj.z < -1) continue;
             const px = (proj.x * 0.5 + 0.5) * canvas.width;
             const py = (-proj.y * 0.5 + 0.5) * canvas.height;
             pts2d.push({ x: px, y: py });
@@ -1082,7 +1081,6 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
 
   return api;
 }
-
 
 
 /* ---------- Updated scene initializers (CPU renderer) ---------- */
@@ -3181,6 +3179,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
