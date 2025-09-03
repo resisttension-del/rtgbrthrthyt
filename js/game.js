@@ -811,344 +811,242 @@ function setupDetailToggle() {
 }
 
 
-// createCanvasRenderer_safe.js
-// Drop-in replacement: conservative triangle raster CPU renderer
-// - No workers, no string blobs
-// - Triangle raster + z-buffer (correct holes)
-// - Downscale for performance (default 0.6)
-// - Caches arrays to avoid per-frame allocations
-// - Robust handling of vertices behind camera to avoid vanish
+        function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
+            const canvas = document.createElement('canvas');
+            canvas.style.position = 'relative';
+            canvas.style.zIndex = '0';
+            canvas.width = width;
+            canvas.height = height;
+            const ctx = canvas.getContext('2d');
 
-export function createCanvasRenderer({ width = 1280, height = 720, downscale = 0.6 } = {}) {
-  // clamp downscale
-  downscale = Math.max(0.25, Math.min(1.0, downscale));
+            // Scratch vars for projections & temp math
+            const proj = new THREE.Vector3();
+            const tmpPos = new THREE.Vector3();
+            const tmpVec = new THREE.Vector3();
+            const tmpVec2 = new THREE.Vector3();
 
-  // DOM
-  const wrapper = document.createElement('div');
-  wrapper.id = 'gameCanvas';
-  Object.assign(wrapper.style, {
-    position: 'absolute',
-    top: '0px', left: '0px',
-    width: `${width}px`, height: `${height}px`,
-    zIndex: '999', overflow: 'hidden', pointerEvents: 'auto'
-  });
-
-  const visible = document.createElement('canvas');
-  visible.setAttribute('aria-hidden', 'true');
-  visible.style.position = 'absolute';
-  visible.style.top = '0px';
-  visible.style.left = '0px';
-  visible.style.width = `${width}px`;
-  visible.style.height = `${height}px`;
-  visible.style.backgroundColor = 'black';
-  visible.style.border = '1px solid rgba(255,255,255,0.04)';
-  // visible backing store is set to internal size; visible CSS size is scaled by drawImage
-  wrapper.appendChild(visible);
-
-  // internal buffer size (smaller than visible for perf)
-  let bufW = Math.max(1, Math.floor(width * downscale));
-  let bufH = Math.max(1, Math.floor(height * downscale));
-  const bufferCanvas = document.createElement('canvas');
-  bufferCanvas.width = bufW;
-  bufferCanvas.height = bufH;
-  const bufCtx = bufferCanvas.getContext('2d', { alpha: false });
-
-  // imageData + zBuffer reused
-  let imageData = null;
-  let pixelBuf = null; // Uint8ClampedArray
-  let zBuffer = null;
-  function initBuffers(w, h) {
-    bufW = Math.max(1, Math.floor(w));
-    bufH = Math.max(1, Math.floor(h));
-    bufferCanvas.width = bufW;
-    bufferCanvas.height = bufH;
-    try { imageData = bufCtx.createImageData(bufW, bufH); } catch (e) { imageData = new ImageData(bufW, bufH); }
-    pixelBuf = imageData.data;
-    zBuffer = new Float32Array(bufW * bufH);
-    for (let i = 0, p = 0; i < bufW * bufH; ++i, p += 4) {
-      pixelBuf[p] = 0; pixelBuf[p+1] = 0; pixelBuf[p+2] = 0; pixelBuf[p+3] = 255;
-      zBuffer[i] = Infinity;
-    }
-  }
-  initBuffers(bufW, bufH);
-
-  // visible ctx for final blit
-  const visibleCtx = visible.getContext('2d');
-
-  // Scene geometry store (uploaded). Each entry: { id, positions: Float32Array, indices: Uint32Array, color:[r,g,b], cpuStatic, twoSided, bs }
-  const meshes = new Map();
-
-  // small config & state
-  let disableCulling = false;
-  let renderDistance = 2000;
-
-  // scratch arrays to avoid allocations
-  const mvpTemp = new Float32Array(16);
-  const vClip = new Float32Array(4);
-
-  // small matrix multiply (col-major)
-  function multiplyMat4(a,b,out) {
-    for (let i=0;i<4;++i){
-      const ai0=a[i], ai1=a[i+4], ai2=a[i+8], ai3=a[i+12];
-      out[i] = ai0*b[0] + ai1*b[1] + ai2*b[2] + ai3*b[3];
-      out[i+4] = ai0*b[4] + ai1*b[5] + ai2*b[6] + ai3*b[7];
-      out[i+8] = ai0*b[8] + ai1*b[9] + ai2*b[10] + ai3*b[11];
-      out[i+12] = ai0*b[12] + ai1*b[13] + ai2*b[14] + ai3*b[15];
-    }
-    return out;
-  }
-
-  // transform vec3 by 4x4 matrix and perspective divide (robust to w<=0)
-  function transformVec3(mat, vx, vy, vz, out) {
-    const x = mat[0]*vx + mat[4]*vy + mat[8]*vz + mat[12];
-    const y = mat[1]*vx + mat[5]*vy + mat[9]*vz + mat[13];
-    const z = mat[2]*vx + mat[6]*vy + mat[10]*vz + mat[14];
-    const w = mat[3]*vx + mat[7]*vy + mat[11]*vz + mat[15];
-    // protect against w <= 0 (vertex behind camera) by clamping to small positive to avoid NaN
-    const ww = (w === 0 || !isFinite(w)) ? 1e-6 : (w < 1e-6 ? 1e-6 : w);
-    out[0] = x / ww; out[1] = y / ww; out[2] = z / ww; out[3] = w;
-  }
-
-  function ndcToBuffer(ndcX, ndcY) {
-    return [ (ndcX * 0.5 + 0.5) * bufW, (-ndcY * 0.5 + 0.5) * bufH ];
-  }
-
-  function edgeFunc(ax,ay,bx,by,cx,cy) {
-    return (cx - ax) * (by - ay) - (cy - ay) * (bx - ax);
-  }
-
-  // compute bounding sphere from positions array
-  function computeBoundingSphereFromArray(posArr) {
-    const n = posArr.length / 3;
-    if (n === 0) return { cx:0,cy:0,cz:0,r:0 };
-    let cx=0,cy=0,cz=0;
-    for (let i=0;i<n;i++){ cx += posArr[i*3]; cy += posArr[i*3+1]; cz += posArr[i*3+2]; }
-    cx /= n; cy /= n; cz /= n;
-    let r2 = 0;
-    for (let i=0;i<n;i++){
-      const dx = posArr[i*3] - cx, dy = posArr[i*3+1] - cy, dz = posArr[i*3+2] - cz;
-      const d2 = dx*dx + dy*dy + dz*dz; if (d2 > r2) r2 = d2;
-    }
-    return { cx, cy, cz, r: Math.sqrt(r2) };
-  }
-
-  // API
-  const api = {
-    domElement: visible,
-    domWrapper: wrapper,
-    _internal: { bufferCanvas, imageData, zBuffer: () => zBuffer },
-
-    setSize(w, h, updateStyle = true) {
-      if (updateStyle) {
-        wrapper.style.width = `${w}px`;
-        wrapper.style.height = `${h}px`;
-        visible.style.width = `${w}px`;
-        visible.style.height = `${h}px`;
-      }
-      // update internal buffer size with current downscale
-      const newW = Math.max(1, Math.floor(w * downscale));
-      const newH = Math.max(1, Math.floor(h * downscale));
-      initBuffers(newW, newH);
-    },
-
-    setClearColor(hex, alpha = 1) {
-      api._clearColor = { hex, alpha };
-    },
-    _clearColor: { hex: 0x000000, alpha: 1 },
-
-    setCulling(disable) { disableCulling = !!disable; },
-
-    setRenderDistance(d) { renderDistance = Number(d) || renderDistance; },
-
-    uploadMesh({ id, positions, indices, color = [180,180,180], cpuStatic = false, twoSided = false }) {
-      if (!id || !positions || !indices) throw new Error('uploadMesh requires id, positions, indices');
-      const posArr = positions instanceof Float32Array ? positions : new Float32Array(positions);
-      const idxArr = indices instanceof Uint32Array ? indices : new Uint32Array(indices);
-      const bs = computeBoundingSphereFromArray(posArr);
-      meshes.set(id, { id, positions: posArr, indices: idxArr, color, cpuStatic: !!cpuStatic, twoSided: !!twoSided, bs });
-    },
-
-    async scanAndUploadScene(scene) {
-      // simple traversal; copy position/index buffers
-      meshes.clear();
-      scene.traverse((obj) => {
-        if (!obj.isMesh || obj.userData?.cpuRenderable === false) return;
-        const geom = obj.geometry;
-        if (!geom || !geom.attributes || !geom.attributes.position) return;
-        const posAttr = geom.attributes.position;
-        const positionsCopy = new Float32Array(posAttr.array);
-        let indicesCopy;
-        if (geom.index) indicesCopy = new Uint32Array(geom.index.array);
-        else {
-          const triCount = Math.floor(positionsCopy.length / 3) * 3;
-          indicesCopy = new Uint32Array(triCount);
-          for (let i = 0; i < triCount; ++i) indicesCopy[i] = i;
-        }
-        let col = [180,180,180];
-        try {
-          if (obj.userData?.cpuColor) col = obj.userData.cpuColor;
-          else if (obj.material && obj.material.color) col = [
-            Math.min(255, Math.round((obj.material.color.r || 1) * 255)),
-            Math.min(255, Math.round((obj.material.color.g || 1) * 255)),
-            Math.min(255, Math.round((obj.material.color.b || 1) * 255))
-          ];
-        } catch(e) {}
-        const bs = computeBoundingSphereFromArray(positionsCopy);
-        meshes.set(obj.uuid, { id: obj.uuid, positions: positionsCopy, indices: indicesCopy, color: col, cpuStatic: !!obj.userData?.cpuStatic, twoSided: !!obj.userData?.twoSided, bs });
-      });
-    },
-
-    removeMesh(meshOrId) {
-      const id = typeof meshOrId === 'string' ? meshOrId : (meshOrId && meshOrId.uuid);
-      if (!id) return;
-      meshes.delete(id);
-    },
-
-    debugDrawTestTriangle() {
-      const pos = new Float32Array([-0.5,-0.5,0, 0.5,-0.5,0, 0,0.5,0]);
-      const idx = new Uint32Array([0,1,2]);
-      api.uploadMesh({ id: 'test-tri', positions: pos, indices: idx, color: [255,0,0], cpuStatic: false, twoSided: false });
-    },
-
-    dispose() {
-      meshes.clear();
-      try { if (wrapper.parentElement) wrapper.parentElement.removeChild(wrapper); } catch (e) {}
-    },
-
-    // the renderer: projects, rasterizes triangles (barycentric), z-buffer
-    render(scene, camera) {
-      // clear buffer (fast)
-      const c = api._clearColor || { hex: 0x000000, alpha: 1 };
-      const rr = (c.hex >> 16) & 0xff, gg = (c.hex >> 8) & 0xff, bb = c.hex & 0xff;
-      for (let i = 0, p = 0; i < bufW * bufH; ++i, p += 4) {
-        pixelBuf[p] = rr; pixelBuf[p+1] = gg; pixelBuf[p+2] = bb; pixelBuf[p+3] = 255;
-        zBuffer[i] = Infinity;
-      }
-
-      // compute viewProj once
-      const proj = new Float32Array(camera.projectionMatrix.elements);
-      const view = new Float32Array(camera.matrixWorldInverse.elements);
-      multiplyMat4(proj, view, mvpTemp);
-
-      // draw each mesh (we use uploaded mesh copies to avoid reading three internals during raster)
-      let totalTriangles = 0, rasterized = 0, pixelWrites = 0;
-      for (const [id, mesh] of meshes) {
-        // frustum / distance quick check with bounding sphere
-        // transform bs center by object's world matrix if available on scene (we don't have matrix here).
-        // We'll conservatively assume visible; we can skip by renderDistance from camera center.
-        // (Better culling would require per-object model matrix provided via scene transforms.)
-        // So here we rely on user to not upload extremely far objects or mark cpuStatic and manage them.
-
-        const pos = mesh.positions;
-        const idx = mesh.indices;
-        const color = mesh.color;
-        // Build screen-space arrays per-vertex (we assume model is identity for uploaded meshes)
-        // NOTE: When using Three.js, objects in the scene may be transformed; recommended workflow:
-        // upload meshes with positions in world space OR update meshes when their matrixWorld changes.
-        const vcount = pos.length / 3;
-        const sx = new Float32Array(vcount);
-        const sy = new Float32Array(vcount);
-        const sz = new Float32Array(vcount);
-
-        // Project each vertex using mvpTemp as if mesh is in world (user must upload world-space positions),
-        // but to avoid vanish/NaN we protect w as done in transformVec3.
-        for (let vi = 0; vi < vcount; ++vi) {
-          transformVec3(mvpTemp, pos[vi*3], pos[vi*3+1], pos[vi*3+2], vClip);
-          const sc = ndcToBuffer(vClip[0], vClip[1]);
-          sx[vi] = sc[0]; sy[vi] = sc[1]; sz[vi] = vClip[2];
-        }
-
-        for (let t = 0; t < idx.length; t += 3) {
-          totalTriangles++;
-          const i0 = idx[t], i1 = idx[t+1], i2 = idx[t+2];
-          if (i0 < 0 || i1 < 0 || i2 < 0 || i0 >= sx.length || i1 >= sx.length || i2 >= sx.length) continue;
-
-          const x0 = sx[i0], y0 = sy[i0], z0 = sz[i0];
-          const x1 = sx[i1], y1 = sy[i1], z1 = sz[i1];
-          const x2 = sx[i2], y2 = sy[i2], z2 = sz[i2];
-
-          // triangle bbox in buffer coords
-          const minX = Math.max(0, Math.floor(Math.min(x0,x1,x2)));
-          const maxX = Math.min(bufW-1, Math.ceil(Math.max(x0,x1,x2)));
-          const minY = Math.max(0, Math.floor(Math.min(y0,y1,y2)));
-          const maxY = Math.min(bufH-1, Math.ceil(Math.max(y0,y1,y2)));
-          if (maxX < 0 || maxY < 0 || minX > bufW-1 || minY > bufH-1) continue;
-
-          // cull backfaces (screen-space cross)
-          const ux = x1 - x0, uy = y1 - y0;
-          const vx = x2 - x0, vy = y2 - y0;
-          const cross = ux * vy - uy * vx;
-          if (!disableCulling && !mesh.twoSided && cross >= 0) continue;
-
-          const area = edgeFunc(x0,y0,x1,y1,x2,y2);
-          if (!isFinite(area) || Math.abs(area) < 1e-8) continue;
-
-          rasterized++;
-          const invArea = 1.0 / area;
-
-          for (let py = minY; py <= maxY; ++py) {
-            const rowBase = py * bufW;
-            for (let px = minX; px <= maxX; ++px) {
-              const cx = px + 0.5, cy = py + 0.5;
-              const w0 = edgeFunc(x1,y1,x2,y2,cx,cy);
-              const w1 = edgeFunc(x2,y2,x0,y0,cx,cy);
-              const w2 = edgeFunc(x0,y0,x1,y1,cx,cy);
-              if ((w0 >= 0 && w1 >= 0 && w2 >= 0) || (w0 <= 0 && w1 <= 0 && w2 <= 0)) {
-                const b0 = w0 * invArea, b1 = w1 * invArea, b2 = w2 * invArea;
-                const zInterp = b0*z0 + b1*z1 + b2*z2;
-                if (!isFinite(zInterp)) continue;
-                const depth = (zInterp + 1) * 0.5;
-                const idxBuf = rowBase + px;
-                if (depth < zBuffer[idxBuf]) {
-                  const p = idxBuf * 4;
-                  pixelBuf[p] = color[0];
-                  pixelBuf[p+1] = color[1];
-                  pixelBuf[p+2] = color[2];
-                  pixelBuf[p+3] = 255;
-                  zBuffer[idxBuf] = depth;
-                  pixelWrites++;
+            // helper: build convex hull (Andrew monotone chain) of 2D points
+            function convexHull(points) {
+                if (points.length <= 1) return points.slice();
+                const pts = points.slice().sort((a, b) => (a.x === b.x ? a.y - b.y : a.x - b.x));
+                const cross = (o, a, b) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+                const lower = [];
+                for (let p of pts) {
+                    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop();
+                    lower.push(p);
                 }
-              }
+                const upper = [];
+                for (let i = pts.length - 1; i >= 0; i--) {
+                    const p = pts[i];
+                    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop();
+                    upper.push(p);
+                }
+                lower.pop();
+                upper.pop();
+                return lower.concat(upper);
             }
-          }
+
+            const api = {
+                domElement: canvas,
+                setSize(w, h, updateStyle = true) {
+                    canvas.width = w;
+                    canvas.height = h;
+                    if (updateStyle) {
+                        canvas.style.width = `${w}px`;
+                        canvas.style.height = `${h}px`;
+                    }
+                },
+                // Minimal clear color support
+                setClearColor(hex, alpha = 1) {
+                    api._clearColor = { hex, alpha };
+                },
+                _clearColor: { hex: 0x000000, alpha: 1 },
+
+                // Basic render: draw sprites (material.map.image) and approximated shapes for meshes
+                render(scene, camera) {
+                    // Clear with the clear color (converted to CSS)
+                    const c = api._clearColor;
+                    const r = (c.hex >> 16) & 0xff;
+                    const g = (c.hex >> 8) & 0xff;
+                    const b = c.hex & 0xff;
+                    ctx.save();
+                    ctx.setTransform(1, 0, 0, 1, 0, 0);
+                    ctx.fillStyle = `rgba(${r},${g},${b},${c.alpha})`;
+                    ctx.fillRect(0, 0, canvas.width, canvas.height);
+                    ctx.restore();
+
+                    // collect drawables (so we can sort by depth)
+                    const drawables = [];
+                    scene.traverse((obj) => {
+                        if (!obj.visible) return;
+                        if (obj.isCamera || obj.isLight) return;
+
+                        // World position (center)
+                        obj.getWorldPosition(tmpPos);
+                        proj.copy(tmpPos).project(camera); // NDC -1..1
+
+                        // quick NDC cull (if center far off-screen, skip). We allow some slack for large objects.
+                        if (proj.z > 1 || proj.z < -1 || proj.x < -2 || proj.x > 2 || proj.y < -2 || proj.y > 2) {
+                            // still allow meshes that have explicit userData.alwaysRender = true
+                            if (!obj.userData?.alwaysRender) return;
+                        }
+
+                        // screen coords
+                        const sx = (proj.x * 0.5 + 0.5) * canvas.width;
+                        const sy = (-proj.y * 0.5 + 0.5) * canvas.height;
+
+                        // distance for depth sorting
+                        const dist = camera.position.distanceTo(tmpPos);
+
+                        // check for texture
+                        const mapImage = obj.material && obj.material.map && obj.material.map.image ? obj.material.map.image : null;
+
+                        // categorize drawable
+                        if (mapImage) {
+                            drawables.push({ type: 'image', obj, sx, sy, dist, projZ: proj.z, mapImage });
+                        } else if (obj.isMesh && obj.geometry) {
+                            // Project a larger sample of vertices to create a better silhouette.
+                            const worldPoints = [];
+                            const geom = obj.geometry;
+                            const posAttr = geom.attributes?.position;
+
+                            if (posAttr && posAttr.count > 0) {
+                                // Sample up to 100 vertices to create a more detailed polygon
+                                const stride = Math.max(1, Math.floor(posAttr.count / 100));
+                                for (let i = 0; i < posAttr.count; i += stride) {
+                                    tmpVec.set(
+                                        posAttr.getX(i),
+                                        posAttr.getY(i),
+                                        posAttr.getZ(i)
+                                    ).applyMatrix4(obj.matrixWorld);
+                                    worldPoints.push(tmpVec.clone());
+                                }
+                            } else {
+                                // Fallback to the object's world position if no geometry points
+                                worldPoints.push(tmpPos.clone());
+                            }
+
+                            // project worldPoints to screen-space 2D points
+                            const pts2d = [];
+                            for (let wp of worldPoints) {
+                                proj.copy(wp).project(camera);
+                                if (proj.z > 1 || proj.z < -1) continue;
+                                const px = (proj.x * 0.5 + 0.5) * canvas.width;
+                                const py = (-proj.y * 0.5 + 0.5) * canvas.height;
+                                pts2d.push({ x: px, y: py });
+                            }
+
+                            if (pts2d.length === 0) {
+                                if (obj.userData?.forceMarker) {
+                                    drawables.push({ type: 'rect', obj, sx, sy, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
+                                }
+                                return;
+                            } else {
+                                const hull = convexHull(pts2d);
+                                if (hull.length >= 3) {
+                                    drawables.push({ type: 'poly', obj, pts: hull, dist, projZ: proj.z });
+                                } else if (hull.length === 2) {
+                                    drawables.push({ type: 'line', obj, pts: hull, dist });
+                                } else {
+                                    if (obj.userData?.forceMarker) {
+                                        drawables.push({ type: 'rect', obj, sx: pts2d[0].x, sy: pts2d[0].y, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
+                                    }
+                                }
+                                return;
+                            }
+                        } else {
+                            if (obj.userData?.forceMarker) {
+                                drawables.push({ type: 'rect', obj, sx, sy, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
+                            }
+                        }
+                    });
+
+                    // Painter's order: furthest first (larger distance)
+                    drawables.sort((a, b) => b.dist - a.dist);
+
+                    // draw
+                    for (let i = 0; i < drawables.length; i++) {
+                        const d = drawables[i];
+                        const { obj, dist } = d;
+
+                        // common color selection
+                        let color = obj.userData?.color;
+                        if (!color && obj.material && obj.material.color) {
+                            try {
+                                color = obj.material.color.getStyle ? obj.material.color.getStyle() : (`#${obj.material.color.getHexString()}`);
+                            } catch (e) {
+                                color = obj.userData?.color || 'white';
+                            }
+                        }
+                        color = color || obj.userData?.color || 'white';
+
+                        if (d.type === 'image' && d.mapImage && d.mapImage.width) {
+                            let size;
+                            if (obj.geometry && obj.geometry.boundingBox) {
+                                const bb = obj.geometry.boundingBox;
+                                const corners = [
+                                    [bb.min.x, bb.min.y, bb.min.z],
+                                    [bb.max.x, bb.max.y, bb.max.z]
+                                ];
+                                const screenPts = [];
+                                for (let c of corners) {
+                                    tmpVec.set(c[0], c[1], c[2]).applyMatrix4(obj.matrixWorld);
+                                    const p = tmpVec.project(camera);
+                                    screenPts.push({ x: (p.x * 0.5 + 0.5) * canvas.width, y: (-p.y * 0.5 + 0.5) * canvas.height });
+                                }
+                                const wPx = Math.abs(screenPts[0].x - screenPts[1].x);
+                                const hPx = Math.abs(screenPts[0].y - screenPts[1].y);
+                                size = Math.max(8, obj.userData?.sizePx ?? Math.max(wPx, hPx, 32));
+                            } else {
+                                const baseSize = obj.userData?.sizePx ?? 300;
+                                size = Math.max(8, baseSize * (1 / Math.max(0.1, dist * 0.05)));
+                            }
+                            ctx.save();
+                            ctx.translate(d.sx, d.sy);
+                            const rot = obj.userData?.rotation ?? (obj.rotation?.z ?? 0);
+                            if (rot) ctx.rotate(rot);
+                            ctx.globalAlpha = obj.userData?.opacity ?? (obj.material?.opacity ?? 1);
+                            ctx.drawImage(d.mapImage, -size / 2, -size / 2, size, size);
+                            ctx.restore();
+                        } else if (d.type === 'poly' && d.pts) {
+                            ctx.save();
+                            ctx.beginPath();
+                            ctx.moveTo(d.pts[0].x, d.pts[0].y);
+                            for (let j = 1; j < d.pts.length; j++) ctx.lineTo(d.pts[j].x, d.pts[j].y);
+                            ctx.closePath();
+                            ctx.globalAlpha = Math.max(0.2, Math.min(1, 1 - (dist * 0.002)));
+                            ctx.fillStyle = color;
+                            ctx.fill();
+                            ctx.globalAlpha = 0.6;
+                            ctx.lineWidth = Math.max(1, 2 - (dist * 0.001));
+                            ctx.strokeStyle = 'rgba(0,0,0,0.6)';
+                            ctx.stroke();
+                            ctx.restore();
+                        } else if (d.type === 'line' && d.pts && d.pts.length === 2) {
+                            ctx.beginPath();
+                            ctx.moveTo(d.pts[0].x, d.pts[0].y);
+                            ctx.lineTo(d.pts[1].x, d.pts[1].y);
+                            ctx.strokeStyle = color;
+                            ctx.lineWidth = obj.userData?.lineWidth ?? 3;
+                            ctx.globalAlpha = 1 - Math.min(0.9, dist * 0.002);
+                            ctx.stroke();
+                        } else if (d.type === 'rect') {
+                            const size = d.sizePx ?? Math.max(2, Math.round(12 * (1 / Math.max(0.1, dist * 0.05))));
+                            const x = (d.sx || d.sx === 0) ? d.sx : 0;
+                            const y = (d.sy || d.sy === 0) ? d.sy : 0;
+                            ctx.save();
+                            ctx.globalAlpha = Math.max(0.5, Math.min(1, 1 - (dist * 0.002)));
+                            ctx.fillStyle = color;
+                            ctx.fillRect(x - size / 2, y - size / 2, size, size);
+                            ctx.restore();
+                        } else {
+                            // nothing - we've removed automatic sphere/arc drawing
+                        }
+                    }
+                }
+            };
+            return api;
         }
-      }
-
-      // push imageData to bufferCanvas then scale up to visible canvas
-      try {
-        bufCtx.putImageData(imageData, 0, 0);
-        // draw scaled to visible canvas (fast when GPU does stretch)
-        visibleCtx.clearRect(0,0,visible.width, visible.height);
-        visibleCtx.imageSmoothingEnabled = false;
-        visibleCtx.drawImage(bufferCanvas, 0, 0, visible.width, visible.height);
-      } catch (err) {
-        // fallback: draw a visible magenta box so it's obvious
-        try {
-          visibleCtx.fillStyle = 'magenta';
-          visibleCtx.fillRect(Math.max(0, Math.floor(visible.width*0.1)), Math.max(0, Math.floor(visible.height*0.1)), Math.max(4, Math.floor(visible.width*0.1)), Math.max(4, Math.floor(visible.height*0.1)));
-        } catch (e) {}
-      }
-
-      // If nothing was drawn, draw a small visible indicator so you don't get a black screen
-      if (pixelWrites === 0) {
-        try {
-          visibleCtx.fillStyle = 'magenta';
-          visibleCtx.fillRect(Math.max(0, Math.floor(visible.width*0.1)), Math.max(0, Math.floor(visible.height*0.1)), Math.max(4, Math.floor(visible.width*0.1)), Math.max(4, Math.floor(visible.height*0.1)));
-          visibleCtx.fillStyle = 'white';
-          visibleCtx.fillRect(Math.floor(visible.width/2), Math.floor(visible.height/2), 2, 2);
-        } catch (e) {}
-      }
-
-      return { totalTriangles, rasterized, pixelWrites };
-    } // end render
-  }; // end api
-
-  // apply initial clear color
-  api.setClearColor(0x000000, 1);
-
-  return api;
-}
-
 
 
 /* ---------- Updated scene initializers (CPU renderer) ---------- */
@@ -1175,7 +1073,7 @@ export async function initSceneCrocodilosConstruction() {
   scene.add(window.camera);
 
   // 3. Renderer (CPU canvas)
-const cpuRenderer = createCanvasRenderer({ width: 1280, height: 720, downscale: 0.6 });
+const cpuRenderer = createCanvasRenderer({ width: FIXED_WIDTH, height: FIXED_HEIGHT });
   cpuRenderer.setClearColor(0x000000, 1);
   renderer = cpuRenderer;
   window.renderer = renderer;
@@ -3251,6 +3149,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
