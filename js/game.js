@@ -901,8 +901,8 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
         const sx = (proj.x * 0.5 + 0.5) * canvas.width;
         const sy = (-proj.y * 0.5 + 0.5) * canvas.height;
 
-        // distance for depth sorting
-        const dist = camera.position.distanceTo(tmpPos);
+        // center distance for fallback (still useful)
+        const centerDist = camera.position.distanceTo(tmpPos);
 
         // check for texture (sprites)
         const mapImage = obj.material && obj.material.map && obj.material.map.image ? obj.material.map.image : null;
@@ -910,19 +910,10 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
         // If user explicitly wants to always render, skip strict culling checks later
         const alwaysRender = !!obj.userData?.alwaysRender;
 
-        // categorize drawable
-        if (mapImage) {
-          // Sprite-style: keep rendering (center used for placement)
-          drawables.push({ type: 'image', obj, sx, sy, dist, projZ: proj.z, mapImage });
-          return;
-        } else if (obj.isMesh && obj.geometry) {
-          const geom = obj.geometry;
-          if (!geom.boundingBox) geom.computeBoundingBox && geom.computeBoundingBox();
-          if (!geom.boundingSphere) geom.computeBoundingSphere && geom.computeBoundingSphere();
-
-          // Build sample points in world space (bbox corners, sphere points, or subset of positions)
+        // Helper: assemble sample world points for an object (bbox corners / sphere / subset of positions)
+        function sampleWorldPointsFor(obj, geom) {
           const worldPoints = [];
-          if (geom.boundingBox) {
+          if (geom && geom.boundingBox) {
             const bb = geom.boundingBox;
             const min = bb.min;
             const max = bb.max;
@@ -940,7 +931,7 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
               tmpVec.set(c[0], c[1], c[2]).applyMatrix4(obj.matrixWorld);
               worldPoints.push(tmpVec.clone());
             }
-          } else if (geom.boundingSphere) {
+          } else if (geom && geom.boundingSphere) {
             const bs = geom.boundingSphere;
             const center = bs.center.clone().applyMatrix4(obj.matrixWorld);
             const r = bs.radius * (obj.matrixWorld.getMaxScaleOnAxis ? obj.matrixWorld.getMaxScaleOnAxis() : 1);
@@ -951,29 +942,59 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
             worldPoints.push(center.clone().add(new THREE.Vector3(0, -r, 0)));
             worldPoints.push(center.clone().add(new THREE.Vector3(0, 0, r)));
             worldPoints.push(center.clone().add(new THREE.Vector3(0, 0, -r)));
-          } else {
-            const posAttr = geom.attributes && geom.attributes.position;
-            if (posAttr && posAttr.count > 0) {
-              for (let i = 0; i < Math.min(12, posAttr.count); i += Math.max(1, Math.floor(posAttr.count / 12))) {
-                tmpVec.set(
-                  posAttr.getX(i),
-                  posAttr.getY(i),
-                  posAttr.getZ(i)
-                ).applyMatrix4(obj.matrixWorld);
-                worldPoints.push(tmpVec.clone());
-              }
-            } else {
-              worldPoints.push(tmpPos.clone());
+          } else if (geom && geom.attributes && geom.attributes.position && geom.attributes.position.count > 0) {
+            const posAttr = geom.attributes.position;
+            for (let i = 0; i < Math.min(12, posAttr.count); i += Math.max(1, Math.floor(posAttr.count / 12))) {
+              tmpVec.set(
+                posAttr.getX(i),
+                posAttr.getY(i),
+                posAttr.getZ(i)
+              ).applyMatrix4(obj.matrixWorld);
+              worldPoints.push(tmpVec.clone());
             }
+          } else {
+            // fallback to center
+            worldPoints.push(tmpPos.clone());
           }
+          return worldPoints;
+        }
+
+        // If sprite/image
+        if (mapImage) {
+          // try to create sample points to compute near/far distances
+          let worldPoints = [];
+          if (obj.geometry) {
+            worldPoints = sampleWorldPointsFor(obj, obj.geometry);
+          } else {
+            worldPoints = [tmpPos.clone()];
+          }
+          // compute distances to camera for these samples
+          const dists = worldPoints.map(wp => camera.position.distanceTo(wp));
+          const distNear = Math.min(...dists);
+          const distFar = Math.max(...dists);
+
+          drawables.push({ type: 'image', obj, sx, sy, distNear, distFar, projZ: proj.z, mapImage });
+          return;
+        } else if (obj.isMesh && obj.geometry) {
+          const geom = obj.geometry;
+          if (!geom.boundingBox) geom.computeBoundingBox && geom.computeBoundingBox();
+          if (!geom.boundingSphere) geom.computeBoundingSphere && geom.computeBoundingSphere();
+
+          // Build sample points in world space (bbox corners, sphere points, or subset of positions)
+          const worldPoints = sampleWorldPointsFor(obj, geom);
 
           // If no world points, fallback to center marker (rare)
           if (worldPoints.length === 0) {
             if (obj.userData?.forceMarker) {
-              drawables.push({ type: 'rect', obj, sx, sy, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
+              drawables.push({ type: 'rect', obj, sx, sy, distNear: centerDist, distFar: centerDist, sizePx: obj.userData?.markerSizePx ?? 6 });
             }
             return;
           }
+
+          // compute distances to camera for the sample points (this is the key change)
+          const dists = worldPoints.map(wp => camera.position.distanceTo(wp));
+          const distNear = Math.min(...dists);
+          const distFar = Math.max(...dists);
 
           // === CLIPPING AGAINST NEAR PLANE (camera space) ===
           // Convert points to camera space (z is negative in front of camera for THREE cameras)
@@ -1037,7 +1058,7 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
               // clamp center to screen bounds so we get a marker on-screen
               const cx = Math.max(0, Math.min(canvas.width, sx));
               const cy = Math.max(0, Math.min(canvas.height, sy));
-              drawables.push({ type: 'rect', obj, sx: cx, sy: cy, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
+              drawables.push({ type: 'rect', obj, sx: cx, sy: cy, distNear, distFar, sizePx: obj.userData?.markerSizePx ?? 6 });
             }
             return;
           }
@@ -1047,14 +1068,14 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
 
           // If hull is trivial (1 or 2 points), but user forced rendering, make fallback shapes
           if (hull.length >= 3) {
-            drawables.push({ type: 'poly', obj, pts: hull, dist, projZ: proj.z });
+            drawables.push({ type: 'poly', obj, pts: hull, distNear, distFar, projZ: proj.z });
           } else if (hull.length === 2) {
-            drawables.push({ type: 'line', obj, pts: hull, dist });
+            drawables.push({ type: 'line', obj, pts: hull, distNear, distFar });
           } else {
             // single point fallback
             const p = hull[0] || pts2d[0];
             if (alwaysRender || obj.userData?.forceMarker) {
-              drawables.push({ type: 'rect', obj, sx: p.x, sy: p.y, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
+              drawables.push({ type: 'rect', obj, sx: p.x, sy: p.y, distNear, distFar, sizePx: obj.userData?.markerSizePx ?? 6 });
             }
           }
 
@@ -1062,18 +1083,31 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
         } else {
           // unknown / fallback: only draw marker if explicitly requested
           if (obj.userData?.forceMarker) {
-            drawables.push({ type: 'rect', obj, sx, sy, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
+            drawables.push({ type: 'rect', obj, sx, sy, distNear: centerDist, distFar: centerDist, sizePx: obj.userData?.markerSizePx ?? 6 });
           }
         }
       });
 
-      // Painter's order: furthest first (larger distance)
-      drawables.sort((a, b) => b.dist - a.dist);
+      // Painter's order: sort by farthest sampled point first (so large objects that *span* far will be drawn behind)
+      // fallback to center-based dist if distFar is missing.
+      drawables.sort((a, b) => {
+        const aFar = (a.distFar !== undefined) ? a.distFar : (a.dist !== undefined ? a.dist : 0);
+        const bFar = (b.distFar !== undefined) ? b.distFar : (b.dist !== undefined ? b.dist : 0);
+        if (aFar === bFar) {
+          const aNear = (a.distNear !== undefined) ? a.distNear : (a.dist !== undefined ? a.dist : 0);
+          const bNear = (b.distNear !== undefined) ? b.distNear : (b.dist !== undefined ? b.dist : 0);
+          return bNear - aNear; // tie-breaker: draw object with larger near distance first
+        }
+        return bFar - aFar; // farthest first
+      });
 
       // draw
       for (let i = 0; i < drawables.length; i++) {
         const d = drawables[i];
-        const { obj, dist } = d;
+        const { obj } = d;
+
+        // compute an average distance for alpha/linewidth falloffs (keeps visuals smooth)
+        const avgDist = ((d.distNear ?? d.dist ?? 0) + (d.distFar ?? d.dist ?? 0)) * 0.5;
 
         // common color selection
         let color = obj.userData?.color;
@@ -1105,7 +1139,7 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
             size = Math.max(8, obj.userData?.sizePx ?? Math.max(wPx, hPx, 32));
           } else {
             const baseSize = obj.userData?.sizePx ?? 300;
-            size = Math.max(8, baseSize * (1 / Math.max(0.1, dist * 0.05)));
+            size = Math.max(8, baseSize * (1 / Math.max(0.1, avgDist * 0.05)));
           }
           ctx.save();
           ctx.translate(d.sx, d.sy);
@@ -1120,11 +1154,11 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
           ctx.moveTo(d.pts[0].x, d.pts[0].y);
           for (let j = 1; j < d.pts.length; j++) ctx.lineTo(d.pts[j].x, d.pts[j].y);
           ctx.closePath();
-          ctx.globalAlpha = Math.max(0.2, Math.min(1, 1 - (dist * 0.002)));
+          ctx.globalAlpha = Math.max(0.2, Math.min(1, 1 - (avgDist * 0.002)));
           ctx.fillStyle = color;
           ctx.fill();
           ctx.globalAlpha = 0.6;
-          ctx.lineWidth = Math.max(1, 2 - (dist * 0.001));
+          ctx.lineWidth = Math.max(1, 2 - (avgDist * 0.001));
           ctx.strokeStyle = 'rgba(0,0,0,0.6)';
           ctx.stroke();
           ctx.restore();
@@ -1134,15 +1168,15 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
           ctx.lineTo(d.pts[1].x, d.pts[1].y);
           ctx.strokeStyle = color;
           ctx.lineWidth = obj.userData?.lineWidth ?? 3;
-          ctx.globalAlpha = 1 - Math.min(0.9, dist * 0.002);
+          ctx.globalAlpha = 1 - Math.min(0.9, avgDist * 0.002);
           ctx.stroke();
         } else if (d.type === 'rect') {
           // small centered rectangle marker (replaces prior circle/sphere)
-          const size = d.sizePx ?? Math.max(2, Math.round(12 * (1 / Math.max(0.1, dist * 0.05))));
+          const size = d.sizePx ?? Math.max(2, Math.round(12 * (1 / Math.max(0.1, avgDist * 0.05))));
           const x = (d.sx || d.sx === 0) ? d.sx : 0;
           const y = (d.sy || d.sy === 0) ? d.sy : 0;
           ctx.save();
-          ctx.globalAlpha = Math.max(0.5, Math.min(1, 1 - (dist * 0.002)));
+          ctx.globalAlpha = Math.max(0.5, Math.min(1, 1 - (avgDist * 0.002)));
           ctx.fillStyle = color;
           ctx.fillRect(x - size / 2, y - size / 2, size, size);
           ctx.restore();
@@ -1155,11 +1189,6 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
 
   return api;
 }
-
-
-
-
-
 
 
 /* ---------- Updated scene initializers (CPU renderer) ---------- */
@@ -3258,6 +3287,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
