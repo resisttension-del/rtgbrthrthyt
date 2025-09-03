@@ -828,6 +828,11 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
   const tmpView = new THREE.Vector3();
   const tmpScale = new THREE.Vector3();
 
+  // Remember the last good screen representation for objects
+  // WeakMap so entries disappear when objects are GC'd
+  const lastScreenState = new WeakMap();
+  let frameId = 0;
+
   // helper: build convex hull (Andrew monotone chain) of 2D points
   function convexHull(points) {
     if (points.length <= 1) return points.slice();
@@ -878,9 +883,10 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
 
     // Basic render: draw sprites (material.map.image) and approximated shapes for meshes
     render(scene, camera) {
+      frameId++;
+
       // ensure camera matrices are up to date
       if (camera.updateMatrixWorld) camera.updateMatrixWorld();
-      // compute matrixWorldInverse safely (support older/newer three.js)
       if (!camera.matrixWorldInverse) camera.matrixWorldInverse = new THREE.Matrix4();
       try {
         if (typeof camera.matrixWorldInverse.copy === 'function') {
@@ -893,7 +899,7 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
           }
         }
       } catch (e) {
-        // ignore if invert/getInverse isn't available; projection below will still work via project()
+        // ignore if invert/getInverse isn't available; .project() will still work
       }
 
       // Clear with the clear color (converted to CSS)
@@ -939,7 +945,50 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
 
         // categorize drawable
         if (mapImage) {
-          drawables.push({ type: 'image', obj, sx, sy, dist, projZ: proj.z, mapImage });
+          // image sprites: compute size using projected bbox corners when possible
+          let size;
+          if (obj.geometry && obj.geometry.boundingBox) {
+            const bb = obj.geometry.boundingBox;
+            const corners = [
+              [bb.min.x, bb.min.y, bb.min.z],
+              [bb.max.x, bb.max.y, bb.max.z]
+            ];
+            const screenPts = [];
+            let validScreenPts = 0;
+            for (let c of corners) {
+              tmpVec.set(c[0], c[1], c[2]).applyMatrix4(obj.matrixWorld);
+              const pView = tmpVec.clone().applyMatrix4(camera.matrixWorldInverse);
+              if (pView.z < 0) {
+                const pp = tmpVec.clone().project(camera);
+                screenPts.push({ x: (pp.x * 0.5 + 0.5) * canvas.width, y: (-pp.y * 0.5 + 0.5) * canvas.height });
+                validScreenPts++;
+              }
+            }
+            if (validScreenPts === 2) {
+              const wPx = Math.abs(screenPts[0].x - screenPts[1].x);
+              const hPx = Math.abs(screenPts[0].y - screenPts[1].y);
+              size = Math.max(8, obj.userData?.sizePx ?? Math.max(wPx, hPx, 32));
+            } else {
+              const baseSize = obj.userData?.sizePx ?? 300;
+              size = Math.max(8, baseSize * (1 / Math.max(0.1, dist * 0.05)));
+            }
+          } else {
+            const baseSize = obj.userData?.sizePx ?? 300;
+            size = Math.max(8, baseSize * (1 / Math.max(0.1, dist * 0.05)));
+          }
+
+          // Save last good state for this image object
+          lastScreenState.set(obj, {
+            frame: frameId,
+            type: 'image',
+            sx, sy, size,
+            mapImage,
+            rot: obj.userData?.rotation ?? (obj.rotation?.z ?? 0),
+            alpha: obj.userData?.opacity ?? (obj.material?.opacity ?? 1),
+            colorHint: obj.userData?.color
+          });
+
+          drawables.push({ type: 'image', obj, sx, sy, dist, projZ: proj.z, mapImage, size });
         } else if (obj.isMesh && obj.geometry) {
           const geom = obj.geometry;
           if (!geom.boundingBox && geom.computeBoundingBox) geom.computeBoundingBox();
@@ -995,16 +1044,13 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
           }
 
           // --- robust projection + near-plane clipping ---
-          // Convert corners into view-space z values (apply camera.matrixWorldInverse)
           const cornerViews = worldPoints.map(wp => {
             const v = wp.clone().applyMatrix4(camera.matrixWorldInverse || new THREE.Matrix4().copy(camera.matrixWorld).invert());
-            return { world: wp.clone(), viewZ: v.z }; // viewZ: negative in front of camera in Three.js
+            return { world: wp.clone(), viewZ: v.z };
           });
 
-          // gather projected pts
           const pts2d = [];
-
-          // include corners that are in front of camera (viewZ < 0) - even if beyond far plane
+          // include corners that are in front of camera (viewZ < 0)
           for (let cv of cornerViews) {
             if (cv.viewZ < 0) {
               proj.copy(cv.world).project(camera);
@@ -1014,36 +1060,27 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
             }
           }
 
-          // compute intersections with the camera near plane for edges that cross it.
-          // near plane in view-space is z = -camera.near
+          // near plane intersections
           const nearZ = -Math.max(0.0001, (camera.near || 0.1));
-
           for (let e of cubeEdges) {
             const a = cornerViews[e[0]];
             const b = cornerViews[e[1]];
             if (!a || !b) continue;
-
             const za = a.viewZ;
             const zb = b.viewZ;
 
-            // if edge crosses the near plane (one endpoint in front of near, the other not),
-            // calculate the intersection point at viewZ = -camera.near
-            const aInFrontOfNear = za < nearZ;
-            const bInFrontOfNear = zb < nearZ;
+            const aInFront = za < nearZ;
+            const bInFront = zb < nearZ;
 
-            if (aInFrontOfNear !== bInFrontOfNear) {
-              // Transform endpoints to view space for linear interpolation along z
+            if (aInFront !== bInFront) {
               const Av = a.world.clone().applyMatrix4(camera.matrixWorldInverse);
               const Bv = b.world.clone().applyMatrix4(camera.matrixWorldInverse);
-
               const za_v = Av.z;
               const zb_v = Bv.z;
-
               const denom = (zb_v - za_v);
               if (Math.abs(denom) < 1e-9) continue;
               const t = (nearZ - za_v) / denom;
               if (t >= 0 && t <= 1) {
-                // lerp in world space to find intersection world point
                 const interWorld = new THREE.Vector3().lerpVectors(a.world, b.world, t);
                 proj.copy(interWorld).project(camera);
                 const px = (proj.x * 0.5 + 0.5) * canvas.width;
@@ -1051,52 +1088,74 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
                 pts2d.push({ x: px, y: py, world: interWorld.clone(), viewZ: nearZ });
               }
             } else {
-              // Also handle the case where one endpoint is behind the camera (viewZ >= 0)
-              // and the other is in front (viewZ < 0) - the edge may cross the near plane.
-              // The previous branch handles near-plane crossing, but here we check if
-              // one is behind camera (>= 0) and the other clearly in front of near plane.
-              const aBehindCamera = za >= 0;
-              const bBehindCamera = zb >= 0;
-              if (aBehindCamera !== bBehindCamera) {
-                // if the front endpoint is also in front of near plane, compute intersection with near plane
-                const front = aBehindCamera ? b : a;
-                const frontAv = front.world.clone().applyMatrix4(camera.matrixWorldInverse);
-                if (frontAv.z < nearZ) {
-                  // compute t where viewZ = nearZ between A and B in view space
-                  const Av = a.world.clone().applyMatrix4(camera.matrixWorldInverse);
-                  const Bv = b.world.clone().applyMatrix4(camera.matrixWorldInverse);
-                  const za_v = Av.z;
-                  const zb_v = Bv.z;
-                  const denom = (zb_v - za_v);
-                  if (Math.abs(denom) < 1e-9) continue;
-                  const t = (nearZ - za_v) / denom;
-                  if (t >= 0 && t <= 1) {
-                    const interWorld = new THREE.Vector3().lerpVectors(a.world, b.world, t);
-                    proj.copy(interWorld).project(camera);
-                    const px = (proj.x * 0.5 + 0.5) * canvas.width;
-                    const py = (-proj.y * 0.5 + 0.5) * canvas.height;
-                    pts2d.push({ x: px, y: py, world: interWorld.clone(), viewZ: nearZ });
-                  }
+              const aBehind = za >= 0;
+              const bBehind = zb >= 0;
+              if (aBehind !== bBehind) {
+                const Av = a.world.clone().applyMatrix4(camera.matrixWorldInverse);
+                const Bv = b.world.clone().applyMatrix4(camera.matrixWorldInverse);
+                const za_v = Av.z;
+                const zb_v = Bv.z;
+                const denom = (zb_v - za_v);
+                if (Math.abs(denom) < 1e-9) continue;
+                const t = (nearZ - za_v) / denom;
+                if (t >= 0 && t <= 1) {
+                  const interWorld = new THREE.Vector3().lerpVectors(a.world, b.world, t);
+                  proj.copy(interWorld).project(camera);
+                  const px = (proj.x * 0.5 + 0.5) * canvas.width;
+                  const py = (-proj.y * 0.5 + 0.5) * canvas.height;
+                  pts2d.push({ x: px, y: py, world: interWorld.clone(), viewZ: nearZ });
                 }
               }
             }
           }
 
-          // If no good projected points, skip drawing (unless forceMarker)
           if (pts2d.length === 0) {
+            // No good current projection points: reuse last known state if available
+            const last = lastScreenState.get(obj);
+            if (last) {
+              // create a drawable from last known state, but update distance
+              const copied = Object.assign({}, last);
+              copied.obj = obj;
+              copied.dist = dist;
+              copied.fromLast = true;
+              drawables.push(copied);
+              return;
+            }
+
             if (obj.userData?.forceMarker) {
               drawables.push({ type: 'rect', obj, sx, sy, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
             }
             return;
           } else {
-            // compute 2D convex hull from pts2d
             const hullPoints = pts2d.map(p => ({ x: p.x, y: p.y }));
             const hull = convexHull(hullPoints);
             if (hull.length >= 3) {
+              // save last good poly
+              lastScreenState.set(obj, {
+                frame: frameId,
+                type: 'poly',
+                pts: hull.map(p => ({ x: p.x, y: p.y })),
+                colorHint: obj.userData?.color
+              });
               drawables.push({ type: 'poly', obj, pts: hull, dist, projZ: proj.z });
             } else if (hull.length === 2) {
+              lastScreenState.set(obj, {
+                frame: frameId,
+                type: 'line',
+                pts: hull.map(p => ({ x: p.x, y: p.y })),
+                colorHint: obj.userData?.color
+              });
               drawables.push({ type: 'line', obj, pts: hull, dist });
             } else {
+              // single-point fallback
+              lastScreenState.set(obj, {
+                frame: frameId,
+                type: 'rect',
+                sx: pts2d[0].x,
+                sy: pts2d[0].y,
+                sizePx: obj.userData?.markerSizePx ?? 6,
+                colorHint: obj.userData?.color
+              });
               if (obj.userData?.forceMarker) {
                 drawables.push({ type: 'rect', obj, sx: pts2d[0].x, sy: pts2d[0].y, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
               }
@@ -1106,6 +1165,12 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
         } else {
           // unknown / fallback: only draw marker if explicitly requested
           if (obj.userData?.forceMarker) {
+            lastScreenState.set(obj, {
+              frame: frameId,
+              type: 'rect',
+              sx, sy, sizePx: obj.userData?.markerSizePx ?? 6,
+              colorHint: obj.userData?.color
+            });
             drawables.push({ type: 'rect', obj, sx, sy, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
           }
         }
@@ -1119,55 +1184,27 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
         const d = drawables[i];
         const { obj, dist } = d;
 
-        // common color selection
-        let color = obj.userData?.color;
-        if (!color && obj.material && obj.material.color) {
+        // If this drawable was reconstructed from lastScreenState, it may not include material/color info.
+        let color = obj?.userData?.color;
+        if (!color && obj && obj.material && obj.material.color) {
           try {
             color = obj.material.color.getStyle ? obj.material.color.getStyle() : (`#${obj.material.color.getHexString()}`);
           } catch (e) {
-            color = obj.userData?.color || 'white';
+            color = obj?.userData?.color || 'white';
           }
         }
-        color = color || obj.userData?.color || 'white';
+        color = color || obj?.userData?.color || (d.colorHint ?? 'white');
 
         if (d.type === 'image' && d.mapImage && d.mapImage.width) {
-          let size;
-          if (obj.geometry && obj.geometry.boundingBox) {
-            const bb = obj.geometry.boundingBox;
-            const corners = [
-              [bb.min.x, bb.min.y, bb.min.z],
-              [bb.max.x, bb.max.y, bb.max.z]
-            ];
-            const screenPts = [];
-            let validScreenPts = 0;
-            for (let c of corners) {
-              tmpVec.set(c[0], c[1], c[2]).applyMatrix4(obj.matrixWorld);
-              const p = tmpVec.clone().applyMatrix4(camera.matrixWorldInverse); // view space
-              if (p.z < 0) {
-                // valid to project
-                const pp = tmpVec.clone().project(camera);
-                screenPts.push({ x: (pp.x * 0.5 + 0.5) * canvas.width, y: (-pp.y * 0.5 + 0.5) * canvas.height });
-                validScreenPts++;
-              }
-            }
-            if (validScreenPts === 2) {
-              const wPx = Math.abs(screenPts[0].x - screenPts[1].x);
-              const hPx = Math.abs(screenPts[0].y - screenPts[1].y);
-              size = Math.max(8, obj.userData?.sizePx ?? Math.max(wPx, hPx, 32));
-            } else {
-              // fallback when one or both bbox corners not projectable
-              const baseSize = obj.userData?.sizePx ?? 300;
-              size = Math.max(8, baseSize * (1 / Math.max(0.1, dist * 0.05)));
-            }
-          } else {
-            const baseSize = obj.userData?.sizePx ?? 300;
-            size = Math.max(8, baseSize * (1 / Math.max(0.1, dist * 0.05)));
-          }
+          // use provided size (either fresh or from last)
+          const size = d.size ?? d.sizePx ?? Math.max(8, (obj && obj.userData?.sizePx) || 32);
+          const drawSx = d.sx ?? sx; // if last-state had sx stored, use it; otherwise use most recent center
+          const drawSy = d.sy ?? sy;
           ctx.save();
-          ctx.translate(d.sx, d.sy);
-          const rot = obj.userData?.rotation ?? (obj.rotation?.z ?? 0);
+          ctx.translate(drawSx, drawSy);
+          const rot = d.rot ?? (obj?.userData?.rotation ?? (obj?.rotation?.z ?? 0));
           if (rot) ctx.rotate(rot);
-          ctx.globalAlpha = obj.userData?.opacity ?? (obj.material?.opacity ?? 1);
+          ctx.globalAlpha = d.alpha ?? (obj?.userData?.opacity ?? (obj?.material?.opacity ?? 1));
           ctx.drawImage(d.mapImage, -size / 2, -size / 2, size, size);
           ctx.restore();
         } else if (d.type === 'poly' && d.pts) {
@@ -1189,14 +1226,14 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
           ctx.moveTo(d.pts[0].x, d.pts[0].y);
           ctx.lineTo(d.pts[1].x, d.pts[1].y);
           ctx.strokeStyle = color;
-          ctx.lineWidth = obj.userData?.lineWidth ?? 3;
+          ctx.lineWidth = obj?.userData?.lineWidth ?? d.lineWidth ?? 3;
           ctx.globalAlpha = 1 - Math.min(0.9, dist * 0.002);
           ctx.stroke();
         } else if (d.type === 'rect') {
           // small centered rectangle marker (replaces prior circle/sphere)
-          const size = d.sizePx ?? Math.max(2, Math.round(12 * (1 / Math.max(0.1, dist * 0.05))));
-          const x = (d.sx || d.sx === 0) ? d.sx : 0;
-          const y = (d.sy || d.sy === 0) ? d.sy : 0;
+          const size = d.sizePx ?? d.size ?? Math.max(2, Math.round(12 * (1 / Math.max(0.1, dist * 0.05))));
+          const x = (d.sx || d.sx === 0) ? d.sx : (d.centerX ?? 0);
+          const y = (d.sy || d.sy === 0) ? d.sy : (d.centerY ?? 0);
           ctx.save();
           ctx.globalAlpha = Math.max(0.5, Math.min(1, 1 - (dist * 0.002)));
           ctx.fillStyle = color;
@@ -3308,6 +3345,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
