@@ -1045,23 +1045,12 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
             }
           }
 
-          // fallback: if clipping produced nothing, try to project some original points (sanitized),
-          // otherwise fall back to center marker so object does not vanish
+          // Fallback is no longer needed. If no clipped points exist, the object is not visible.
           if (pts2d.length === 0) {
-            // attempt to project original worldPoints but sanitize/protect against behind-camera points
-            for (let wp of worldPoints) {
-              const p = wp.clone().project(camera);
-              if (!isFinite(p.x) || !isFinite(p.y)) continue;
-              // clamp NDC so behind-camera extremes become finite screen coords
-              const ndcX = Math.max(-10, Math.min(10, p.x));
-              const ndcY = Math.max(-10, Math.min(10, p.y));
-              pts2d.push({ x: (ndcX * 0.5 + 0.5) * canvas.width, y: (-ndcY * 0.5 + 0.5) * canvas.height });
+            // Draw a simple marker if forced, otherwise just skip this object
+            if (obj.userData?.forceMarker) {
+              drawables.push({ type: 'rect', obj, sx, sy, dist, sizePx: obj.userData?.markerSizePx ?? 12 });
             }
-          }
-
-          // If still empty -> center marker fallback
-          if (pts2d.length === 0) {
-            drawables.push({ type: 'rect', obj, sx, sy, dist, sizePx: obj.userData?.markerSizePx ?? 12 });
             return;
           }
 
