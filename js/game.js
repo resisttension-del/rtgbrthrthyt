@@ -1608,43 +1608,39 @@ group.name = `remotePlayer_${data.id}`; // Set the name here for future getObjec
 group.userData.playerId = data.id; // Store ID on the group
 
 // ─── Body ──────────────────────────────────────────────────────────────────────
-const bodyGeom = new THREE.CapsuleGeometry(0.3, 1.3, 4, 8);
+const bodyWidth = 0.6;   // ~2 * capsule radius (0.3)
+const bodyHeight = 1.9;  // approx. capsule total height (1.3 + 2*0.3)
+const bodyDepth = 0.6;
+
+const bodyGeom = new THREE.BoxGeometry(bodyWidth, bodyHeight, bodyDepth);
 const bodyMat = new THREE.MeshStandardMaterial({ color: initialColor });
 const bodyMesh = new THREE.Mesh(bodyGeom, bodyMat);
 bodyMesh.castShadow = true;
 bodyMesh.position.set(0, 0.0 - 1.1, 0); // Position relative to group center
 bodyMesh.userData.isPlayerBodyPart = true;
 bodyMesh.userData.playerId = data.id;
+
+// ensure index exists (some custom routines expect it)
+if (!bodyMesh.geometry.index) {
+  bodyMesh.geometry.setIndex(
+    generateSequentialIndices(bodyMesh.geometry.attributes.position.count)
+  );
+}
+bodyMesh.geometry.computeBoundsTree();
+
 group.add(bodyMesh);
 
-     if (!bodyMesh.geometry.index) {
-    bodyMesh.geometry.setIndex(
-      generateSequentialIndices(bodyMesh.geometry.attributes.position.count)
-    );
-  }
-  bodyMesh.geometry.computeBoundsTree();
-
-  group.add(bodyMesh);
-
-// ─── Head ──────────────────────────────────────────────────────────────────────
-const headGeom = new THREE.SphereGeometry(0.15, 8, 8);
+// ─── Head (box) ───────────────────────────────────────────────────────────────
+const headSize = 0.3; // ~diameter of original sphere (radius 0.15)
+const headGeom = new THREE.BoxGeometry(headSize, headSize, headSize);
 const headMat = new THREE.MeshStandardMaterial({ color: 0xffffaa });
 const headMesh = new THREE.Mesh(headGeom, headMat);
 headMesh.castShadow = true;
-headMesh.position.set(0, 1.1 - 1.1, 0); // Relative to body/group
+headMesh.position.set(0, 1.1 - 1.1, 0); // same relative offset as before
 headMesh.userData.isPlayerBodyPart = true;
 headMesh.userData.playerId = data.id;
 headMesh.userData.isPlayerHead = true;
 group.add(headMesh);
-
-      if (!headMesh.geometry.index) {
-    headMesh.geometry.setIndex(
-      generateSequentialIndices(headMesh.geometry.attributes.position.count)
-    );
-  }
-  headMesh.geometry.computeBoundsTree();
-
-  group.add(headMesh);
 
 // ─── Health Bar ───────────────────────────────────────────────────────────────
 // Ensure createHealthBar exists and returns expected object structure
@@ -1691,7 +1687,7 @@ THREE.MathUtils.degToRad(180),
 0
 );
 nameMesh.userData.isPlayerName = true;
-group.add(nameMesh);
+// group.add(nameMesh);
 }, undefined, function(err) {
 console.error('An error happened loading the font:', err);
 });
@@ -3287,6 +3283,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
