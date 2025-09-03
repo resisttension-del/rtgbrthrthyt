@@ -850,7 +850,6 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
   const api = {
     domElement: canvas,
     options: {
-      // if you ever want to toggle strict near-plane clipping:
       strictNearClip: true
     },
     setSize(w, h, updateStyle = true) {
@@ -861,15 +860,13 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
         canvas.style.height = `${h}px`;
       }
     },
-    // Minimal clear color support
     setClearColor(hex, alpha = 1) {
       api._clearColor = { hex, alpha };
     },
     _clearColor: { hex: 0x000000, alpha: 1 },
 
-    // Basic render: draw sprites (material.map.image) and approximated shapes for meshes
     render(scene, camera) {
-      // Clear with the clear color (converted to CSS)
+      // Clear
       const c = api._clearColor;
       const r = (c.hex >> 16) & 0xff;
       const g = (c.hex >> 8) & 0xff;
@@ -880,38 +877,29 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
       ctx.fillRect(0, 0, canvas.width, canvas.height);
       ctx.restore();
 
-      // update camera matrices once
+      // update camera
       camera.updateMatrixWorld();
       if (camera.updateProjectionMatrix) camera.updateProjectionMatrix();
 
-      // camera world->camera matrix (inverse of matrixWorld)
+      // inverse world -> camera matrix
       const camInv = tmpMat.copy(camera.matrixWorld).invert();
 
-      // collect drawables (so we can sort by depth)
       const drawables = [];
       scene.traverse((obj) => {
         if (!obj.visible) return;
         if (obj.isCamera || obj.isLight) return;
 
-        // World position (center)
         obj.getWorldPosition(tmpPos);
-        proj.copy(tmpPos).project(camera); // NDC -1..1 (center)
-
-        // screen coords of center (used as fallback)
+        proj.copy(tmpPos).project(camera);
         const sx = (proj.x * 0.5 + 0.5) * canvas.width;
         const sy = (-proj.y * 0.5 + 0.5) * canvas.height;
 
-        // check for texture (sprites)
         const mapImage = obj.material && obj.material.map && obj.material.map.image ? obj.material.map.image : null;
-
-        // If user explicitly wants to always render, skip strict culling checks later
         const alwaysRender = !!obj.userData?.alwaysRender;
 
-        // Build sample points and camera-space z list (used for better depth sorting)
+        // collect world sample points
         const worldPoints = [];
-
         if (mapImage) {
-          // For sprites, sample bounding box if present, otherwise center
           if (obj.geometry && obj.geometry.boundingBox) {
             const bb = obj.geometry.boundingBox;
             const corners = [
@@ -926,40 +914,25 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
             worldPoints.push(tmpPos.clone());
           }
 
-          // Convert to camera space
           const camSpacePts = worldPoints.map(wp => wp.clone().applyMatrix4(camInv));
           const camZs = camSpacePts.map(p => p.z);
           const avgCamZ = camZs.reduce((a, b) => a + b, 0) / camZs.length;
-          const minCamZ = Math.min(...camZs);
-          const maxCamZ = Math.max(...camZs);
-
-          // distance for human readable fade, but not used for sorting primarily
-          const dist = camera.position.distanceTo(tmpPos);
-
           drawables.push({
-            type: 'image',
-            obj,
-            sx,
-            sy,
-            mapImage,
-            worldPoints,
-            camZs,
-            avgCamZ,
-            minCamZ,
-            maxCamZ,
-            dist
+            type: 'image', obj, sx, sy, mapImage, worldPoints,
+            camZs, avgCamZ, minCamZ: Math.min(...camZs), maxCamZ: Math.max(...camZs),
+            dist: camera.position.distanceTo(tmpPos)
           });
           return;
-        } else if (obj.isMesh && obj.geometry) {
+        }
+
+        if (obj.isMesh && obj.geometry) {
           const geom = obj.geometry;
           if (!geom.boundingBox) geom.computeBoundingBox && geom.computeBoundingBox();
           if (!geom.boundingSphere) geom.computeBoundingSphere && geom.computeBoundingSphere();
 
-          // Build sample points in world space (bbox corners, sphere points, or subset of positions)
           if (geom.boundingBox) {
             const bb = geom.boundingBox;
-            const min = bb.min;
-            const max = bb.max;
+            const min = bb.min, max = bb.max;
             const corners = [
               [min.x, min.y, min.z],
               [min.x, min.y, max.z],
@@ -970,30 +943,17 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
               [max.x, max.y, min.z],
               [max.x, max.y, max.z],
             ];
-            for (let c of corners) {
-              tmpVec.set(c[0], c[1], c[2]).applyMatrix4(obj.matrixWorld);
-              worldPoints.push(tmpVec.clone());
-            }
+            for (let c of corners) { tmpVec.set(c[0], c[1], c[2]).applyMatrix4(obj.matrixWorld); worldPoints.push(tmpVec.clone()); }
           } else if (geom.boundingSphere) {
             const bs = geom.boundingSphere;
             const center = bs.center.clone().applyMatrix4(obj.matrixWorld);
             const r = bs.radius * (obj.matrixWorld.getMaxScaleOnAxis ? obj.matrixWorld.getMaxScaleOnAxis() : 1);
-            worldPoints.push(center.clone());
-            worldPoints.push(center.clone().add(new THREE.Vector3(r, 0, 0)));
-            worldPoints.push(center.clone().add(new THREE.Vector3(-r, 0, 0)));
-            worldPoints.push(center.clone().add(new THREE.Vector3(0, r, 0)));
-            worldPoints.push(center.clone().add(new THREE.Vector3(0, -r, 0)));
-            worldPoints.push(center.clone().add(new THREE.Vector3(0, 0, r)));
-            worldPoints.push(center.clone().add(new THREE.Vector3(0, 0, -r)));
+            worldPoints.push(center.clone(), center.clone().add(new THREE.Vector3(r, 0, 0)), center.clone().add(new THREE.Vector3(-r, 0, 0)), center.clone().add(new THREE.Vector3(0, r, 0)), center.clone().add(new THREE.Vector3(0, -r, 0)), center.clone().add(new THREE.Vector3(0, 0, r)), center.clone().add(new THREE.Vector3(0, 0, -r)));
           } else {
             const posAttr = geom.attributes && geom.attributes.position;
             if (posAttr && posAttr.count > 0) {
               for (let i = 0; i < Math.min(12, posAttr.count); i += Math.max(1, Math.floor(posAttr.count / 12))) {
-                tmpVec.set(
-                  posAttr.getX(i),
-                  posAttr.getY(i),
-                  posAttr.getZ(i)
-                ).applyMatrix4(obj.matrixWorld);
+                tmpVec.set(posAttr.getX(i), posAttr.getY(i), posAttr.getZ(i)).applyMatrix4(obj.matrixWorld);
                 worldPoints.push(tmpVec.clone());
               }
             } else {
@@ -1003,37 +963,33 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
 
           if (worldPoints.length === 0) {
             if (obj.userData?.forceMarker) {
-              drawables.push({ type: 'rect', obj, sx, sy, dist: camera.position.distanceTo(tmpPos), sizePx: obj.userData?.markerSizePx ?? 6, camZs: [tmpPos.clone().applyMatrix4(camInv).z] });
+              const camZ = tmpPos.clone().applyMatrix4(camInv).z;
+              drawables.push({ type: 'rect', obj, sx, sy, camZs: [camZ], minCamZ: camZ, maxCamZ: camZ, avgCamZ: camZ, dist: camera.position.distanceTo(tmpPos), sizePx: obj.userData?.markerSizePx ?? 6 });
             }
             return;
           }
 
-          // Convert to camera space for clipping & depth metrics
+          // convert to camera space and project points for screen hull
           const camSpacePts = worldPoints.map(wp => wp.clone().applyMatrix4(camInv));
           const nearZ = - (camera.near !== undefined ? camera.near : 0.1);
           const farZ = - (camera.far !== undefined ? camera.far : 1e12);
-
-          // Collect projected screen points for those in front of near and within far
           const pts2d = [];
           const camZs = [];
+
           for (let i = 0; i < worldPoints.length; i++) {
             const camPt = camSpacePts[i];
             const wp = worldPoints[i];
             camZs.push(camPt.z);
-
             if (camPt.z <= nearZ && camPt.z >= farZ) {
               proj.copy(wp).project(camera);
-              const px = (proj.x * 0.5 + 0.5) * canvas.width;
-              const py = (-proj.y * 0.5 + 0.5) * canvas.height;
-              pts2d.push({ x: px, y: py, ndcZ: proj.z });
+              pts2d.push({ x: (proj.x * 0.5 + 0.5) * canvas.width, y: (-proj.y * 0.5 + 0.5) * canvas.height, ndcZ: proj.z });
             }
           }
 
-          // For edges that cross the near plane, compute intersection point and include it
+          // include near-plane edge intersections
           for (let i = 0; i < worldPoints.length; i++) {
             for (let j = i + 1; j < worldPoints.length; j++) {
-              const z1 = camSpacePts[i].z;
-              const z2 = camSpacePts[j].z;
+              const z1 = camSpacePts[i].z, z2 = camSpacePts[j].z;
               if ((z1 <= nearZ && z2 > nearZ) || (z2 <= nearZ && z1 > nearZ)) {
                 const denom = (z2 - z1);
                 if (Math.abs(denom) < 1e-9) continue;
@@ -1041,120 +997,102 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
                 if (t < 0 || t > 1) continue;
                 const ip = worldPoints[i].clone().lerp(worldPoints[j], t);
                 proj.copy(ip).project(camera);
-                const px = (proj.x * 0.5 + 0.5) * canvas.width;
-                const py = (-proj.y * 0.5 + 0.5) * canvas.height;
-                pts2d.push({ x: px, y: py, ndcZ: proj.z });
+                pts2d.push({ x: (proj.x * 0.5 + 0.5) * canvas.width, y: (-proj.y * 0.5 + 0.5) * canvas.height, ndcZ: proj.z });
               }
             }
           }
 
-          // If strict near clipping is disabled, include center projection as a loose fallback
           if (!api.options.strictNearClip && pts2d.length === 0) {
             proj.copy(tmpPos).project(camera);
-            const px = (proj.x * 0.5 + 0.5) * canvas.width;
-            const py = (-proj.y * 0.5 + 0.5) * canvas.height;
-            pts2d.push({ x: px, y: py, ndcZ: proj.z });
+            pts2d.push({ x: (proj.x * 0.5 + 0.5) * canvas.width, y: (-proj.y * 0.5 + 0.5) * canvas.height, ndcZ: proj.z });
           }
 
-          // If after near-plane clipping we have zero pts, we may still want a fallback marker
           if (pts2d.length === 0) {
             if (alwaysRender || obj.userData?.forceMarker) {
               const cx = Math.max(0, Math.min(canvas.width, sx));
               const cy = Math.max(0, Math.min(canvas.height, sy));
-              drawables.push({ type: 'rect', obj, sx: cx, sy: cy, dist: camera.position.distanceTo(tmpPos), sizePx: obj.userData?.markerSizePx ?? 6, camZs: camZs });
+              const camZsSafe = camZs.length ? camZs : [tmpPos.clone().applyMatrix4(camInv).z];
+              drawables.push({ type: 'rect', obj, sx: cx, sy: cy, camZs: camZsSafe, minCamZ: Math.min(...camZsSafe), maxCamZ: Math.max(...camZsSafe), avgCamZ: camZsSafe.reduce((a,b)=>a+b,0)/camZsSafe.length, dist: camera.position.distanceTo(tmpPos), sizePx: obj.userData?.markerSizePx ?? 6 });
             }
             return;
           }
 
-          // Build convex hull from the collected projected points
           const hull = convexHull(pts2d);
-
-          // Compute depth metrics for sorting
           const avgCamZ = camZs.reduce((a, b) => a + b, 0) / camZs.length;
           const minCamZ = Math.min(...camZs);
           const maxCamZ = Math.max(...camZs);
 
-          if (hull.length >= 3) {
-            drawables.push({ type: 'poly', obj, pts: hull, dist: camera.position.distanceTo(tmpPos), camZs, avgCamZ, minCamZ, maxCamZ });
-          } else if (hull.length === 2) {
-            drawables.push({ type: 'line', obj, pts: hull, dist: camera.position.distanceTo(tmpPos), camZs, avgCamZ, minCamZ, maxCamZ });
-          } else {
-            const p = hull[0] || pts2d[0];
-            if (alwaysRender || obj.userData?.forceMarker) {
-              drawables.push({ type: 'rect', obj, sx: p.x, sy: p.y, dist: camera.position.distanceTo(tmpPos), sizePx: obj.userData?.markerSizePx ?? 6, camZs, avgCamZ, minCamZ, maxCamZ });
-            }
-          }
+          if (hull.length >= 3) drawables.push({ type: 'poly', obj, pts: hull, camZs, avgCamZ, minCamZ, maxCamZ, dist: camera.position.distanceTo(tmpPos) });
+          else if (hull.length === 2) drawables.push({ type: 'line', obj, pts: hull, camZs, avgCamZ, minCamZ, maxCamZ, dist: camera.position.distanceTo(tmpPos) });
+          else drawables.push({ type: 'rect', obj, sx: hull[0].x, sy: hull[0].y, camZs, avgCamZ, minCamZ, maxCamZ, dist: camera.position.distanceTo(tmpPos), sizePx: obj.userData?.markerSizePx ?? 6 });
 
           return;
-        } else {
-          // unknown / fallback: only draw marker if explicitly requested
-          if (obj.userData?.forceMarker) {
-            const camZ = tmpPos.clone().applyMatrix4(camInv).z;
-            drawables.push({ type: 'rect', obj, sx, sy, dist: camera.position.distanceTo(tmpPos), sizePx: obj.userData?.markerSizePx ?? 6, camZs: [camZ], avgCamZ: camZ, minCamZ: camZ, maxCamZ: camZ });
-          }
+        }
+
+        // fallback: forceMarker only
+        if (obj.userData?.forceMarker) {
+          const camZ = tmpPos.clone().applyMatrix4(camInv).z;
+          drawables.push({ type: 'rect', obj, sx, sy, camZs: [camZ], minCamZ: camZ, maxCamZ: camZ, avgCamZ: camZ, dist: camera.position.distanceTo(tmpPos), sizePx: obj.userData?.markerSizePx ?? 6 });
         }
       });
 
-      // ---- SORTING: respect renderOrder, alwaysOnTop, then use camera-space depth metrics ----
-      // We want to draw farthest first (back-to-front painter's algorithm). In camera space
-      // z is usually negative in front of the camera; more negative => farther away.
+      // === Improved sorting ===
+      // camera-space z is usually negative in front of camera (more negative => farther).
+      // Each drawable should have minCamZ/maxCamZ (furthest/nearest in camera-space).
       drawables.sort((A, B) => {
-        // 1) explicit renderOrder/userData.renderOrder (lower renderOrder drawn earlier)
+        // 1) explicit renderOrder (lower draw earlier)
         const roA = (A.obj && (A.obj.renderOrder ?? A.obj.userData?.renderOrder ?? 0)) || 0;
         const roB = (B.obj && (B.obj.renderOrder ?? B.obj.userData?.renderOrder ?? 0)) || 0;
         if (roA !== roB) return roA - roB;
 
-        // 2) alwaysOnTop flag (objects with alwaysOnTop should be drawn later i.e. on top)
+        // 2) alwaysOnTop (drawn last -> on top)
         const topA = A.obj?.userData?.alwaysOnTop ? 1 : 0;
         const topB = B.obj?.userData?.alwaysOnTop ? 1 : 0;
         if (topA !== topB) return topA - topB;
 
-        // 3) Depth: prefer average camera Z; if missing fall back to min/max or dist
-        const aDepth = (A.avgCamZ !== undefined) ? A.avgCamZ : (A.minCamZ !== undefined ? (A.minCamZ + (A.maxCamZ||A.minCamZ))/2 : (A.dist || 0));
-        const bDepth = (B.avgCamZ !== undefined) ? B.avgCamZ : (B.minCamZ !== undefined ? (B.minCamZ + (B.maxCamZ||B.minCamZ))/2 : (B.dist || 0));
+        // Ensure we have min/max values (fallbacks)
+        const Amin = (A.minCamZ !== undefined) ? A.minCamZ : (A.avgCamZ !== undefined ? A.avgCamZ : (A.dist || 0));
+        const Amax = (A.maxCamZ !== undefined) ? A.maxCamZ : (A.avgCamZ !== undefined ? A.avgCamZ : (A.dist || 0));
+        const Bmin = (B.minCamZ !== undefined) ? B.minCamZ : (B.avgCamZ !== undefined ? B.avgCamZ : (B.dist || 0));
+        const Bmax = (B.maxCamZ !== undefined) ? B.maxCamZ : (B.avgCamZ !== undefined ? B.avgCamZ : (B.dist || 0));
 
-        // sort ascending so more negative (farther) comes first
-        if (aDepth !== bDepth) return aDepth - bDepth;
+        // 3) if intervals do not overlap -> fully in front/behind -> order by interval relation
+        // Note: more negative = farther.
+        if (Amax < Bmin) return -1; // A is entirely farther (draw A first)
+        if (Bmax < Amin) return 1;  // B is entirely farther
 
-        // last tie-breaker: geometric size (small objects more likely should be drawn over big ones)
+        // 4) intervals overlap -> order by nearest-point (maxCamZ): draw object whose nearest point is farther first
+        if (Amax !== Bmax) return Amax - Bmax;
+
+        // 5) tie-breaker: average camera Z
+        const Aavg = (A.avgCamZ !== undefined) ? A.avgCamZ : (Amin + Amax) / 2;
+        const Bavg = (B.avgCamZ !== undefined) ? B.avgCamZ : (Bmin + Bmax) / 2;
+        if (Aavg !== Bavg) return Aavg - Bavg;
+
+        // 6) last: geometric screen size (smaller on top)
         const aSize = (A.pts && A.pts.length) ? Math.abs(A.pts[0].x - (A.pts[A.pts.length - 1]?.x || A.pts[0].x)) + Math.abs(A.pts[0].y - (A.pts[A.pts.length - 1]?.y || A.pts[0].y)) : (A.sizePx || 0);
         const bSize = (B.pts && B.pts.length) ? Math.abs(B.pts[0].x - (B.pts[B.pts.length - 1]?.x || B.pts[0].x)) + Math.abs(B.pts[0].y - (B.pts[B.pts.length - 1]?.y || B.pts[0].y)) : (B.sizePx || 0);
         return aSize - bSize;
       });
 
-      // draw
+      // draw loop (unchanged visuals)
       for (let i = 0; i < drawables.length; i++) {
         const d = drawables[i];
         const { obj } = d;
-
-        // common color selection
         let color = obj.userData?.color;
         if (!color && obj.material && obj.material.color) {
-          try {
-            color = obj.material.color.getStyle ? obj.material.color.getStyle() : (`#${obj.material.color.getHexString()}`);
-          } catch (e) {
-            color = obj.userData?.color || 'white';
-          }
+          try { color = obj.material.color.getStyle ? obj.material.color.getStyle() : (`#${obj.material.color.getHexString()}`); } catch (e) { color = obj.userData?.color || 'white'; }
         }
         color = color || obj.userData?.color || 'white';
-
-        // ensure default composite mode and alpha handling per draw
         ctx.globalCompositeOperation = 'source-over';
 
         if (d.type === 'image' && d.mapImage && d.mapImage.width) {
           let size;
           if (obj.geometry && obj.geometry.boundingBox) {
             const bb = obj.geometry.boundingBox;
-            const corners = [
-              [bb.min.x, bb.min.y, bb.min.z],
-              [bb.max.x, bb.max.y, bb.max.z]
-            ];
+            const corners = [[bb.min.x, bb.min.y, bb.min.z],[bb.max.x, bb.max.y, bb.max.z]];
             const screenPts = [];
-            for (let c of corners) {
-              tmpVec.set(c[0], c[1], c[2]).applyMatrix4(obj.matrixWorld);
-              const p = tmpVec.project(camera);
-              screenPts.push({ x: (p.x * 0.5 + 0.5) * canvas.width, y: (-p.y * 0.5 + 0.5) * canvas.height });
-            }
+            for (let c of corners) { tmpVec.set(c[0], c[1], c[2]).applyMatrix4(obj.matrixWorld); const p = tmpVec.project(camera); screenPts.push({ x: (p.x * 0.5 + 0.5) * canvas.width, y: (-p.y * 0.5 + 0.5) * canvas.height }); }
             const wPx = Math.abs(screenPts[0].x - screenPts[1].x);
             const hPx = Math.abs(screenPts[0].y - screenPts[1].y);
             size = Math.max(8, obj.userData?.sizePx ?? Math.max(wPx, hPx, 32));
@@ -1175,7 +1113,6 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
           ctx.moveTo(d.pts[0].x, d.pts[0].y);
           for (let j = 1; j < d.pts.length; j++) ctx.lineTo(d.pts[j].x, d.pts[j].y);
           ctx.closePath();
-          // subtle depth-based alpha but ordering is primary fix
           const depthAlpha = Math.max(0.25, Math.min(1, 1 - ((d.avgCamZ || d.dist || 0) * 0.002)));
           ctx.globalAlpha = depthAlpha;
           ctx.fillStyle = color;
@@ -1204,8 +1141,6 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
           ctx.fillStyle = color;
           ctx.fillRect(x - size / 2, y - size / 2, size, size);
           ctx.restore();
-        } else {
-          // nothing
         }
       }
     }
@@ -1213,6 +1148,7 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
 
   return api;
 }
+
 
 
 
@@ -3314,6 +3250,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
