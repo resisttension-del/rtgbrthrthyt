@@ -881,31 +881,21 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
         if (!obj.visible) return;
         if (obj.isCamera || obj.isLight) return;
 
-        // Use the bounding sphere for accurate culling
-        if (obj.geometry) {
-            if (!obj.geometry.boundingSphere) {
-                obj.geometry.computeBoundingSphere();
-            }
-            if (obj.geometry.boundingSphere) {
-                tmpSphere.copy(obj.geometry.boundingSphere).applyMatrix4(obj.matrixWorld);
-                if (camera.isPerspectiveCamera) {
-                    if (!camera.frustum.containsSphere(tmpSphere)) {
-                        return; // Frustum culling
-                    }
-                }
-            }
-        }
-        
         // World position (center)
         obj.getWorldPosition(tmpPos);
         const dist = camera.position.distanceTo(tmpPos);
+
+        // quick NDC cull (if center far off-screen, skip).
+        proj.copy(tmpPos).project(camera);
+        if (proj.z > 1 || proj.z < -1 || proj.x < -1.5 || proj.x > 1.5 || proj.y < -1.5 || proj.y > 1.5) {
+          if (!obj.userData?.alwaysRender) return;
+        }
 
         // check for texture
         const mapImage = obj.material && obj.material.map && obj.material.map.image ? obj.material.map.image : null;
 
         // categorize drawable
         if (mapImage) {
-          proj.copy(tmpPos).project(camera);
           const sx = (proj.x * 0.5 + 0.5) * canvas.width;
           const sy = (-proj.y * 0.5 + 0.5) * canvas.height;
           drawables.push({ type: 'image', obj, sx, sy, dist, projZ: proj.z, mapImage });
@@ -913,8 +903,8 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
           const geom = obj.geometry;
           if (!geom.boundingSphere) geom.computeBoundingSphere();
           
+          const worldPoints = [];
           if (geom.boundingSphere) {
-            const worldPoints = [];
             const bs = geom.boundingSphere;
             const center = bs.center.clone().applyMatrix4(obj.matrixWorld);
             const r = bs.radius * (obj.matrixWorld.getMaxScaleOnAxis ? obj.matrixWorld.getMaxScaleOnAxis() : 1);
@@ -927,33 +917,32 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
             worldPoints.push(center.clone().add(new THREE.Vector3(0, -r, 0)));
             worldPoints.push(center.clone().add(new THREE.Vector3(0, 0, r)));
             worldPoints.push(center.clone().add(new THREE.Vector3(0, 0, -r)));
+          } else {
+            // Fallback for meshes without a bounding sphere
+            obj.getWorldPosition(tmpVec);
+            worldPoints.push(tmpVec);
+          }
+          
+          const pts2d = [];
+          for (let wp of worldPoints) {
+            proj.copy(wp).project(camera);
+            // No need for strict Z-cull here, the initial check handles it
+            const px = (proj.x * 0.5 + 0.5) * canvas.width;
+            const py = (-proj.y * 0.5 + 0.5) * canvas.height;
+            pts2d.push({ x: px, y: py });
+          }
 
-            const pts2d = [];
-            for (let wp of worldPoints) {
-                proj.copy(wp).project(camera);
-                // No need for strict Z-cull here, frustum handles it
-                const px = (proj.x * 0.5 + 0.5) * canvas.width;
-                const py = (-proj.y * 0.5 + 0.5) * canvas.height;
-                pts2d.push({ x: px, y: py });
-            }
-
-            const hull = convexHull(pts2d);
-            if (hull.length >= 3) {
-              drawables.push({ type: 'poly', obj, pts: hull, dist, projZ: proj.z });
-            } else {
-              // Fallback to a single point marker if polygon can't be formed
+          const hull = convexHull(pts2d);
+          if (hull.length >= 3) {
+            drawables.push({ type: 'poly', obj, pts: hull, dist, projZ: proj.z });
+          } else {
+            // Fallback to a single point marker if polygon can't be formed
+            if (pts2d.length > 0) {
               drawables.push({ type: 'rect', obj, sx: pts2d[0].x, sy: pts2d[0].y, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
             }
-          } else {
-            // No bounding sphere, use marker
-            proj.copy(tmpPos).project(camera);
-            const sx = (proj.x * 0.5 + 0.5) * canvas.width;
-            const sy = (-proj.y * 0.5 + 0.5) * canvas.height;
-            drawables.push({ type: 'rect', obj, sx, sy, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
           }
         } else {
           // unknown / fallback: draw marker
-          proj.copy(tmpPos).project(camera);
           const sx = (proj.x * 0.5 + 0.5) * canvas.width;
           const sy = (-proj.y * 0.5 + 0.5) * canvas.height;
           drawables.push({ type: 'rect', obj, sx, sy, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
@@ -1038,7 +1027,6 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
 
   return api;
 }
-
 
 /* ---------- Updated scene initializers (CPU renderer) ---------- */
 
@@ -3158,6 +3146,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
