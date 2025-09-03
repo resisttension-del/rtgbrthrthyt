@@ -824,6 +824,7 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
   const tmpPos = new THREE.Vector3();
   const tmpVec = new THREE.Vector3();
   const tmpVec2 = new THREE.Vector3();
+  const tmpMat = new THREE.Matrix4();
 
   // helper: build convex hull (Andrew monotone chain) of 2D points
   function convexHull(points) {
@@ -848,6 +849,10 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
 
   const api = {
     domElement: canvas,
+    options: {
+      // if you ever want to toggle strict near-plane clipping:
+      strictNearClip: true
+    },
     setSize(w, h, updateStyle = true) {
       canvas.width = w;
       canvas.height = h;
@@ -875,6 +880,13 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
       ctx.fillRect(0, 0, canvas.width, canvas.height);
       ctx.restore();
 
+      // update camera matrices once
+      camera.updateMatrixWorld();
+      if (camera.updateProjectionMatrix) camera.updateProjectionMatrix();
+
+      // camera world->camera matrix (inverse of matrixWorld)
+      const camInv = tmpMat.copy(camera.matrixWorld).invert();
+
       // collect drawables (so we can sort by depth)
       const drawables = [];
       scene.traverse((obj) => {
@@ -883,11 +895,7 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
 
         // World position (center)
         obj.getWorldPosition(tmpPos);
-        proj.copy(tmpPos).project(camera); // NDC -1..1
-
-        // NOTE: removed the aggressive early center-based cull.
-        // We will instead try to project bbox/sample points and decide visibility from them.
-        // This avoids large objects disappearing simply because their center is offscreen.
+        proj.copy(tmpPos).project(camera); // NDC -1..1 (center)
 
         // screen coords of center (used as fallback)
         const sx = (proj.x * 0.5 + 0.5) * canvas.width;
@@ -896,12 +904,15 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
         // distance for depth sorting
         const dist = camera.position.distanceTo(tmpPos);
 
-        // check for texture
+        // check for texture (sprites)
         const mapImage = obj.material && obj.material.map && obj.material.map.image ? obj.material.map.image : null;
+
+        // If user explicitly wants to always render, skip strict culling checks later
+        const alwaysRender = !!obj.userData?.alwaysRender;
 
         // categorize drawable
         if (mapImage) {
-          // Sprites/images: keep rendering even if center offscreen (so long as user didn't explicitly want culling)
+          // Sprite-style: keep rendering (center used for placement)
           drawables.push({ type: 'image', obj, sx, sy, dist, projZ: proj.z, mapImage });
           return;
         } else if (obj.isMesh && obj.geometry) {
@@ -909,6 +920,7 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
           if (!geom.boundingBox) geom.computeBoundingBox && geom.computeBoundingBox();
           if (!geom.boundingSphere) geom.computeBoundingSphere && geom.computeBoundingSphere();
 
+          // Build sample points in world space (bbox corners, sphere points, or subset of positions)
           const worldPoints = [];
           if (geom.boundingBox) {
             const bb = geom.boundingBox;
@@ -955,90 +967,94 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
             }
           }
 
-          // project worldPoints to screen-space 2D points
-          const pts2d = [];
-          const pts2d_unclamped = []; // track unclamped to detect "all behind" situations
-          for (let wp of worldPoints) {
-            proj.copy(wp).project(camera); // proj.x/y/z in NDC
-
-            // Save unclamped for heuristic decisions
-            pts2d_unclamped.push({ ndcX: proj.x, ndcY: proj.y, ndcZ: proj.z });
-
-            // CLAMP NDC to [-1,1] so even points outside frustum map to screen edges (prevents disappearance)
-            // This produces an approximate silhouette on the edges for large/offscreen geometry.
-            let ndcX = proj.x;
-            let ndcY = proj.y;
-            let ndcZ = proj.z;
-
-            // If behind camera (z < -1), we still compute an edge projection by flipping/inverting
-            // projection to the nearest clipping plane. This is a practical approximation.
-            if (ndcX < -1) ndcX = -1;
-            if (ndcX > 1) ndcX = 1;
-            if (ndcY < -1) ndcY = -1;
-            if (ndcY > 1) ndcY = 1;
-            if (ndcZ < -1) ndcZ = -1;
-            if (ndcZ > 1) ndcZ = 1;
-
-            const px = (ndcX * 0.5 + 0.5) * canvas.width;
-            const py = (-ndcY * 0.5 + 0.5) * canvas.height;
-            pts2d.push({ x: px, y: py, ndcZ: proj.z });
-          }
-
-          // If no pts2d (shouldn't happen), skip or fallback
-          if (pts2d.length === 0) {
+          // If no world points, fallback to center marker (rare)
+          if (worldPoints.length === 0) {
             if (obj.userData?.forceMarker) {
               drawables.push({ type: 'rect', obj, sx, sy, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
             }
             return;
           }
 
-          // Heuristic: if *all* unclamped points are behind the camera's near plane (ndcZ < -1),
-          // create an approximate silhouette by projecting bbox corners but clamped to screen edges (we already clamp).
-          const allBehind = pts2d_unclamped.every(p => p.ndcZ < -1);
-          // Heuristic: if all points are very far off-screen in NDC plane (abs(ndcX) > 1.5 etc), still render clamped silhouette
-          const allFarOffPlane = pts2d_unclamped.every(p => Math.abs(p.ndcX) > 1.5 || Math.abs(p.ndcY) > 1.5);
+          // === CLIPPING AGAINST NEAR PLANE (camera space) ===
+          // Convert points to camera space (z is negative in front of camera for THREE cameras)
+          const camSpacePts = worldPoints.map(wp => wp.clone().applyMatrix4(camInv));
 
-          // If we have reasonable projected points, compute hull and draw polygon silhouette.
-          const hull = convexHull(pts2d);
+          // near plane in camera space (z <= -near is in front)
+          const nearZ = - (camera.near !== undefined ? camera.near : 0.1);
+          const farZ = - (camera.far !== undefined ? camera.far : 1e12);
 
-          // If hull collapsed to trivial (<=2) but we still want to render, attempt fallback:
-          if ((hull.length < 3) && (obj.userData?.forceMarker || allBehind || allFarOffPlane)) {
-            // Use center clamped at screen edge as a 1-2 point fallback
-            const fallbackPts = [];
+          // Collect projected screen points for those in front of near and within far
+          const pts2d = [];
 
-            // center clamped:
-            const cx = Math.max(0, Math.min(canvas.width, sx));
-            const cy = Math.max(0, Math.min(canvas.height, sy));
-            fallbackPts.push({ x: cx, y: cy });
+          for (let i = 0; i < worldPoints.length; i++) {
+            const camPt = camSpacePts[i];
+            const wp = worldPoints[i];
 
-            // Add bbox-clamped corners (pts2d) to give it some area even if collapsed
-            for (let p of pts2d) {
-              // don't duplicate center
-              if (Math.hypot(p.x - cx, p.y - cy) > 1) fallbackPts.push({ x: p.x, y: p.y });
-              if (fallbackPts.length >= 6) break;
+            if (camPt.z <= nearZ && camPt.z >= farZ) {
+              // point is in front of near and not beyond far -> project normally
+              proj.copy(wp).project(camera);
+              const px = (proj.x * 0.5 + 0.5) * canvas.width;
+              const py = (-proj.y * 0.5 + 0.5) * canvas.height;
+              pts2d.push({ x: px, y: py, ndcZ: proj.z });
             }
+          }
 
-            if (fallbackPts.length === 1) {
-              // single point fallback: marker
-              drawables.push({ type: 'rect', obj, sx: fallbackPts[0].x, sy: fallbackPts[0].y, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
-            } else if (fallbackPts.length === 2) {
-              drawables.push({ type: 'line', obj, pts: fallbackPts, dist });
-            } else {
-              const fallbackHull = convexHull(fallbackPts);
-              drawables.push({ type: 'poly', obj, pts: fallbackHull, dist, projZ: proj.z });
+          // For edges that cross the near plane, compute intersection point and include it
+          for (let i = 0; i < worldPoints.length; i++) {
+            for (let j = i + 1; j < worldPoints.length; j++) {
+              const z1 = camSpacePts[i].z;
+              const z2 = camSpacePts[j].z;
+
+              // If one side is in front (<= nearZ) and the other is behind (> nearZ), there's a crossing
+              if ((z1 <= nearZ && z2 > nearZ) || (z2 <= nearZ && z1 > nearZ)) {
+                // Avoid numerical division by zero
+                const denom = (z2 - z1);
+                if (Math.abs(denom) < 1e-9) continue;
+                const t = (nearZ - z1) / denom; // 0..1 along segment i->j where z == nearZ
+                if (t < 0 || t > 1) continue;
+                // Interpolate in world space to get accurate intersection position
+                const ip = worldPoints[i].clone().lerp(worldPoints[j], t);
+                proj.copy(ip).project(camera);
+                const px = (proj.x * 0.5 + 0.5) * canvas.width;
+                const py = (-proj.y * 0.5 + 0.5) * canvas.height;
+                pts2d.push({ x: px, y: py, ndcZ: proj.z });
+              }
+            }
+          }
+
+          // If strict near clipping is disabled, include center projection as a loose fallback
+          if (!api.options.strictNearClip && pts2d.length === 0) {
+            proj.copy(tmpPos).project(camera);
+            const px = (proj.x * 0.5 + 0.5) * canvas.width;
+            const py = (-proj.y * 0.5 + 0.5) * canvas.height;
+            pts2d.push({ x: px, y: py, ndcZ: proj.z });
+          }
+
+          // If after near-plane clipping we have zero pts, we may still want a fallback marker,
+          // but only if user asked or object is forced to render.
+          if (pts2d.length === 0) {
+            if (alwaysRender || obj.userData?.forceMarker) {
+              // clamp center to screen bounds so we get a marker on-screen
+              const cx = Math.max(0, Math.min(canvas.width, sx));
+              const cy = Math.max(0, Math.min(canvas.height, sy));
+              drawables.push({ type: 'rect', obj, sx: cx, sy: cy, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
             }
             return;
           }
 
-          // Normal case: have hull with >= 3 points
+          // Build convex hull from the collected projected points
+          const hull = convexHull(pts2d);
+
+          // If hull is trivial (1 or 2 points), but user forced rendering, make fallback shapes
           if (hull.length >= 3) {
             drawables.push({ type: 'poly', obj, pts: hull, dist, projZ: proj.z });
           } else if (hull.length === 2) {
             drawables.push({ type: 'line', obj, pts: hull, dist });
           } else {
             // single point fallback
-            if (obj.userData?.forceMarker) {
-              drawables.push({ type: 'rect', obj, sx: pts2d[0].x, sy: pts2d[0].y, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
+            const p = hull[0] || pts2d[0];
+            if (alwaysRender || obj.userData?.forceMarker) {
+              drawables.push({ type: 'rect', obj, sx: p.x, sy: p.y, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
             }
           }
 
@@ -1131,7 +1147,7 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
           ctx.fillRect(x - size / 2, y - size / 2, size, size);
           ctx.restore();
         } else {
-          // nothing - we've removed automatic sphere/arc drawing
+          // nothing
         }
       }
     }
@@ -3238,6 +3254,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
