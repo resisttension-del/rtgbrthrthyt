@@ -912,7 +912,7 @@ function setupDetailToggle() {
 
                             if (posAttr && posAttr.count > 0) {
                                 // Sample up to 100 vertices to create a more detailed polygon
-                                const stride = Math.max(1, Math.floor(posAttr.count / 100));
+                                const stride = Math.max(1, Math.floor(posAttr.count / 200));
                                 for (let i = 0; i < posAttr.count; i += stride) {
                                     tmpVec.set(
                                         posAttr.getX(i),
@@ -3149,6 +3149,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
