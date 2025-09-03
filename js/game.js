@@ -824,11 +824,6 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
   const tmpPos = new THREE.Vector3();
   const tmpVec = new THREE.Vector3();
   const tmpVec2 = new THREE.Vector3();
-  const tmpQuat = new THREE.Quaternion();
-
-  // Frustum helpers (re-used each frame)
-  const projScreenMatrix = new THREE.Matrix4();
-  const frustum = new THREE.Frustum();
 
   // helper: build convex hull (Andrew monotone chain) of 2D points
   function convexHull(points) {
@@ -851,50 +846,8 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
     return lower.concat(upper);
   }
 
-  // Segment-plane intersection: returns point or null
-  function intersectSegmentPlane(p0, p1, planePoint, planeNormal) {
-    const dir = new THREE.Vector3().subVectors(p1, p0);
-    const denom = planeNormal.dot(dir);
-    if (Math.abs(denom) < 1e-9) return null;
-    const t = planeNormal.dot(new THREE.Vector3().subVectors(planePoint, p0)) / denom;
-    if (t < 0 || t > 1) return null;
-    return p0.clone().add(dir.multiplyScalar(t));
-  }
-
-  // Ray (origin->target) -> plane intersection (0..1 relative t)
-  function intersectRayPlane(origin, target, planePoint, planeNormal) {
-    return intersectSegmentPlane(origin, target, planePoint, planeNormal);
-  }
-
-  // Sutherland-Hodgman clip polygon against plane (3D polygon)
-  function clipPolyAgainstPlane(polyPts, plane) {
-    if (!polyPts || polyPts.length === 0) return [];
-    const out = [];
-    const eps = 1e-9;
-    for (let i = 0, L = polyPts.length; i < L; i++) {
-      const a = polyPts[i];
-      const b = polyPts[(i + 1) % L];
-      const da = plane.distanceToPoint(a);
-      const db = plane.distanceToPoint(b);
-      const aIn = da >= -eps;
-      const bIn = db >= -eps;
-      if (aIn) out.push(a.clone());
-      if (aIn ^ bIn) {
-        const denom = (da - db);
-        if (Math.abs(denom) > 1e-12) {
-          const t = da / denom;
-          if (Number.isFinite(t)) {
-            out.push(a.clone().lerp(b, t));
-          }
-        }
-      }
-    }
-    return out;
-  }
-
   const api = {
     domElement: canvas,
-
     setSize(w, h, updateStyle = true) {
       canvas.width = w;
       canvas.height = h;
@@ -903,7 +856,6 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
         canvas.style.height = `${h}px`;
       }
     },
-
     // Minimal clear color support
     setClearColor(hex, alpha = 1) {
       api._clearColor = { hex, alpha };
@@ -923,15 +875,6 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
       ctx.fillRect(0, 0, canvas.width, canvas.height);
       ctx.restore();
 
-      // Prepare frustum once per frame
-      projScreenMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
-      frustum.setFromProjectionMatrix(projScreenMatrix);
-
-      // compute camera near-plane in world space for intersections
-      const camForward = camera.getWorldDirection(tmpVec).clone();
-      const nearPlanePoint = camera.position.clone().add(camForward.clone().multiplyScalar(camera.near));
-      const nearPlaneNormal = camForward.clone();
-
       // collect drawables (so we can sort by depth)
       const drawables = [];
       scene.traverse((obj) => {
@@ -940,39 +883,19 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
 
         // World position (center)
         obj.getWorldPosition(tmpPos);
+        proj.copy(tmpPos).project(camera); // NDC -1..1
 
-        // === FRUSTUM / VISIBILITY TEST ===
-        let inFrustum = true;
-        let cameraInside = false;
-        if (obj.geometry) {
-          const geom = obj.geometry;
-          // ensure boundingSphere exists
-          if (!geom.boundingSphere) geom.computeBoundingSphere();
-          // boundingSphere is in local space; transform to world
-          const bsCenterWorld = geom.boundingSphere.center.clone().applyMatrix4(obj.matrixWorld);
-          // extract scale from matrixWorld by decomposing
-          obj.matrixWorld.decompose(tmpVec2 /*pos*/, tmpQuat /*quat*/, tmpVec /*scale*/);
-          const maxScale = Math.max(Math.abs(tmpVec.x), Math.abs(tmpVec.y), Math.abs(tmpVec.z), 1e-6);
-          const radiusScaled = geom.boundingSphere.radius * maxScale;
-          const sphere = new THREE.Sphere(bsCenterWorld, radiusScaled);
-          const camDistToSphereCenter = camera.position.distanceTo(bsCenterWorld);
-          cameraInside = camDistToSphereCenter < radiusScaled;
-          inFrustum = frustum.intersectsSphere(sphere);
-        } else {
-          // fallback: test the center point in NDC with a little slack
-          proj.copy(tmpPos).project(camera);
-          inFrustum = !(proj.z > 1 || proj.z < -1 || proj.x < -1.3 || proj.x > 1.3 || proj.y < -1.3 || proj.y > 1.3);
+        // quick NDC cull (if center far off-screen, skip). We allow some slack for large objects.
+        if (proj.z > 1 || proj.z < -1 || proj.x < -2 || proj.x > 2 || proj.y < -2 || proj.y > 2) {
+          // still allow meshes that have explicit userData.alwaysRender = true
+          if (!obj.userData?.alwaysRender) return;
         }
 
-        // allow explicit override
-        if (!inFrustum && !obj.userData?.alwaysRender) return;
-
-        // screen coords (we still compute for ordering / fallback markers)
-        proj.copy(tmpPos).project(camera);
+        // screen coords
         const sx = (proj.x * 0.5 + 0.5) * canvas.width;
         const sy = (-proj.y * 0.5 + 0.5) * canvas.height;
 
-        // distance for depth sorting (use center distance)
+        // distance for depth sorting
         const dist = camera.position.distanceTo(tmpPos);
 
         // check for texture
@@ -982,25 +905,54 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
         if (mapImage) {
           drawables.push({ type: 'image', obj, sx, sy, dist, projZ: proj.z, mapImage });
         } else if (obj.isMesh && obj.geometry) {
-          // Project a larger sample of vertices to create a better silhouette.
-          const worldPoints = [];
           const geom = obj.geometry;
-          const posAttr = geom.attributes?.position;
+          if (!geom.boundingBox) geom.computeBoundingBox && geom.computeBoundingBox();
+          if (!geom.boundingSphere) geom.computeBoundingSphere && geom.computeBoundingSphere();
 
-          if (posAttr && posAttr.count > 0) {
-            // Sample up to 100 vertices to create a more detailed polygon
-            const stride = Math.max(1, Math.floor(posAttr.count / 100));
-            for (let i = 0; i < posAttr.count; i += stride) {
-              tmpVec.set(
-                posAttr.getX(i),
-                posAttr.getY(i),
-                posAttr.getZ(i)
-              ).applyMatrix4(obj.matrixWorld);
+          const worldPoints = [];
+          if (geom.boundingBox) {
+            const bb = geom.boundingBox;
+            const min = bb.min;
+            const max = bb.max;
+            const corners = [
+              [min.x, min.y, min.z],
+              [min.x, min.y, max.z],
+              [min.x, max.y, min.z],
+              [min.x, max.y, max.z],
+              [max.x, min.y, min.z],
+              [max.x, min.y, max.z],
+              [max.x, max.y, min.z],
+              [max.x, max.y, max.z],
+            ];
+            for (let c of corners) {
+              tmpVec.set(c[0], c[1], c[2]).applyMatrix4(obj.matrixWorld);
               worldPoints.push(tmpVec.clone());
             }
+          } else if (geom.boundingSphere) {
+            const bs = geom.boundingSphere;
+            const center = bs.center.clone().applyMatrix4(obj.matrixWorld);
+            const r = bs.radius * (obj.matrixWorld.getMaxScaleOnAxis ? obj.matrixWorld.getMaxScaleOnAxis() : 1);
+            worldPoints.push(center.clone());
+            worldPoints.push(center.clone().add(new THREE.Vector3(r, 0, 0)));
+            worldPoints.push(center.clone().add(new THREE.Vector3(-r, 0, 0)));
+            worldPoints.push(center.clone().add(new THREE.Vector3(0, r, 0)));
+            worldPoints.push(center.clone().add(new THREE.Vector3(0, -r, 0)));
+            worldPoints.push(center.clone().add(new THREE.Vector3(0, 0, r)));
+            worldPoints.push(center.clone().add(new THREE.Vector3(0, 0, -r)));
           } else {
-            // Fallback to the object's world position if no geometry points
-            worldPoints.push(tmpPos.clone());
+            const posAttr = geom.attributes && geom.attributes.position;
+            if (posAttr && posAttr.count > 0) {
+              for (let i = 0; i < Math.min(12, posAttr.count); i += Math.max(1, Math.floor(posAttr.count / 12))) {
+                tmpVec.set(
+                  posAttr.getX(i),
+                  posAttr.getY(i),
+                  posAttr.getZ(i)
+                ).applyMatrix4(obj.matrixWorld);
+                worldPoints.push(tmpVec.clone());
+              }
+            } else {
+              worldPoints.push(tmpPos.clone());
+            }
           }
 
           // project worldPoints to screen-space 2D points
@@ -1013,71 +965,9 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
             pts2d.push({ x: px, y: py });
           }
 
-          // If no projected vertices but camera is inside the object's bounding sphere,
-          // attempt robust clipping: Sutherland–Hodgman face clipping against frustum planes
-          if (pts2d.length === 0 && cameraInside) {
-            // ensure boundingBox exists
-            if (!geom.boundingBox) geom.computeBoundingBox();
-            const bb = geom.boundingBox;
-            if (bb) {
-              // 8 box corners (local -> world)
-              const cornersLocal = [
-                [bb.min.x, bb.min.y, bb.min.z],
-                [bb.min.x, bb.min.y, bb.max.z],
-                [bb.min.x, bb.max.y, bb.min.z],
-                [bb.min.x, bb.max.y, bb.max.z],
-                [bb.max.x, bb.min.y, bb.min.z],
-                [bb.max.x, bb.min.y, bb.max.z],
-                [bb.max.x, bb.max.y, bb.min.z],
-                [bb.max.x, bb.max.y, bb.max.z],
-              ];
-              const cornersWorld = cornersLocal.map(c => new THREE.Vector3(c[0], c[1], c[2]).applyMatrix4(obj.matrixWorld));
-
-              // faces are quads of indices into cornersWorld
-              const faces = [
-                [0,1,3,2], // -X face
-                [4,5,7,6], // +X face
-                [0,4,6,2], // -Y face
-                [1,5,7,3], // +Y face
-                [0,1,5,4], // -Z face
-                [2,3,7,6], // +Z face
-              ];
-
-              // clip each face polygon against all frustum planes
-              for (let f of faces) {
-                let poly = f.map(idx => cornersWorld[idx].clone());
-                for (let p = 0; p < frustum.planes.length; p++) {
-                  poly = clipPolyAgainstPlane(poly, frustum.planes[p]);
-                  if (poly.length === 0) break;
-                }
-                // project clipped polygon verts to screen, add to pts2d
-                if (poly.length > 0) {
-                  for (let v of poly) {
-                    proj.copy(v).project(camera);
-                    // only keep points that project in front of near/far planes (allow small slack)
-                    if (!(proj.z > 1 || proj.z < -1)) {
-                      const px = (proj.x * 0.5 + 0.5) * canvas.width;
-                      const py = (-proj.y * 0.5 + 0.5) * canvas.height;
-                      pts2d.push({ x: px, y: py });
-                    }
-                  }
-                }
-              }
-            } else {
-              // fallback: try ray->near-plane intersections with sampled worldPoints
-              for (let wp of worldPoints) {
-                const inter = intersectRayPlane(camera.position, wp, nearPlanePoint, nearPlaneNormal);
-                if (inter) {
-                  proj.copy(inter).project(camera);
-                  if (!(proj.z > 1 || proj.z < -1)) {
-                    pts2d.push({ x: (proj.x * 0.5 + 0.5) * canvas.width, y: (-proj.y * 0.5 + 0.5) * canvas.height });
-                  }
-                }
-              }
-            }
-          }
-
+          // if no good projected points, skip drawing (no more spheres)
           if (pts2d.length === 0) {
+            // If you want a fallback marker instead of skipping, set userData.forceMarker = true
             if (obj.userData?.forceMarker) {
               drawables.push({ type: 'rect', obj, sx, sy, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
             }
@@ -1089,6 +979,7 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
             } else if (hull.length === 2) {
               drawables.push({ type: 'line', obj, pts: hull, dist });
             } else {
+              // single point fallback: only draw if explicitly requested
               if (obj.userData?.forceMarker) {
                 drawables.push({ type: 'rect', obj, sx: pts2d[0].x, sy: pts2d[0].y, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
               }
@@ -1096,6 +987,7 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
             return;
           }
         } else {
+          // unknown / fallback: only draw marker if explicitly requested
           if (obj.userData?.forceMarker) {
             drawables.push({ type: 'rect', obj, sx, sy, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
           }
@@ -1172,6 +1064,7 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
           ctx.globalAlpha = 1 - Math.min(0.9, dist * 0.002);
           ctx.stroke();
         } else if (d.type === 'rect') {
+          // small centered rectangle marker (replaces prior circle/sphere)
           const size = d.sizePx ?? Math.max(2, Math.round(12 * (1 / Math.max(0.1, dist * 0.05))));
           const x = (d.sx || d.sx === 0) ? d.sx : 0;
           const y = (d.sy || d.sy === 0) ? d.sy : 0;
@@ -1181,10 +1074,10 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
           ctx.fillRect(x - size / 2, y - size / 2, size, size);
           ctx.restore();
         } else {
-          // nothing
+          // nothing - we've removed automatic sphere/arc drawing
         }
       }
-    } // end render
+    }
   };
 
   return api;
@@ -3292,6 +3185,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
