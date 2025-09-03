@@ -813,36 +813,17 @@ function setupDetailToggle() {
 
 function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
     const canvas = document.createElement('canvas');
-    canvas.style.position = 'relative';
-    canvas.style.zIndex = '0';
     canvas.width = width;
     canvas.height = height;
+    canvas.style.position = 'relative';
+    canvas.style.zIndex = '0';
     const ctx = canvas.getContext('2d');
 
-    // Scratch vars
+    // Scratch vectors
     const proj = new THREE.Vector3();
-    const tmpPos = new THREE.Vector3();
     const tmpVec = new THREE.Vector3();
-
-    // Convex hull helper (monotone chain)
-    function convexHull(points) {
-        if (points.length <= 1) return points.slice();
-        const pts = points.slice().sort((a, b) => a.x === b.x ? a.y - b.y : a.x - b.x);
-        const cross = (o, a, b) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
-        const lower = [];
-        for (let p of pts) {
-            while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop();
-            lower.push(p);
-        }
-        const upper = [];
-        for (let i = pts.length - 1; i >= 0; i--) {
-            const p = pts[i];
-            while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop();
-            upper.push(p);
-        }
-        lower.pop(); upper.pop();
-        return lower.concat(upper);
-    }
+    const tmpVec2 = new THREE.Vector3();
+    const tmpVec3 = new THREE.Vector3();
 
     const api = {
         domElement: canvas,
@@ -860,156 +841,107 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
         _clearColor: { hex: 0x000000, alpha: 1 },
 
         render(scene, camera) {
-            // Clear
+            // Clear canvas
             const c = api._clearColor;
-            const r = (c.hex >> 16) & 0xff;
-            const g = (c.hex >> 8) & 0xff;
-            const b = c.hex & 0xff;
-            ctx.save();
             ctx.setTransform(1, 0, 0, 1, 0, 0);
-            ctx.fillStyle = `rgba(${r},${g},${b},${c.alpha})`;
+            ctx.globalAlpha = 1;
+            ctx.fillStyle = `rgba(${(c.hex>>16)&255},${(c.hex>>8)&255},${c.hex&255},${c.alpha})`;
             ctx.fillRect(0, 0, canvas.width, canvas.height);
-            ctx.restore();
 
-            const drawables = [];
+            // Collect drawables (faces), painter's sort by average Z
+            const drawFaces = [];
+
             scene.traverse((obj) => {
                 if (!obj.visible || obj.isCamera || obj.isLight) return;
+                if (!(obj.isMesh && obj.geometry && obj.geometry.isBufferGeometry)) return;
 
-                // Get world position (center)
-                obj.getWorldPosition(tmpPos);
-                proj.copy(tmpPos).project(camera);
+                const geom = obj.geometry;
+                const posAttr = geom.attributes.position;
+                const idxAttr = geom.index;
 
-                // Cull objects far offscreen
-                if (proj.z > 1 || proj.z < -1 || proj.x < -2 || proj.x > 2 || proj.y < -2 || proj.y > 2) {
-                    if (!obj.userData?.alwaysRender) return;
+                // Get color
+                let color = obj.userData?.color;
+                if (!color && obj.material?.color) {
+                    color = obj.material.color.getStyle ? obj.material.color.getStyle() : `#${obj.material.color.getHexString()}`;
                 }
+                color = color || 'white';
 
-                // Screen coords
-                const sx = (proj.x * 0.5 + 0.5) * canvas.width;
-                const sy = (-proj.y * 0.5 + 0.5) * canvas.height;
-                const dist = camera.position.distanceTo(tmpPos);
-
-                const mapImage = obj.material?.map?.image || null;
-
-                if (mapImage) {
-                    drawables.push({ type: 'image', obj, sx, sy, dist, mapImage });
-                } else if (obj.isMesh && obj.geometry) {
-                    // Sample vertices for silhouette
-                    const worldPoints = [];
-                    const geom = obj.geometry;
-                    const posAttr = geom.attributes?.position;
-                    if (posAttr && posAttr.count > 0) {
-                        // Only sample up to 32 vertices (for speed & enough detail)
-                        const stride = Math.max(1, Math.floor(posAttr.count / 32));
-                        for (let i = 0; i < posAttr.count; i += stride) {
-                            tmpVec.set(
-                                posAttr.getX(i),
-                                posAttr.getY(i),
-                                posAttr.getZ(i)
-                            ).applyMatrix4(obj.matrixWorld);
-                            worldPoints.push(tmpVec.clone());
-                        }
+                // For each triangle
+                const triCount = idxAttr ? idxAttr.count / 3 : posAttr.count / 3;
+                for (let i = 0; i < triCount; i++) {
+                    let ai, bi, ci;
+                    if (idxAttr) {
+                        ai = idxAttr.getX(i * 3 + 0);
+                        bi = idxAttr.getX(i * 3 + 1);
+                        ci = idxAttr.getX(i * 3 + 2);
                     } else {
-                        worldPoints.push(tmpPos.clone());
+                        ai = i * 3 + 0;
+                        bi = i * 3 + 1;
+                        ci = i * 3 + 2;
                     }
 
-                    // Project to 2D
-                    const pts2d = [];
-                    for (let wp of worldPoints) {
-                        proj.copy(wp).project(camera);
-                        if (proj.z > 1 || proj.z < -1) continue;
-                        const px = (proj.x * 0.5 + 0.5) * canvas.width;
-                        const py = (-proj.y * 0.5 + 0.5) * canvas.height;
-                        pts2d.push({ x: px, y: py });
-                    }
+                    tmpVec.set(posAttr.getX(ai), posAttr.getY(ai), posAttr.getZ(ai)).applyMatrix4(obj.matrixWorld);
+                    tmpVec2.set(posAttr.getX(bi), posAttr.getY(bi), posAttr.getZ(bi)).applyMatrix4(obj.matrixWorld);
+                    tmpVec3.set(posAttr.getX(ci), posAttr.getY(ci), posAttr.getZ(ci)).applyMatrix4(obj.matrixWorld);
 
-                    if (pts2d.length === 0) {
-                        if (obj.userData?.forceMarker) {
-                            drawables.push({ type: 'rect', obj, sx, sy, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
-                        }
-                        return;
-                    } else {
-                        // Use convex hull for fast silhouette
-                        const hull = convexHull(pts2d);
-                        if (hull.length >= 3) {
-                            drawables.push({ type: 'poly', obj, pts: hull, dist });
-                        } else if (hull.length === 2) {
-                            drawables.push({ type: 'line', obj, pts: hull, dist });
-                        } else {
-                            if (obj.userData?.forceMarker) {
-                                drawables.push({ type: 'rect', obj, sx: pts2d[0].x, sy: pts2d[0].y, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
-                            }
-                        }
-                        return;
-                    }
-                } else {
-                    if (obj.userData?.forceMarker) {
-                        drawables.push({ type: 'rect', obj, sx, sy, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
-                    }
+                    // Project to NDC
+                    proj.copy(tmpVec).project(camera);
+                    const ax = (proj.x * 0.5 + 0.5) * canvas.width;
+                    const ay = (-proj.y * 0.5 + 0.5) * canvas.height;
+                    const az = proj.z;
+                    proj.copy(tmpVec2).project(camera);
+                    const bx = (proj.x * 0.5 + 0.5) * canvas.width;
+                    const by = (-proj.y * 0.5 + 0.5) * canvas.height;
+                    const bz = proj.z;
+                    proj.copy(tmpVec3).project(camera);
+                    const cx = (proj.x * 0.5 + 0.5) * canvas.width;
+                    const cy = (-proj.y * 0.5 + 0.5) * canvas.height;
+                    const cz = proj.z;
+
+                    // Quick cull: if all points are behind camera, skip
+                    if (az > 1 && bz > 1 && cz > 1) continue;
+
+                    // Optional: backface culling for non-transparent objects
+                    const cross = (bx-ax)*(cy-ay) - (by-ay)*(cx-ax);
+                    if (cross < 0) continue;
+
+                    // Average depth for painter's order
+                    const avgZ = (az + bz + cz) / 3;
+
+                    drawFaces.push({
+                        pts: [
+                            {x: ax, y: ay},
+                            {x: bx, y: by},
+                            {x: cx, y: cy}
+                        ],
+                        color,
+                        opacity: obj.material?.opacity ?? 1,
+                        avgZ
+                    });
                 }
             });
 
-            // Sort painter's order (furthest first)
-            drawables.sort((a, b) => b.dist - a.dist);
+            // Painter's order from farthest to nearest
+            drawFaces.sort((a, b) => b.avgZ - a.avgZ);
 
-            // Draw
-            for (let i = 0; i < drawables.length; i++) {
-                const d = drawables[i];
-                const obj = d.obj;
-                let color = obj.userData?.color;
-                if (!color && obj.material?.color) {
-                    try {
-                        color = obj.material.color.getStyle ? obj.material.color.getStyle() : (`#${obj.material.color.getHexString()}`);
-                    } catch (e) {
-                        color = obj.userData?.color || 'white';
-                    }
-                }
-                color = color || obj.userData?.color || 'white';
-
-                if (d.type === 'image' && d.mapImage && d.mapImage.width) {
-                    let size = obj.userData?.sizePx ?? 64;
-                    ctx.save();
-                    ctx.translate(d.sx, d.sy);
-                    const rot = obj.userData?.rotation ?? (obj.rotation?.z ?? 0);
-                    if (rot) ctx.rotate(rot);
-                    ctx.globalAlpha = obj.userData?.opacity ?? (obj.material?.opacity ?? 1);
-                    ctx.drawImage(d.mapImage, -size / 2, -size / 2, size, size);
-                    ctx.restore();
-                } else if (d.type === 'poly' && d.pts) {
-                    ctx.save();
-                    ctx.beginPath();
-                    ctx.moveTo(d.pts[0].x, d.pts[0].y);
-                    for (let j = 1; j < d.pts.length; j++) ctx.lineTo(d.pts[j].x, d.pts[j].y);
-                    ctx.closePath();
-                    ctx.globalAlpha = obj.material?.opacity ?? 1;
-                    ctx.fillStyle = color;
-                    ctx.fill();
-                    ctx.lineWidth = 1;
-                    ctx.strokeStyle = 'rgba(0,0,0,0.5)';
-                    ctx.stroke();
-                    ctx.restore();
-                } else if (d.type === 'line' && d.pts && d.pts.length === 2) {
-                    ctx.beginPath();
-                    ctx.moveTo(d.pts[0].x, d.pts[0].y);
-                    ctx.lineTo(d.pts[1].x, d.pts[1].y);
-                    ctx.strokeStyle = color;
-                    ctx.lineWidth = 2;
-                    ctx.globalAlpha = 1;
-                    ctx.stroke();
-                } else if (d.type === 'rect') {
-                    const size = d.sizePx ?? 8;
-                    ctx.save();
-                    ctx.globalAlpha = obj.material?.opacity ?? 1;
-                    ctx.fillStyle = color;
-                    ctx.fillRect(d.sx - size / 2, d.sy - size / 2, size, size);
-                    ctx.restore();
-                }
+            // Draw all triangle faces as filled polygons
+            for (let i = 0; i < drawFaces.length; i++) {
+                const { pts, color, opacity } = drawFaces[i];
+                ctx.save();
+                ctx.globalAlpha = opacity;
+                ctx.beginPath();
+                ctx.moveTo(pts[0].x, pts[0].y);
+                ctx.lineTo(pts[1].x, pts[1].y);
+                ctx.lineTo(pts[2].x, pts[2].y);
+                ctx.closePath();
+                ctx.fillStyle = color;
+                ctx.fill();
+                ctx.restore();
             }
         }
     };
     return api;
 }
-
 
 /* ---------- Updated scene initializers (CPU renderer) ---------- */
 
@@ -3111,6 +3043,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
