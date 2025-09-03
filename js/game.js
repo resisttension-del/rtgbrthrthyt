@@ -811,416 +811,144 @@ function setupDetailToggle() {
 }
 
 
-// createCanvasRendererUpdated.js
-// Replace your previous createCanvasRenderer with this file.
-// Features:
-//  - hybrid hull + precise-triangle rendering (only for meshes that need holes / correctness)
-//  - robust vertex projection with behind-camera handling (prevents vanish/vertex-loss near camera)
-//  - caching by matrixWorld + position buffer identity
-//  - adjustable render distance and preciseDownscale for Chromebooks
-//  - small API compatible with your prior usage
+// createCanvasRenderer_safe.js
+// Drop-in replacement: conservative triangle raster CPU renderer
+// - No workers, no string blobs
+// - Triangle raster + z-buffer (correct holes)
+// - Downscale for performance (default 0.6)
+// - Caches arrays to avoid per-frame allocations
+// - Robust handling of vertices behind camera to avoid vanish
 
-export function createCanvasRendererUpdated({
-  width = 1280,
-  height = 720,
-  downscale = 1.0,            // internal resolution scale for entire scene (0.5 saves CPU)
-  preciseDownscale = 1.0,     // when precise triangle path used, draw into this scale (0.5 recommended on Chromebooks)
-  preciseTriangleLimit = 800, // if tri count <= this, auto-choose precise path
-  renderDistance = 2000       // global render distance in world units (can be changed)
-} = {}) {
-
-  // clamp sensible ranges
+export function createCanvasRenderer({ width = 1280, height = 720, downscale = 0.6 } = {}) {
+  // clamp downscale
   downscale = Math.max(0.25, Math.min(1.0, downscale));
-  preciseDownscale = Math.max(0.25, Math.min(1.0, preciseDownscale));
 
-  // DOM: a wrapper and visible canvas scaled by CSS (we use internal canvas size for drawing)
+  // DOM
   const wrapper = document.createElement('div');
   wrapper.id = 'gameCanvas';
   Object.assign(wrapper.style, {
     position: 'absolute',
-    top: '0px',
-    left: '0px',
-    width: `${width}px`,
-    height: `${height}px`,
-    zIndex: '999',
-    overflow: 'hidden',
-    pointerEvents: 'auto'
+    top: '0px', left: '0px',
+    width: `${width}px`, height: `${height}px`,
+    zIndex: '999', overflow: 'hidden', pointerEvents: 'auto'
   });
 
-  const visibleCanvas = document.createElement('canvas');
-  visibleCanvas.setAttribute('aria-hidden', 'true');
-  visibleCanvas.style.position = 'absolute';
-  visibleCanvas.style.top = '0px';
-  visibleCanvas.style.left = '0px';
-  visibleCanvas.style.width = `${width}px`;
-  visibleCanvas.style.height = `${height}px`;
-  visibleCanvas.style.backgroundColor = 'black';
-  visibleCanvas.style.border = '1px solid rgba(255,255,255,0.04)';
-  wrapper.appendChild(visibleCanvas);
+  const visible = document.createElement('canvas');
+  visible.setAttribute('aria-hidden', 'true');
+  visible.style.position = 'absolute';
+  visible.style.top = '0px';
+  visible.style.left = '0px';
+  visible.style.width = `${width}px`;
+  visible.style.height = `${height}px`;
+  visible.style.backgroundColor = 'black';
+  visible.style.border = '1px solid rgba(255,255,255,0.04)';
+  // visible backing store is set to internal size; visible CSS size is scaled by drawImage
+  wrapper.appendChild(visible);
 
-  // internal offscreen buffer where we render at (width*downscale)x(height*downscale)
-  let intW = Math.max(1, Math.floor(width * downscale));
-  let intH = Math.max(1, Math.floor(height * downscale));
+  // internal buffer size (smaller than visible for perf)
+  let bufW = Math.max(1, Math.floor(width * downscale));
+  let bufH = Math.max(1, Math.floor(height * downscale));
   const bufferCanvas = document.createElement('canvas');
-  bufferCanvas.width = intW;
-  bufferCanvas.height = intH;
+  bufferCanvas.width = bufW;
+  bufferCanvas.height = bufH;
   const bufCtx = bufferCanvas.getContext('2d', { alpha: false });
 
-  // imageData reuse
-  let imageData = bufCtx.createImageData(intW, intH);
-  let pixelBuf = imageData.data; // Uint8ClampedArray
-  let zBuffer = new Float32Array(intW * intH);
-
+  // imageData + zBuffer reused
+  let imageData = null;
+  let pixelBuf = null; // Uint8ClampedArray
+  let zBuffer = null;
   function initBuffers(w, h) {
-    intW = Math.max(1, Math.floor(w));
-    intH = Math.max(1, Math.floor(h));
-    bufferCanvas.width = intW;
-    bufferCanvas.height = intH;
-    try {
-      imageData = bufCtx.createImageData(intW, intH);
-    } catch (e) {
-      imageData = new ImageData(intW, intH);
-    }
+    bufW = Math.max(1, Math.floor(w));
+    bufH = Math.max(1, Math.floor(h));
+    bufferCanvas.width = bufW;
+    bufferCanvas.height = bufH;
+    try { imageData = bufCtx.createImageData(bufW, bufH); } catch (e) { imageData = new ImageData(bufW, bufH); }
     pixelBuf = imageData.data;
-    zBuffer = new Float32Array(intW * intH);
-    // initialize
-    for (let i = 0, p = 0; i < intW * intH; ++i, p += 4) {
+    zBuffer = new Float32Array(bufW * bufH);
+    for (let i = 0, p = 0; i < bufW * bufH; ++i, p += 4) {
       pixelBuf[p] = 0; pixelBuf[p+1] = 0; pixelBuf[p+2] = 0; pixelBuf[p+3] = 255;
       zBuffer[i] = Infinity;
     }
   }
-  initBuffers(intW, intH);
+  initBuffers(bufW, bufH);
 
-  // visible canvas ctx (for scaled drawImage)
-  const visibleCtx = visibleCanvas.getContext('2d');
+  // visible ctx for final blit
+  const visibleCtx = visible.getContext('2d');
 
-  // helpers & scratch objects (reused to reduce allocations)
-  const projVec = new THREE.Vector3();
-  const tmpPos = new THREE.Vector3();
-  const tmpVec = new THREE.Vector3();
-  const tmpVec2 = new THREE.Vector3();
-  const tmpQuat = new THREE.Quaternion();
-  const tmpMat4 = new THREE.Matrix4();
+  // Scene geometry store (uploaded). Each entry: { id, positions: Float32Array, indices: Uint32Array, color:[r,g,b], cpuStatic, twoSided, bs }
+  const meshes = new Map();
 
-  // caching per-mesh
-  // WeakMap: obj -> { lastMatElements: Float32Array, posArrayRef: ArrayBuffer|TypedArray, pts2d: [{x,y,z}], triProjected: Float32Array, triDepthAvg: Float32Array, triCount }
-  const meshCache = new WeakMap();
+  // small config & state
+  let disableCulling = false;
+  let renderDistance = 2000;
 
-  function matrixElementsClone(mat) {
-    const el = mat.elements;
-    const out = new Float32Array(16);
-    for (let i = 0; i < 16; ++i) out[i] = el[i];
-    return out;
-  }
-  function matrixEqualsEls(a, b) {
-    if (!a || !b) return false;
-    for (let i = 0; i < 16; ++i) if (a[i] !== b[i]) return false;
-    return true;
-  }
+  // scratch arrays to avoid allocations
+  const mvpTemp = new Float32Array(16);
+  const vClip = new Float32Array(4);
 
-  // projection helpers that are resilient to vertices behind camera.
-  // We'll use THREE.Vector3.project(camera) to avoid manual math pitfalls,
-  // but when vertices are behind camera, we clamp them to near plane representation to avoid NaN/flip.
-  function projectWithClampToNear(worldVec, camera, out) {
-    // This uses three.js project which does: v.applyMatrix4(camera.matrixWorldInverse).applyMatrix4(camera.projectionMatrix)
-    // If the point is behind the camera, .project will give valid numbers but may invert. We make it robust:
-    projVec.copy(worldVec).project(camera); // projVec components -1..1 (x,y) and z in clip range
-    // If z is NaN or infinite due to degenerate w, fallback to clamping using camera position
-    if (!isFinite(projVec.x) || !isFinite(projVec.y) || !isFinite(projVec.z)) {
-      // fallback: compute direction from camera to point, push it slightly in front of near plane:
-      tmpPos.copy(worldVec);
-      tmpPos.applyMatrix4(camera.matrixWorldInverse); // camera-space
-      // if z (camera-space) >= 0 (behind) push it to -near * 1.01
-      const smallZ = (camera.near !== undefined ? -camera.near * 1.01 : -0.001);
-      if (tmpPos.z >= 0) tmpPos.z = smallZ;
-      // transform to clip space using camera.projectionMatrix
-      tmpVec.set(tmpPos.x, tmpPos.y, tmpPos.z);
-      tmpVec.applyMatrix4(camera.projectionMatrix);
-      // perspective divide (w is in tmpVec.w if using vec4, but we used Vector3; approximate by dividing by z?)
-      // Simpler: clamp to center of screen (safe fallback)
-      out.x = 0; out.y = 0; out.z = -1;
-      return out;
+  // small matrix multiply (col-major)
+  function multiplyMat4(a,b,out) {
+    for (let i=0;i<4;++i){
+      const ai0=a[i], ai1=a[i+4], ai2=a[i+8], ai3=a[i+12];
+      out[i] = ai0*b[0] + ai1*b[1] + ai2*b[2] + ai3*b[3];
+      out[i+4] = ai0*b[4] + ai1*b[5] + ai2*b[6] + ai3*b[7];
+      out[i+8] = ai0*b[8] + ai1*b[9] + ai2*b[10] + ai3*b[11];
+      out[i+12] = ai0*b[12] + ai1*b[13] + ai2*b[14] + ai3*b[15];
     }
-    // convert to screen coordinates
-    out.x = (projVec.x * 0.5 + 0.5) * intW;
-    out.y = (-projVec.y * 0.5 + 0.5) * intH;
-    out.z = projVec.z;
     return out;
   }
 
-  // bounding sphere frustum test (conservative; returns true if probably in view)
-  function sphereMayBeInView(bs, objModelMat, camera, viewProj) {
-    if (!bs) return true;
-    // transform bs.center by obj.matrixWorld (we'll compute world coords then project by viewProj)
-    const c = new THREE.Vector3(bs.cx, bs.cy, bs.cz).applyMatrix4(objModelMat);
-    // cheap distance cutoff first
-    const camPos = camera.position;
-    const d = camPos.distanceTo(c);
-    if (d > renderDistance + bs.r) return false;
-    // project center into clip space using camera (vector3.project)
-    projVec.copy(c).project(camera);
-    // if center in NDC within expanded range by bs.r -> might be visible
-    const approxR = bs.r / Math.max(0.0001, d); // rough NDC radius heuristic
-    if (projVec.x < -1 - approxR || projVec.x > 1 + approxR) return false;
-    if (projVec.y < -1 - approxR || projVec.y > 1 + approxR) return false;
-    if (projVec.z < -1 - approxR || projVec.z > 1 + approxR) return false;
-    return true;
+  // transform vec3 by 4x4 matrix and perspective divide (robust to w<=0)
+  function transformVec3(mat, vx, vy, vz, out) {
+    const x = mat[0]*vx + mat[4]*vy + mat[8]*vz + mat[12];
+    const y = mat[1]*vx + mat[5]*vy + mat[9]*vz + mat[13];
+    const z = mat[2]*vx + mat[6]*vy + mat[10]*vz + mat[14];
+    const w = mat[3]*vx + mat[7]*vy + mat[11]*vz + mat[15];
+    // protect against w <= 0 (vertex behind camera) by clamping to small positive to avoid NaN
+    const ww = (w === 0 || !isFinite(w)) ? 1e-6 : (w < 1e-6 ? 1e-6 : w);
+    out[0] = x / ww; out[1] = y / ww; out[2] = z / ww; out[3] = w;
   }
 
-  // convex hull (Andrew monotone chain) for 2D points; returns array of {x,y,z}
-  function convexHull2D(points) {
-    if (!points || points.length <= 1) return points ? points.slice() : [];
-    const pts = points.slice().sort((a,b) => (a.x === b.x ? a.y - b.y : a.x - b.x));
-    const cross = (o,a,b) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
-    const lower = [];
-    for (let p of pts) {
-      while (lower.length >= 2 && cross(lower[lower.length-2], lower[lower.length-1], p) <= 0) lower.pop();
-      lower.push(p);
-    }
-    const upper = [];
-    for (let i = pts.length - 1; i >= 0; --i) {
-      const p = pts[i];
-      while (upper.length >= 2 && cross(upper[upper.length-2], upper[upper.length-1], p) <= 0) upper.pop();
-      upper.push(p);
-    }
-    lower.pop(); upper.pop();
-    return lower.concat(upper);
+  function ndcToBuffer(ndcX, ndcY) {
+    return [ (ndcX * 0.5 + 0.5) * bufW, (-ndcY * 0.5 + 0.5) * bufH ];
   }
 
-  // Compute projected hull + optional precise triangle projection for a mesh, using cache
-  function computeProjectedData(obj, geom, camera, options = {}) {
-    // options: sampleLimit, preciseThreshold
-    const sampleLimit = options.sampleLimit || 48;
-    const preciseThreshold = (obj.userData && obj.userData.preciseTriangleLimit) || options.preciseThreshold || preciseTriangleLimit;
-    let cache = meshCache.get(obj);
-    const matEls = obj.matrixWorld.elements;
-    const posAttr = geom.attributes && geom.attributes.position;
-    const posArrayRef = posAttr ? posAttr.array : null;
-    let needRecompute = false;
-    if (!cache) needRecompute = true;
-    else {
-      if (!matrixEqualsEls(cache.lastMatEls, matEls)) needRecompute = true;
-      if (cache.posRef !== posArrayRef) needRecompute = true;
-      // if geometry version exists use it
-      if (geom.version !== undefined && cache.geomVersion !== geom.version) needRecompute = true;
-    }
-
-    if (!needRecompute) return cache;
-
-    // recompute
-    cache = { lastMatEls: new Float32Array(16), posRef: posArrayRef, geomVersion: geom.version, hullPts: [], triData: null };
-    cache.lastMatEls.set(matEls);
-
-    // sample vertices for hull
-    const hullPts = [];
-    if (posAttr && posAttr.count > 0) {
-      const count = posAttr.count;
-      const step = Math.max(1, Math.floor(count / sampleLimit));
-      for (let i = 0; i < count; i += step) {
-        tmpVec.set(posAttr.getX(i), posAttr.getY(i), posAttr.getZ(i)).applyMatrix4(obj.matrixWorld);
-        projectWithClampToNear(tmpVec, camera, projVec);
-        hullPts.push({ x: projVec.x, y: projVec.y, z: projVec.z });
-      }
-    } else {
-      // fallback: object center
-      obj.getWorldPosition(tmpPos);
-      projVec.copy(tmpPos).project(camera);
-      hullPts.push({ x: (projVec.x * 0.5 + 0.5) * intW, y: (-projVec.y * 0.5 + 0.5) * intH, z: projVec.z });
-    }
-    cache.hullPts = hullPts;
-
-    // prepare precise triangles if geometry is small enough OR flagged
-    const idxAttr = geom.index;
-    let triCount = 0;
-    if (idxAttr) triCount = Math.floor((idxAttr.array || idxAttr).length / 3);
-    else if (posAttr) triCount = Math.floor(posAttr.count / 3);
-
-    if (triCount > 0 && (triCount <= preciseThreshold || obj.userData?.preciseRaster)) {
-      const triProjected = new Float32Array(triCount * 6);
-      const triDepthAvg = new Float32Array(triCount);
-      let triIdx = 0;
-      if (idxAttr) {
-        const idxArray = idxAttr.array || idxAttr;
-        for (let t = 0; t < idxArray.length; t += 3, ++triIdx) {
-          const i0 = idxArray[t], i1 = idxArray[t+1], i2 = idxArray[t+2];
-          tmpVec.set(posAttr.getX(i0), posAttr.getY(i0), posAttr.getZ(i0)).applyMatrix4(obj.matrixWorld);
-          projectWithClampToNear(tmpVec, camera, projVec);
-          triProjected[triIdx*6 + 0] = projVec.x;
-          triProjected[triIdx*6 + 1] = projVec.y;
-          const z0 = projVec.z;
-
-          tmpVec.set(posAttr.getX(i1), posAttr.getY(i1), posAttr.getZ(i1)).applyMatrix4(obj.matrixWorld);
-          projectWithClampToNear(tmpVec, camera, projVec);
-          triProjected[triIdx*6 + 2] = projVec.x;
-          triProjected[triIdx*6 + 3] = projVec.y;
-          const z1 = projVec.z;
-
-          tmpVec.set(posAttr.getX(i2), posAttr.getY(i2), posAttr.getZ(i2)).applyMatrix4(obj.matrixWorld);
-          projectWithClampToNear(tmpVec, camera, projVec);
-          triProjected[triIdx*6 + 4] = projVec.x;
-          triProjected[triIdx*6 + 5] = projVec.y;
-          const z2 = projVec.z;
-
-          triDepthAvg[triIdx] = (z0 + z1 + z2) / 3;
-        }
-      } else {
-        let triIdx2 = 0;
-        for (let v = 0; v < posAttr.count; v += 3, ++triIdx2) {
-          tmpVec.set(posAttr.getX(v), posAttr.getY(v), posAttr.getZ(v)).applyMatrix4(obj.matrixWorld);
-          projectWithClampToNear(tmpVec, camera, projVec);
-          triProjected[triIdx2*6 + 0] = projVec.x;
-          triProjected[triIdx2*6 + 1] = projVec.y;
-          const z0 = projVec.z;
-
-          tmpVec.set(posAttr.getX(v+1), posAttr.getY(v+1), posAttr.getZ(v+1)).applyMatrix4(obj.matrixWorld);
-          projectWithClampToNear(tmpVec, camera, projVec);
-          triProjected[triIdx2*6 + 2] = projVec.x;
-          triProjected[triIdx2*6 + 3] = projVec.y;
-          const z1 = projVec.z;
-
-          tmpVec.set(posAttr.getX(v+2), posAttr.getY(v+2), posAttr.getZ(v+2)).applyMatrix4(obj.matrixWorld);
-          projectWithClampToNear(tmpVec, camera, projVec);
-          triProjected[triIdx2*6 + 4] = projVec.x;
-          triProjected[triIdx2*6 + 5] = projVec.y;
-          const z2 = projVec.z;
-
-          triDepthAvg[triIdx2] = (z0 + z1 + z2) / 3;
-        }
-      }
-      cache.triData = { triProjected, triDepthAvg, triCount };
-    } else {
-      cache.triData = null;
-    }
-
-    meshCache.set(obj, cache);
-    return cache;
+  function edgeFunc(ax,ay,bx,by,cx,cy) {
+    return (cx - ax) * (by - ay) - (cy - ay) * (bx - ax);
   }
 
-  // draw helpers
-  function cssColorFromMaterialOrUser(obj) {
-    try {
-      if (obj.userData && obj.userData.cpuColor) {
-        const c = obj.userData.cpuColor;
-        if (Array.isArray(c) && c.length >= 3) return `rgb(${c[0]},${c[1]},${c[2]})`;
-      }
-      if (obj.material && obj.material.color) {
-        const col = obj.material.color;
-        if (typeof col.getStyle === 'function') return col.getStyle();
-        return `#${col.getHexString ? col.getHexString() : ((col.r*255<<16)|(col.g*255<<8)|(col.b*255)).toString(16)}`;
-      }
-    } catch (e) {}
-    return 'rgb(200,200,200)';
+  // compute bounding sphere from positions array
+  function computeBoundingSphereFromArray(posArr) {
+    const n = posArr.length / 3;
+    if (n === 0) return { cx:0,cy:0,cz:0,r:0 };
+    let cx=0,cy=0,cz=0;
+    for (let i=0;i<n;i++){ cx += posArr[i*3]; cy += posArr[i*3+1]; cz += posArr[i*3+2]; }
+    cx /= n; cy /= n; cz /= n;
+    let r2 = 0;
+    for (let i=0;i<n;i++){
+      const dx = posArr[i*3] - cx, dy = posArr[i*3+1] - cy, dz = posArr[i*3+2] - cz;
+      const d2 = dx*dx + dy*dy + dz*dz; if (d2 > r2) r2 = d2;
+    }
+    return { cx, cy, cz, r: Math.sqrt(r2) };
   }
 
-  // Polygon draw util (fill + stroke)
-  function drawHull(ctx, pts, fillStyle, strokeStyle, alpha = 1.0) {
-    if (!pts || pts.length < 3) return;
-    ctx.save();
-    ctx.beginPath();
-    ctx.moveTo(pts[0].x, pts[0].y);
-    for (let i = 1; i < pts.length; ++i) ctx.lineTo(pts[i].x, pts[i].y);
-    ctx.closePath();
-    ctx.globalAlpha = alpha;
-    ctx.fillStyle = fillStyle;
-    ctx.fill();
-    ctx.globalAlpha = Math.min(1, alpha * 0.75);
-    ctx.lineWidth = Math.max(1, 1);
-    ctx.strokeStyle = strokeStyle || 'rgba(0,0,0,0.6)';
-    ctx.stroke();
-    ctx.restore();
-  }
-
-  // rasterize triangles directly into bufferCanvas (fast path for small meshes)
-  function drawPreciseTrianglesIntoBuffer(triProjected, triDepthAvg, triCount, color, objOptions = {}) {
-    // triProjected: Float32Array [x0,y0,x1,y1,x2,y2,...] in buffer coordinates (intW x intH)
-    // We'll simply painter-sort triangles by depth (furthest first) and fill via canvas API.
-    // Optionally draw into a smaller offscreen precise canvas (preciseDownscale) to save CPU.
-    const down = objOptions.preciseDownscale || preciseDownscale;
-    let targetCtx = bufCtx;
-    let savedImageData = null;
-    let useOffscreen = (down < 1.0);
-    let offscreenCanvas = null, offscreenCtx = null;
-    let targetW = intW, targetH = intH;
-
-    if (useOffscreen) {
-      targetW = Math.max(1, Math.floor(intW * down));
-      targetH = Math.max(1, Math.floor(intH * down));
-      offscreenCanvas = document.createElement('canvas');
-      offscreenCanvas.width = targetW;
-      offscreenCanvas.height = targetH;
-      offscreenCtx = offscreenCanvas.getContext('2d', { alpha: false });
-      targetCtx = offscreenCtx;
-      // We'll draw scaled triangles; so triangles coords must be scaled by down.
-    }
-
-    // Build sorting order (triCount usually small)
-    const order = new Uint32Array(triCount);
-    for (let i = 0; i < triCount; ++i) order[i] = i;
-    // sort by triDepthAvg desc (furthest first)
-    if (triCount <= 512) {
-      for (let i = 1; i < triCount; ++i) {
-        const key = order[i];
-        let j = i - 1;
-        while (j >= 0 && triDepthAvg[order[j]] < triDepthAvg[key]) { order[j+1] = order[j]; j--; }
-        order[j+1] = key;
-      }
-    } else {
-      const tmp = new Array(triCount);
-      for (let i = 0; i < triCount; ++i) tmp[i] = { i, d: triDepthAvg[i] };
-      tmp.sort((a,b) => b.d - a.d);
-      for (let i = 0; i < triCount; ++i) order[i] = tmp[i].i;
-    }
-
-    // draw triangles
-    targetCtx.save();
-    const cssColor = Array.isArray(color) ? `rgb(${color[0]},${color[1]},${color[2]})` : color;
-    targetCtx.fillStyle = cssColor;
-    targetCtx.globalAlpha = objOptions.opacity != null ? objOptions.opacity : 1.0;
-    targetCtx.beginPath();
-    for (let ti = 0; ti < triCount; ++ti) {
-      const i = order[ti];
-      const base = i * 6;
-      let x0 = triProjected[base + 0], y0 = triProjected[base + 1];
-      let x1 = triProjected[base + 2], y1 = triProjected[base + 3];
-      let x2 = triProjected[base + 4], y2 = triProjected[base + 5];
-      if (useOffscreen) {
-        x0 *= down; y0 *= down; x1 *= down; y1 *= down; x2 *= down; y2 *= down;
-      }
-      // skip degenerate triangles
-      if (!isFinite(x0) || !isFinite(y0) || !isFinite(x1) || !isFinite(y1) || !isFinite(x2) || !isFinite(y2)) continue;
-      targetCtx.moveTo(x0 + 0.0001, y0 + 0.0001);
-      targetCtx.lineTo(x1 + 0.0001, y1 + 0.0001);
-      targetCtx.lineTo(x2 + 0.0001, y2 + 0.0001);
-      targetCtx.closePath();
-    }
-    targetCtx.fill();
-    targetCtx.restore();
-
-    // if offscreen, draw scaled up to bufferCanvas
-    if (useOffscreen && offscreenCanvas) {
-      bufCtx.drawImage(offscreenCanvas, 0, 0, targetW, targetH, 0, 0, intW, intH);
-    }
-  }
-
-  // Public API & internals
-  const uploaded = new Map();
-
+  // API
   const api = {
-    domElement: visibleCanvas,
+    domElement: visible,
     domWrapper: wrapper,
-    _internal: { meshCache, bufferCanvas, imageData, zBuffer },
+    _internal: { bufferCanvas, imageData, zBuffer: () => zBuffer },
 
     setSize(w, h, updateStyle = true) {
-      width = w; height = h;
       if (updateStyle) {
         wrapper.style.width = `${w}px`;
         wrapper.style.height = `${h}px`;
-        visibleCanvas.style.width = `${w}px`;
-        visibleCanvas.style.height = `${h}px`;
+        visible.style.width = `${w}px`;
+        visible.style.height = `${h}px`;
       }
-      const iw = Math.max(1, Math.floor(width * downscale));
-      const ih = Math.max(1, Math.floor(height * downscale));
-      initBuffers(iw, ih);
+      // update internal buffer size with current downscale
+      const newW = Math.max(1, Math.floor(w * downscale));
+      const newH = Math.max(1, Math.floor(h * downscale));
+      initBuffers(newW, newH);
     },
 
     setClearColor(hex, alpha = 1) {
@@ -1228,51 +956,33 @@ export function createCanvasRendererUpdated({
     },
     _clearColor: { hex: 0x000000, alpha: 1 },
 
-    setCulling(flag) { api._disableCulling = !!flag; },
+    setCulling(disable) { disableCulling = !!disable; },
 
-    setTwoSided(meshOrId, two) {
-      const id = typeof meshOrId === 'string' ? meshOrId : (meshOrId && meshOrId.uuid);
-      if (!id) return;
-      const m = uploaded.get(id);
-      if (m) m.twoSided = !!two;
-    },
+    setRenderDistance(d) { renderDistance = Number(d) || renderDistance; },
 
-    setRenderDistance(d) { renderDistance = d; },
-
-    uploadMesh({ id, positions, indices, color = [180,180,180], cpuStatic = false, twoSided = false, preciseRaster = false }) {
+    uploadMesh({ id, positions, indices, color = [180,180,180], cpuStatic = false, twoSided = false }) {
       if (!id || !positions || !indices) throw new Error('uploadMesh requires id, positions, indices');
       const posArr = positions instanceof Float32Array ? positions : new Float32Array(positions);
       const idxArr = indices instanceof Uint32Array ? indices : new Uint32Array(indices);
-      // compute bounding sphere simple approx
-      let cx = 0, cy = 0, cz = 0;
-      const n = posArr.length / 3;
-      for (let i = 0; i < n; ++i) { cx += posArr[i*3]; cy += posArr[i*3+1]; cz += posArr[i*3+2]; }
-      cx /= n; cy /= n; cz /= n;
-      let r2 = 0;
-      for (let i = 0; i < n; ++i) {
-        const dx = posArr[i*3] - cx, dy = posArr[i*3+1] - cy, dz = posArr[i*3+2] - cz;
-        const d2 = dx*dx + dy*dy + dz*dz; if (d2 > r2) r2 = d2;
-      }
-      const bs = { cx, cy, cz, r: Math.sqrt(r2) };
-      uploaded.set(id, { id, positions: posArr, indices: idxArr, color, cpuStatic: !!cpuStatic, twoSided: !!twoSided, bs, preciseRaster: !!preciseRaster });
+      const bs = computeBoundingSphereFromArray(posArr);
+      meshes.set(id, { id, positions: posArr, indices: idxArr, color, cpuStatic: !!cpuStatic, twoSided: !!twoSided, bs });
     },
 
     async scanAndUploadScene(scene) {
-      uploaded.clear();
+      // simple traversal; copy position/index buffers
+      meshes.clear();
       scene.traverse((obj) => {
         if (!obj.isMesh || obj.userData?.cpuRenderable === false) return;
         const geom = obj.geometry;
         if (!geom || !geom.attributes || !geom.attributes.position) return;
-        if (uploaded.has(obj.uuid)) return;
-        // copy positions & indices (keep small copies to avoid later reads to three.js)
         const posAttr = geom.attributes.position;
-        const pos = new Float32Array(posAttr.array);
-        let idx;
-        if (geom.index) idx = new Uint32Array(geom.index.array);
+        const positionsCopy = new Float32Array(posAttr.array);
+        let indicesCopy;
+        if (geom.index) indicesCopy = new Uint32Array(geom.index.array);
         else {
-          const triCount = Math.floor(pos.length / 3) * 3;
-          idx = new Uint32Array(triCount);
-          for (let i = 0; i < triCount; ++i) idx[i] = i;
+          const triCount = Math.floor(positionsCopy.length / 3) * 3;
+          indicesCopy = new Uint32Array(triCount);
+          for (let i = 0; i < triCount; ++i) indicesCopy[i] = i;
         }
         let col = [180,180,180];
         try {
@@ -1282,19 +992,17 @@ export function createCanvasRendererUpdated({
             Math.min(255, Math.round((obj.material.color.g || 1) * 255)),
             Math.min(255, Math.round((obj.material.color.b || 1) * 255))
           ];
-        } catch (e) {}
-        const bs = computeBoundingSphereFromArray(pos);
-        uploaded.set(obj.uuid, { id: obj.uuid, positions: pos, indices: idx, color: col, cpuStatic: !!obj.userData?.cpuStatic, twoSided: !!obj.userData?.twoSided, bs, preciseRaster: !!obj.userData?.preciseRaster });
+        } catch(e) {}
+        const bs = computeBoundingSphereFromArray(positionsCopy);
+        meshes.set(obj.uuid, { id: obj.uuid, positions: positionsCopy, indices: indicesCopy, color: col, cpuStatic: !!obj.userData?.cpuStatic, twoSided: !!obj.userData?.twoSided, bs });
       });
     },
 
     removeMesh(meshOrId) {
       const id = typeof meshOrId === 'string' ? meshOrId : (meshOrId && meshOrId.uuid);
       if (!id) return;
-      uploaded.delete(id);
+      meshes.delete(id);
     },
-
-    clearScene() { uploaded.clear(); },
 
     debugDrawTestTriangle() {
       const pos = new Float32Array([-0.5,-0.5,0, 0.5,-0.5,0, 0,0.5,0]);
@@ -1302,197 +1010,142 @@ export function createCanvasRendererUpdated({
       api.uploadMesh({ id: 'test-tri', positions: pos, indices: idx, color: [255,0,0], cpuStatic: false, twoSided: false });
     },
 
-    dispose() { uploaded.clear(); try { if (wrapper.parentElement) wrapper.parentElement.removeChild(wrapper); } catch (e) {} },
+    dispose() {
+      meshes.clear();
+      try { if (wrapper.parentElement) wrapper.parentElement.removeChild(wrapper); } catch (e) {}
+    },
 
-    // Render entry - main function called every frame
+    // the renderer: projects, rasterizes triangles (barycentric), z-buffer
     render(scene, camera) {
-      // Clear buffer with clearColor
+      // clear buffer (fast)
       const c = api._clearColor || { hex: 0x000000, alpha: 1 };
       const rr = (c.hex >> 16) & 0xff, gg = (c.hex >> 8) & 0xff, bb = c.hex & 0xff;
-      // clear imageData
-      for (let i = 0, p = 0; i < intW * intH; ++i, p += 4) {
+      for (let i = 0, p = 0; i < bufW * bufH; ++i, p += 4) {
         pixelBuf[p] = rr; pixelBuf[p+1] = gg; pixelBuf[p+2] = bb; pixelBuf[p+3] = 255;
         zBuffer[i] = Infinity;
       }
 
-      // We'll gather drawables (poly/hull, image, preciseMesh)
-      const drawables = [];
+      // compute viewProj once
+      const proj = new Float32Array(camera.projectionMatrix.elements);
+      const view = new Float32Array(camera.matrixWorldInverse.elements);
+      multiplyMat4(proj, view, mvpTemp);
 
-      // Scene traversal: prefer scene meshes previously scanned/uploaded; we still traverse scene to gather dynamic transforms + sprites
-      scene.traverse((obj) => {
-        if (!obj.visible) return;
-        if (obj.isCamera || obj.isLight) return;
+      // draw each mesh (we use uploaded mesh copies to avoid reading three internals during raster)
+      let totalTriangles = 0, rasterized = 0, pixelWrites = 0;
+      for (const [id, mesh] of meshes) {
+        // frustum / distance quick check with bounding sphere
+        // transform bs center by object's world matrix if available on scene (we don't have matrix here).
+        // We'll conservatively assume visible; we can skip by renderDistance from camera center.
+        // (Better culling would require per-object model matrix provided via scene transforms.)
+        // So here we rely on user to not upload extremely far objects or mark cpuStatic and manage them.
 
-        // Sprite / image detection
-        const mapImage = obj.material && obj.material.map && obj.material.map.image ? obj.material.map.image : null;
+        const pos = mesh.positions;
+        const idx = mesh.indices;
+        const color = mesh.color;
+        // Build screen-space arrays per-vertex (we assume model is identity for uploaded meshes)
+        // NOTE: When using Three.js, objects in the scene may be transformed; recommended workflow:
+        // upload meshes with positions in world space OR update meshes when their matrixWorld changes.
+        const vcount = pos.length / 3;
+        const sx = new Float32Array(vcount);
+        const sy = new Float32Array(vcount);
+        const sz = new Float32Array(vcount);
 
-        // compute world center & cheap distance
-        obj.getWorldPosition(tmpPos);
-        const camDist = camera.position.distanceTo(tmpPos);
-        if (camDist > renderDistance && !obj.userData?.alwaysRender) return;
-
-        // if sprite
-        if (mapImage) {
-          // project center to screen robustly
-          projectWithClampToNear(tmpPos, camera, projVec);
-          const sx = projVec.x * (intW / intW); // already in buffer coords
-          const sy = projVec.y * (intH / intH);
-          drawables.push({ type: 'image', obj, sx, sy, dist: camDist, mapImage });
-          return;
+        // Project each vertex using mvpTemp as if mesh is in world (user must upload world-space positions),
+        // but to avoid vanish/NaN we protect w as done in transformVec3.
+        for (let vi = 0; vi < vcount; ++vi) {
+          transformVec3(mvpTemp, pos[vi*3], pos[vi*3+1], pos[vi*3+2], vClip);
+          const sc = ndcToBuffer(vClip[0], vClip[1]);
+          sx[vi] = sc[0]; sy[vi] = sc[1]; sz[vi] = vClip[2];
         }
 
-        // if mesh & uploaded copy exists -> use that geometry copy for CPU raster
-        if (obj.isMesh && uploaded.has(obj.uuid)) {
-          const meshData = uploaded.get(obj.uuid);
+        for (let t = 0; t < idx.length; t += 3) {
+          totalTriangles++;
+          const i0 = idx[t], i1 = idx[t+1], i2 = idx[t+2];
+          if (i0 < 0 || i1 < 0 || i2 < 0 || i0 >= sx.length || i1 >= sx.length || i2 >= sx.length) continue;
 
-          // quick bounding-sphere frustum test
-          const mMat = obj.matrixWorld;
-          if (!sphereMayBeInView(meshData.bs, mMat, camera)) return;
+          const x0 = sx[i0], y0 = sy[i0], z0 = sz[i0];
+          const x1 = sx[i1], y1 = sy[i1], z1 = sz[i1];
+          const x2 = sx[i2], y2 = sy[i2], z2 = sz[i2];
 
-          // compute projected hull & triData (caching inside)
-          // build a faux geometry object with attributes for computeProjectedData
-          // We must craft a tiny geometry-like object to pass, but we can salvage three's geometry reference if available
-          const geom = obj.geometry;
-          const projCache = computeProjectedData(obj, geom, camera, { sampleLimit: 48, preciseThreshold: preciseTriangleLimit });
+          // triangle bbox in buffer coords
+          const minX = Math.max(0, Math.floor(Math.min(x0,x1,x2)));
+          const maxX = Math.min(bufW-1, Math.ceil(Math.max(x0,x1,x2)));
+          const minY = Math.max(0, Math.floor(Math.min(y0,y1,y2)));
+          const maxY = Math.min(bufH-1, Math.ceil(Math.max(y0,y1,y2)));
+          if (maxX < 0 || maxY < 0 || minX > bufW-1 || minY > bufH-1) continue;
 
-          // prefer precise triangle path if triData exists or user asked
-          if (projCache.triData) {
-            // triProjected coords are computed in buffer-space (intW/intH)
-            // choose color
-            const color = meshData.color;
-            drawables.push({
-              type: 'preciseMesh',
-              obj,
-              triProjected: projCache.triData.triProjected,
-              triDepthAvg: projCache.triData.triDepthAvg,
-              triCount: projCache.triData.triCount,
-              color,
-              opacity: obj.userData?.opacity ?? (obj.material?.opacity ?? 1),
-              preciseDownscale: obj.userData?.preciseDownscale || preciseDownscale
-            });
-          } else {
-            // fallback hull: project cached hull pts (but recompute if empty)
-            let hullPts = projCache.hullPts || [];
-            // filter valid numeric points
-            const pts2d = hullPts.filter(p => isFinite(p.x) && isFinite(p.y));
-            if (pts2d.length === 0) {
-              // fallback marker if requested
-              if (obj.userData?.forceMarker) {
-                projectWithClampToNear(tmpPos, camera, projVec);
-                drawables.push({ type: 'rect', obj, sx: projVec.x, sy: projVec.y, dist: camDist, sizePx: obj.userData?.markerSizePx ?? 6 });
-              }
-            } else {
-              const hull = convexHull2D(pts2d);
-              if (hull.length >= 3) {
-                drawables.push({ type: 'poly', obj, pts: hull, dist: camDist, projZ: projVec.z });
-              } else if (hull.length === 2) {
-                drawables.push({ type: 'line', obj, pts: hull, dist: camDist });
-              } else {
-                if (obj.userData?.forceMarker) {
-                  drawables.push({ type: 'rect', obj, sx: pts2d[0].x, sy: pts2d[0].y, dist: camDist, sizePx: obj.userData?.markerSizePx ?? 6 });
+          // cull backfaces (screen-space cross)
+          const ux = x1 - x0, uy = y1 - y0;
+          const vx = x2 - x0, vy = y2 - y0;
+          const cross = ux * vy - uy * vx;
+          if (!disableCulling && !mesh.twoSided && cross >= 0) continue;
+
+          const area = edgeFunc(x0,y0,x1,y1,x2,y2);
+          if (!isFinite(area) || Math.abs(area) < 1e-8) continue;
+
+          rasterized++;
+          const invArea = 1.0 / area;
+
+          for (let py = minY; py <= maxY; ++py) {
+            const rowBase = py * bufW;
+            for (let px = minX; px <= maxX; ++px) {
+              const cx = px + 0.5, cy = py + 0.5;
+              const w0 = edgeFunc(x1,y1,x2,y2,cx,cy);
+              const w1 = edgeFunc(x2,y2,x0,y0,cx,cy);
+              const w2 = edgeFunc(x0,y0,x1,y1,cx,cy);
+              if ((w0 >= 0 && w1 >= 0 && w2 >= 0) || (w0 <= 0 && w1 <= 0 && w2 <= 0)) {
+                const b0 = w0 * invArea, b1 = w1 * invArea, b2 = w2 * invArea;
+                const zInterp = b0*z0 + b1*z1 + b2*z2;
+                if (!isFinite(zInterp)) continue;
+                const depth = (zInterp + 1) * 0.5;
+                const idxBuf = rowBase + px;
+                if (depth < zBuffer[idxBuf]) {
+                  const p = idxBuf * 4;
+                  pixelBuf[p] = color[0];
+                  pixelBuf[p+1] = color[1];
+                  pixelBuf[p+2] = color[2];
+                  pixelBuf[p+3] = 255;
+                  zBuffer[idxBuf] = depth;
+                  pixelWrites++;
                 }
               }
             }
           }
-          return;
-        }
-
-        // fallback: we don't have uploaded CPU geometry, so optionally draw marker or skip
-        if (obj.userData?.forceMarker) {
-          projectWithClampToNear(tmpPos, camera, projVec);
-          drawables.push({ type: 'rect', obj, sx: projVec.x, sy: projVec.y, dist: camDist, sizePx: obj.userData?.markerSizePx ?? 6 });
-        }
-      }); // end traverse
-
-      // sort drawables by distance for painter's ordering (furthest first)
-      drawables.sort((a,b) => (b.dist || 0) - (a.dist || 0));
-
-      // draw to bufferCanvas: we already have imageData cleared; we'll draw either to ctx (fast) or use triangle raster into buffer via canvas path
-      // We'll draw hulls and lines using buffer context drawing on scaled buffer
-      const ctx = bufCtx;
-
-      // draw each drawable
-      for (let d of drawables) {
-        if (d.type === 'image') {
-          // simple drawImage scaled to buffer coords — compute display size from bounding box if possible
-          const img = d.mapImage;
-          if (!img || !img.width) continue;
-          // determine size: either user-specified or 1/10 screen or based on distance
-          const baseSize = d.obj.userData?.sizePx || Math.max(16, Math.min(intW, intH) * 0.08);
-          const scaledSize = Math.max(8, baseSize * (1 / Math.max(0.1, (d.dist || 1) * 0.05)));
-          ctx.save();
-          ctx.translate(d.sx, d.sy);
-          const rot = d.obj.userData?.rotation ?? (d.obj.rotation?.z ?? 0);
-          if (rot) ctx.rotate(rot);
-          ctx.globalAlpha = d.obj.userData?.opacity ?? (d.obj.material?.opacity ?? 1);
-          ctx.drawImage(img, -scaledSize/2, -scaledSize/2, scaledSize, scaledSize);
-          ctx.restore();
-        } else if (d.type === 'poly') {
-          const fillStyle = cssColorFromMaterialOrUser(d.obj);
-          const alpha = Math.max(0.2, Math.min(1, 1 - (d.dist * 0.002)));
-          drawHull(ctx, d.pts, fillStyle, 'rgba(0,0,0,0.6)', alpha);
-        } else if (d.type === 'line') {
-          ctx.save();
-          ctx.beginPath();
-          ctx.moveTo(d.pts[0].x, d.pts[0].y);
-          ctx.lineTo(d.pts[1].x, d.pts[1].y);
-          ctx.strokeStyle = cssColorFromMaterialOrUser(d.obj);
-          ctx.lineWidth = d.obj.userData?.lineWidth ?? 3;
-          ctx.globalAlpha = 1 - Math.min(0.9, d.dist * 0.002);
-          ctx.stroke();
-          ctx.restore();
-        } else if (d.type === 'rect') {
-          const size = d.sizePx ?? 8;
-          ctx.save();
-          ctx.globalAlpha = Math.max(0.5, Math.min(1, 1 - (d.dist * 0.002)));
-          ctx.fillStyle = cssColorFromMaterialOrUser(d.obj);
-          ctx.fillRect(d.sx - size/2, d.sy - size/2, size, size);
-          ctx.restore();
-        } else if (d.type === 'preciseMesh') {
-          // Prefer to draw precise triangles into buffer (possibly at reduced resolution)
-          drawPreciseTrianglesIntoBuffer(d.triProjected, d.triDepthAvg, d.triCount, d.color, { opacity: d.opacity, preciseDownscale: d.preciseDownscale });
         }
       }
 
-      // flush buffer to visible canvas by scale-copy (drawImage uses GPU to accelerate scaling)
+      // push imageData to bufferCanvas then scale up to visible canvas
       try {
-        // update internal imageData because drawPreciseTriangles drew with ctx; but we also filled raw pixelBuf earlier.
-        // We'll prefer drawImage bufferCanvas -> visibleCanvas to scale to visible size
-        visibleCtx.clearRect(0, 0, width, height);
+        bufCtx.putImageData(imageData, 0, 0);
+        // draw scaled to visible canvas (fast when GPU does stretch)
+        visibleCtx.clearRect(0,0,visible.width, visible.height);
         visibleCtx.imageSmoothingEnabled = false;
-        visibleCtx.drawImage(bufferCanvas, 0, 0, width, height);
+        visibleCtx.drawImage(bufferCanvas, 0, 0, visible.width, visible.height);
       } catch (err) {
-        // fallback: if drawImage fails, try putImageData to visible (slower) or fill with magenta so bug is visible
+        // fallback: draw a visible magenta box so it's obvious
         try {
           visibleCtx.fillStyle = 'magenta';
-          visibleCtx.fillRect(0,0,width,height);
+          visibleCtx.fillRect(Math.max(0, Math.floor(visible.width*0.1)), Math.max(0, Math.floor(visible.height*0.1)), Math.max(4, Math.floor(visible.width*0.1)), Math.max(4, Math.floor(visible.height*0.1)));
         } catch (e) {}
       }
 
-      // return some stats optionally (no heavy allocation)
-      return { drawables: drawables.length, bufferW: intW, bufferH: intH };
-    } // end render
+      // If nothing was drawn, draw a small visible indicator so you don't get a black screen
+      if (pixelWrites === 0) {
+        try {
+          visibleCtx.fillStyle = 'magenta';
+          visibleCtx.fillRect(Math.max(0, Math.floor(visible.width*0.1)), Math.max(0, Math.floor(visible.height*0.1)), Math.max(4, Math.floor(visible.width*0.1)), Math.max(4, Math.floor(visible.height*0.1)));
+          visibleCtx.fillStyle = 'white';
+          visibleCtx.fillRect(Math.floor(visible.width/2), Math.floor(visible.height/2), 2, 2);
+        } catch (e) {}
+      }
 
+      return { totalTriangles, rasterized, pixelWrites };
+    } // end render
   }; // end api
 
-  // small helper used above in scanAndUploadScene
-  function computeBoundingSphereFromArray(posArr) {
-    const n = Math.floor(posArr.length / 3);
-    if (n === 0) return { cx:0, cy:0, cz:0, r:0 };
-    let cx = 0, cy = 0, cz = 0;
-    for (let i = 0; i < n; ++i) { cx += posArr[i*3]; cy += posArr[i*3+1]; cz += posArr[i*3+2]; }
-    cx /= n; cy /= n; cz /= n;
-    let r2 = 0;
-    for (let i = 0; i < n; ++i) {
-      const dx = posArr[i*3] - cx, dy = posArr[i*3+1] - cy, dz = posArr[i*3+2] - cz;
-      const d2 = dx*dx + dy*dy + dz*dz; if (d2 > r2) r2 = d2;
-    }
-    return { cx, cy, cz, r: Math.sqrt(r2) };
-  }
-
-  // append wrapper to document body by default? No — caller should attach.
-  // But to help existing usage, export wrapper and domElement as before.
+  // apply initial clear color
   api.setClearColor(0x000000, 1);
+
   return api;
 }
 
@@ -1522,14 +1175,7 @@ export async function initSceneCrocodilosConstruction() {
   scene.add(window.camera);
 
   // 3. Renderer (CPU canvas)
-  const cpuRenderer = createCanvasRendererUpdated({
-  width: FIXED_WIDTH,
-  height: FIXED_HEIGHT,
-  downscale: 0.6,          // reduce CPU; try 0.5 on weak Chromebooks
-  preciseDownscale: 0.5,   // draw precise triangles at half resolution
-  preciseTriangleLimit: 600,
-  renderDistance: 1500
-});
+const cpuRenderer = createCanvasRenderer({ width: 1280, height: 720, downscale: 0.6 });
   cpuRenderer.setClearColor(0x000000, 1);
   renderer = cpuRenderer;
   window.renderer = renderer;
