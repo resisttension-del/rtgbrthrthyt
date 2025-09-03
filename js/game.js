@@ -810,9 +810,6 @@ function setupDetailToggle() {
   
 }
 
-// At the top of the function, modify:
-const MAX_RENDER_DISTANCE = 100; // Lower = better performance
-const maxSamples = dist < 20 ? 50 : dist < 50 ? 25 : 15; // Lower = better performance
 
 
 
@@ -3197,6 +3194,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
