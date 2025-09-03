@@ -260,14 +260,15 @@ export async function createSigmaCity(scene, physicsController) {
     // Define scaling and initial spawn points for the map
     const SCALE = 2;
     const rawSpawnPoints = [
-        new THREE.Vector3(-1, 3, -4), // 1
-        new THREE.Vector3(-55, -1, -6), // 2
-        new THREE.Vector3(13, 5, 47), // 3
-        new THREE.Vector3(1, 5, -66), // 4
-        new THREE.Vector3(21, 5, -45), // 5
-        new THREE.Vector3(0, 10, 22), // 6
-        new THREE.Vector3(43, 1, -35), // 7
-        new THREE.Vector3(24, 3, -14), // 8
+        new THREE.Vector3(0, 10, 0)
+     //   new THREE.Vector3(-1, 3, -4), // 1
+    //    new THREE.Vector3(-55, -1, -6), // 2
+     //   new THREE.Vector3(13, 5, 47), // 3
+     //   new THREE.Vector3(1, 5, -66), // 4
+     //   new THREE.Vector3(21, 5, -45), // 5
+    //    new THREE.Vector3(0, 10, 22), // 6
+    //    new THREE.Vector3(43, 1, -35), // 7
+     //   new THREE.Vector3(24, 3, -14), // 8
     ];
     const spawnPoints = rawSpawnPoints.map(p => p.clone().multiplyScalar(SCALE / 2));
 
