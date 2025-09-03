@@ -1278,7 +1278,7 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
             }
           } else if (d.type === 'rect') {
             // small centered rectangle marker
-            const size = d.sizePx ?? Math.max(2, Math.round(12 * (1 / Math.max(0.1, ((d.visibleDistNear ?? d.distNear ?? d.dist ?? 0) + (d.visibleDistFar ?? d.distFar ?? d.dist ?? 0)) * 0.5 * 0.05)))));
+            const size = d.sizePx ?? Math.max(2, Math.round(12 / Math.max(0.1, (((d.visibleDistNear ?? d.distNear ?? d.dist ?? 0) + (d.visibleDistFar ?? d.distFar ?? d.dist ?? 0)) * 0.5 * 0.05))));
             const cx = Math.round((d.sx || d.sx === 0) ? d.sx : 0);
             const cy = Math.round((d.sy || d.sy === 0) ? d.sy : 0);
             const half = Math.max(1, Math.floor(size/2));
