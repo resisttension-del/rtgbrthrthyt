@@ -856,17 +856,15 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
         canvas.style.height = `${h}px`;
       }
     },
+    // Minimal clear color support
     setClearColor(hex, alpha = 1) {
       api._clearColor = { hex, alpha };
     },
     _clearColor: { hex: 0x000000, alpha: 1 },
 
+    // Basic render: draw sprites (material.map.image) and approximated shapes for meshes
     render(scene, camera) {
-      // Ensure world matrices are up-to-date (fixes many vanishing/invisible issues)
-      if (scene && typeof scene.updateMatrixWorld === 'function') scene.updateMatrixWorld(true);
-      if (camera && typeof camera.updateMatrixWorld === 'function') camera.updateMatrixWorld(true);
-
-      // Clear
+      // Clear with the clear color (converted to CSS)
       const c = api._clearColor;
       const r = (c.hex >> 16) & 0xff;
       const g = (c.hex >> 8) & 0xff;
@@ -877,46 +875,51 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
       ctx.fillRect(0, 0, canvas.width, canvas.height);
       ctx.restore();
 
+      // collect drawables (so we can sort by depth)
       const drawables = [];
-
-      // Traverse scene and build drawables. NOTE: no early cull by object center.
       scene.traverse((obj) => {
         if (!obj.visible) return;
         if (obj.isCamera || obj.isLight) return;
 
-        // compute a reliable world center
+        // World position (center)
         obj.getWorldPosition(tmpPos);
+        proj.copy(tmpPos).project(camera); // NDC -1..1
 
-        // screen center projection (used as fallback coords)
-        proj.copy(tmpPos).project(camera);
-        const centerSx = (proj.x * 0.5 + 0.5) * canvas.width;
-        const centerSy = (-proj.y * 0.5 + 0.5) * canvas.height;
-        const centerProjZ = proj.z;
-
-        const dist = camera.position.distanceTo(tmpPos);
-        const mapImage = obj.material && obj.material.map && obj.material.map.image ? obj.material.map.image : null;
-
-        // If it's a sprite/image, keep it
-        if (mapImage) {
-          drawables.push({ type: 'image', obj, sx: centerSx, sy: centerSy, dist, mapImage });
-          return;
+        // quick NDC cull (if center far off-screen, skip). We allow some slack for large objects.
+        if (proj.z > 1 || proj.z < -1 || proj.x < -2 || proj.x > 2 || proj.y < -2 || proj.y > 2) {
+          // still allow meshes that have explicit userData.alwaysRender = true
+          if (!obj.userData?.alwaysRender) return;
         }
 
-        // If it's a Mesh with geometry: try to project geometry samples / bounding box
-        if (obj.isMesh && obj.geometry) {
+        // screen coords
+        const sx = (proj.x * 0.5 + 0.5) * canvas.width;
+        const sy = (-proj.y * 0.5 + 0.5) * canvas.height;
+
+        // distance for depth sorting
+        const dist = camera.position.distanceTo(tmpPos);
+
+        // check for texture
+        const mapImage = obj.material && obj.material.map && obj.material.map.image ? obj.material.map.image : null;
+
+        // categorize drawable
+        if (mapImage) {
+          // sprite-like: keep image and let later logic scale/rotate it
+          drawables.push({ type: 'image', obj, sx, sy, dist, projZ: proj.z, mapImage });
+        } else if (obj.isMesh && obj.geometry) {
+          // Mesh: try to compute a projected silhouette using bounding box/sphere
           const geom = obj.geometry;
 
-          // ensure bounding data - compute only if missing
-          if (!geom.boundingBox && geom.computeBoundingBox) geom.computeBoundingBox();
-          if (!geom.boundingSphere && geom.computeBoundingSphere) geom.computeBoundingSphere();
+          // ensure boundingBox / boundingSphere exist (cache in geometry)
+          if (!geom.boundingBox) geom.computeBoundingBox && geom.computeBoundingBox();
+          if (!geom.boundingSphere) geom.computeBoundingSphere && geom.computeBoundingSphere();
 
+          // gather world-space corner points (if boundingBox) or sample sphere
           const worldPoints = [];
-
-          // Prefer boundingBox corners (local space) transformed to world
           if (geom.boundingBox) {
             const bb = geom.boundingBox;
             const min = bb.min;
             const max = bb.max;
+            // 8 corners
             const corners = [
               [min.x, min.y, min.z],
               [min.x, min.y, max.z],
@@ -932,7 +935,7 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
               worldPoints.push(tmpVec.clone());
             }
           } else if (geom.boundingSphere) {
-            // fallback: sphere sample points
+            // fallback: use center + axis points
             const bs = geom.boundingSphere;
             const center = bs.center.clone().applyMatrix4(obj.matrixWorld);
             const r = bs.radius * (obj.matrixWorld.getMaxScaleOnAxis ? obj.matrixWorld.getMaxScaleOnAxis() : 1);
@@ -944,84 +947,75 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
             worldPoints.push(center.clone().add(new THREE.Vector3(0, 0, r)));
             worldPoints.push(center.clone().add(new THREE.Vector3(0, 0, -r)));
           } else {
-            // cheap vertex sampling (if positions exist)
+            // if geometry has positions, sample some vertices (cheap sample)
             const posAttr = geom.attributes && geom.attributes.position;
             if (posAttr && posAttr.count > 0) {
-              const sampleCount = Math.min(16, posAttr.count);
-              const step = Math.max(1, Math.floor(posAttr.count / sampleCount));
-              for (let i = 0; i < posAttr.count; i += step) {
-                tmpVec.set(posAttr.getX(i), posAttr.getY(i), posAttr.getZ(i)).applyMatrix4(obj.matrixWorld);
+              for (let i = 0; i < Math.min(12, posAttr.count); i += Math.max(1, Math.floor(posAttr.count / 12))) {
+                tmpVec.set(
+                  posAttr.getX(i),
+                  posAttr.getY(i),
+                  posAttr.getZ(i)
+                ).applyMatrix4(obj.matrixWorld);
                 worldPoints.push(tmpVec.clone());
-                if (worldPoints.length >= sampleCount) break;
               }
             } else {
-              // last resort: use world position
+              // give up and use object's world position
               worldPoints.push(tmpPos.clone());
             }
           }
 
-          // Project those points and keep ones within a tolerance of the NDC range.
-          // Use a looser tolerance so large objects near the edge aren't culled.
+          // project worldPoints to screen-space 2D points
           const pts2d = [];
           for (let wp of worldPoints) {
             proj.copy(wp).project(camera);
-            // Accept any point within this looser z tolerance (helps partial near-plane visibility)
-            if (proj.z > 2 || proj.z < -2) continue;
+            // skip behind camera points, but keep a few even if behind in case of partial visibility
+            if (proj.z > 1 || proj.z < -1) continue;
             const px = (proj.x * 0.5 + 0.5) * canvas.width;
             const py = (-proj.y * 0.5 + 0.5) * canvas.height;
-            pts2d.push({ x: px, y: py, ndcZ: proj.z });
+            pts2d.push({ x: px, y: py });
           }
 
-          if (pts2d.length > 0) {
-            // compute hull & render polygon silhouette
+          // if no good projected points, fallback to center-based heuristic (sphere/point)
+          if (pts2d.length === 0) {
+            // try boundingSphere approach for a circle
+            if (geom.boundingSphere) {
+              const bs = geom.boundingSphere;
+              const centerWorld = bs.center.clone().applyMatrix4(obj.matrixWorld);
+              const worldR = bs.radius * (obj.matrixWorld.getMaxScaleOnAxis ? obj.matrixWorld.getMaxScaleOnAxis() : 1);
+              const pCenter = centerWorld.clone().project(camera);
+              const pEdge = centerWorld.clone().add(new THREE.Vector3(worldR, 0, 0)).project(camera);
+              const cx = (pCenter.x * 0.5 + 0.5) * canvas.width;
+              const cy = (-pCenter.y * 0.5 + 0.5) * canvas.height;
+              const ex = (pEdge.x * 0.5 + 0.5) * canvas.width;
+              const ey = (-pEdge.y * 0.5 + 0.5) * canvas.height;
+              const radiusPx = Math.hypot(ex - cx, ey - cy);
+              drawables.push({ type: 'circle', obj, sx: cx, sy: cy, dist, radiusPx });
+              return;
+            } else {
+              drawables.push({ type: 'point', obj, sx, sy, dist });
+              return;
+            }
+          } else {
+            // convex hull to get silhouette
             const hull = convexHull(pts2d);
             if (hull.length >= 3) {
-              drawables.push({ type: 'poly', obj, pts: hull, dist, projZ: centerProjZ });
+              drawables.push({ type: 'poly', obj, pts: hull, dist, projZ: proj.z });
             } else if (hull.length === 2) {
+              // line -> draw thick line or small rect
               drawables.push({ type: 'line', obj, pts: hull, dist });
             } else {
-              // single projected point (rare)
-              if (obj.userData?.forceMarker) {
-                drawables.push({ type: 'rect', obj, sx: pts2d[0].x, sy: pts2d[0].y, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
-              }
+              // single point fallback
+              drawables.push({ type: 'point', obj, sx, sy, dist });
             }
             return;
           }
-
-          // If we got no projected points, try a conservative bounding-sphere fallback so big objects don't vanish.
-          // Only apply fallback when the object's boundingSphere exists or user explicitly allows it.
-          if (geom.boundingSphere) {
-            const bs = geom.boundingSphere;
-            const centerWorld = bs.center.clone().applyMatrix4(obj.matrixWorld);
-            const worldR = bs.radius * (obj.matrixWorld.getMaxScaleOnAxis ? obj.matrixWorld.getMaxScaleOnAxis() : 1);
-            const pCenter = centerWorld.clone().project(camera);
-            // only draw fallback if center isn't *extremely* far behind/far in front
-            if (pCenter.z <= 2 && pCenter.z >= -2) {
-              const cx = (pCenter.x * 0.5 + 0.5) * canvas.width;
-              const cy = (-pCenter.y * 0.5 + 0.5) * canvas.height;
-              // Derive radius in px by projecting a radial offset
-              const edge = centerWorld.clone().add(new THREE.Vector3(worldR, 0, 0)).project(camera);
-              const ex = (edge.x * 0.5 + 0.5) * canvas.width;
-              const ey = (-edge.y * 0.5 + 0.5) * canvas.height;
-              const radiusPx = Math.hypot(ex - cx, ey - cy);
-              // Instead of drawing a sphere/circle (you asked to remove spheres), draw a small rectangle sized to radiusPx (clamped)
-              const fallbackSize = Math.max(6, Math.min(120, radiusPx));
-              drawables.push({ type: 'rect', obj, sx: cx, sy: cy, dist, sizePx: fallbackSize });
-              return;
-            }
-          }
-
-          // else: nothing visible and no fallback allowed => skip rendering this object
-          return;
-        } // end isMesh
-
-        // If we reach here (non-mesh, non-image) draw only when explicitly flagged
-        if (obj.userData?.forceMarker) {
-          drawables.push({ type: 'rect', obj, sx: centerSx, sy: centerSy, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
+        } else {
+          // unknown / fallback: draw as point
+          drawables.push({ type: 'point', obj, sx, sy, dist });
         }
-      }); // end traverse
+      });
 
-      // Painter's order: furthest first
+      // Painter's order: furthest first (larger distance)
       drawables.sort((a, b) => b.dist - a.dist);
 
       // draw
@@ -1029,7 +1023,7 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
         const d = drawables[i];
         const { obj, dist } = d;
 
-        // color selection
+        // common color selection
         let color = obj.userData?.color;
         if (!color && obj.material && obj.material.color) {
           try {
@@ -1041,8 +1035,11 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
         color = color || obj.userData?.color || 'white';
 
         if (d.type === 'image' && d.mapImage && d.mapImage.width) {
+          // size heuristic: userData.sizePx if provided, otherwise based on projected bbox or distance
           let size;
+          // try to derive screen size from bounding box if available
           if (obj.geometry && obj.geometry.boundingBox) {
+            // compute bbox screen extents quickly by projecting bb corners if possible
             const bb = obj.geometry.boundingBox;
             const corners = [
               [bb.min.x, bb.min.y, bb.min.z],
@@ -1074,14 +1071,22 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
           ctx.moveTo(d.pts[0].x, d.pts[0].y);
           for (let j = 1; j < d.pts.length; j++) ctx.lineTo(d.pts[j].x, d.pts[j].y);
           ctx.closePath();
+          // fill with material color (lower alpha if far)
           ctx.globalAlpha = Math.max(0.2, Math.min(1, 1 - (dist * 0.002)));
           ctx.fillStyle = color;
           ctx.fill();
+          // optional outline to help readability
           ctx.globalAlpha = 0.6;
           ctx.lineWidth = Math.max(1, 2 - (dist * 0.001));
           ctx.strokeStyle = 'rgba(0,0,0,0.6)';
           ctx.stroke();
           ctx.restore();
+        } else if (d.type === 'circle') {
+          ctx.beginPath();
+          ctx.arc(d.sx, d.sy, d.radiusPx, 0, Math.PI * 2);
+          ctx.fillStyle = color;
+          ctx.globalAlpha = Math.max(0.25, Math.min(1, 1 - (dist * 0.002)));
+          ctx.fill();
         } else if (d.type === 'line' && d.pts && d.pts.length === 2) {
           ctx.beginPath();
           ctx.moveTo(d.pts[0].x, d.pts[0].y);
@@ -1090,17 +1095,13 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
           ctx.lineWidth = obj.userData?.lineWidth ?? 3;
           ctx.globalAlpha = 1 - Math.min(0.9, dist * 0.002);
           ctx.stroke();
-        } else if (d.type === 'rect') {
-          const size = d.sizePx ?? Math.max(4, Math.round(12 * (1 / Math.max(0.1, dist * 0.05))));
-          const x = (d.sx || d.sx === 0) ? d.sx : 0;
-          const y = (d.sy || d.sy === 0) ? d.sy : 0;
-          ctx.save();
-          ctx.globalAlpha = Math.max(0.5, Math.min(1, 1 - (dist * 0.002)));
-          ctx.fillStyle = color;
-          ctx.fillRect(x - size / 2, y - size / 2, size, size);
-          ctx.restore();
         } else {
-          // intentionally draw nothing for other types
+          // fallback: draw a simple circle / point (for small objects)
+          ctx.beginPath();
+          ctx.fillStyle = obj.userData?.color || 'white';
+          const radius = obj.userData?.pointRadius ?? Math.max(3, 40 * (1 / Math.max(0.1, dist * 0.05)));
+          ctx.arc(d.sx, d.sy, radius, 0, Math.PI * 2);
+          ctx.fill();
         }
       }
     }
@@ -1108,7 +1109,6 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
 
   return api;
 }
-
 
 /* ---------- Updated scene initializers (CPU renderer) ---------- */
 
@@ -3210,8 +3210,6 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
-
-
 
 
 
