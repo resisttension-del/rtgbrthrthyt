@@ -885,9 +885,8 @@ function setupDetailToggle() {
                         obj.getWorldPosition(tmpPos);
                         proj.copy(tmpPos).project(camera); // NDC -1..1
 
-                        // quick NDC cull (if center far off-screen, skip). We allow some slack for large objects.
-                        if (proj.z > 1 || proj.z < -1 || proj.x < -2 || proj.x > 2 || proj.y < -2 || proj.y > 2) {
-                            // still allow meshes that have explicit userData.alwaysRender = true
+                        // Modified frustum culling for better render distance
+                        if (proj.x < -1.5 || proj.x > 1.5 || proj.y < -1.5 || proj.y > 1.5) {
                             if (!obj.userData?.alwaysRender) return;
                         }
 
@@ -905,13 +904,12 @@ function setupDetailToggle() {
                         if (mapImage) {
                             drawables.push({ type: 'image', obj, sx, sy, dist, projZ: proj.z, mapImage });
                         } else if (obj.isMesh && obj.geometry) {
-                            // Project a larger sample of vertices to create a better silhouette.
                             const worldPoints = [];
                             const geom = obj.geometry;
                             const posAttr = geom.attributes?.position;
 
                             if (posAttr && posAttr.count > 0) {
-                                // Sample up to 100 vertices to create a more detailed polygon
+                                // Sample more vertices to create a better silhouette.
                                 const stride = Math.max(1, Math.floor(posAttr.count / 200));
                                 for (let i = 0; i < posAttr.count; i += stride) {
                                     tmpVec.set(
@@ -922,7 +920,6 @@ function setupDetailToggle() {
                                     worldPoints.push(tmpVec.clone());
                                 }
                             } else {
-                                // Fallback to the object's world position if no geometry points
                                 worldPoints.push(tmpPos.clone());
                             }
 
@@ -930,28 +927,21 @@ function setupDetailToggle() {
                             const pts2d = [];
                             for (let wp of worldPoints) {
                                 proj.copy(wp).project(camera);
-                                if (proj.z > 1 || proj.z < -1) continue;
+                                // Removed z-culling to allow rendering from inside objects
+                                if (proj.z > 1.5 || proj.z < -1.5) continue;
                                 const px = (proj.x * 0.5 + 0.5) * canvas.width;
                                 const py = (-proj.y * 0.5 + 0.5) * canvas.height;
                                 pts2d.push({ x: px, y: py });
                             }
 
-                            if (pts2d.length === 0) {
+                            if (pts2d.length < 3) {
                                 if (obj.userData?.forceMarker) {
                                     drawables.push({ type: 'rect', obj, sx, sy, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
                                 }
                                 return;
                             } else {
-                                const hull = convexHull(pts2d);
-                                if (hull.length >= 3) {
-                                    drawables.push({ type: 'poly', obj, pts: hull, dist, projZ: proj.z });
-                                } else if (hull.length === 2) {
-                                    drawables.push({ type: 'line', obj, pts: hull, dist });
-                                } else {
-                                    if (obj.userData?.forceMarker) {
-                                        drawables.push({ type: 'rect', obj, sx: pts2d[0].x, sy: pts2d[0].y, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
-                                    }
-                                }
+                                // Direct drawing of the polygon to preserve holes
+                                drawables.push({ type: 'poly', obj, pts: pts2d, dist, projZ: proj.z });
                                 return;
                             }
                         } else {
@@ -1014,11 +1004,13 @@ function setupDetailToggle() {
                             ctx.moveTo(d.pts[0].x, d.pts[0].y);
                             for (let j = 1; j < d.pts.length; j++) ctx.lineTo(d.pts[j].x, d.pts[j].y);
                             ctx.closePath();
-                            ctx.globalAlpha = Math.max(0.2, Math.min(1, 1 - (dist * 0.002)));
+                            // Removed globalAlpha scaling with distance
+                            ctx.globalAlpha = 0.8;
                             ctx.fillStyle = color;
                             ctx.fill();
                             ctx.globalAlpha = 0.6;
-                            ctx.lineWidth = Math.max(1, 2 - (dist * 0.001));
+                            // Removed lineWidth scaling with distance
+                            ctx.lineWidth = 2;
                             ctx.strokeStyle = 'rgba(0,0,0,0.6)';
                             ctx.stroke();
                             ctx.restore();
@@ -1028,14 +1020,14 @@ function setupDetailToggle() {
                             ctx.lineTo(d.pts[1].x, d.pts[1].y);
                             ctx.strokeStyle = color;
                             ctx.lineWidth = obj.userData?.lineWidth ?? 3;
-                            ctx.globalAlpha = 1 - Math.min(0.9, dist * 0.002);
+                            ctx.globalAlpha = 1; // Set to a consistent value
                             ctx.stroke();
                         } else if (d.type === 'rect') {
                             const size = d.sizePx ?? Math.max(2, Math.round(12 * (1 / Math.max(0.1, dist * 0.05))));
                             const x = (d.sx || d.sx === 0) ? d.sx : 0;
                             const y = (d.sy || d.sy === 0) ? d.sy : 0;
                             ctx.save();
-                            ctx.globalAlpha = Math.max(0.5, Math.min(1, 1 - (dist * 0.002)));
+                            ctx.globalAlpha = 0.8; // Set to a consistent value
                             ctx.fillStyle = color;
                             ctx.fillRect(x - size / 2, y - size / 2, size, size);
                             ctx.restore();
@@ -1047,7 +1039,6 @@ function setupDetailToggle() {
             };
             return api;
         }
-
 
 /* ---------- Updated scene initializers (CPU renderer) ---------- */
 
@@ -3149,6 +3140,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
