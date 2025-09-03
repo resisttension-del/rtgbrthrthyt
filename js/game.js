@@ -819,11 +819,34 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
   canvas.height = height;
   const ctx = canvas.getContext('2d');
 
-  // scratch helpers
+  // Scratch vars for projections & temp math
   const proj = new THREE.Vector3();
   const tmpPos = new THREE.Vector3();
   const tmpVec = new THREE.Vector3();
+  const tmpVec2 = new THREE.Vector3();
   const tmpMat = new THREE.Matrix4();
+  const tmpBoxCorner = new THREE.Vector3();
+
+  // helper: build convex hull (Andrew monotone chain) of 2D points
+  function convexHull(points) {
+    if (points.length <= 1) return points.slice();
+    const pts = points.slice().sort((a, b) => (a.x === b.x ? a.y - b.y : a.x - b.x));
+    const cross = (o, a, b) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+    const lower = [];
+    for (let p of pts) {
+      while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop();
+      lower.push(p);
+    }
+    const upper = [];
+    for (let i = pts.length - 1; i >= 0; i--) {
+      const p = pts[i];
+      while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop();
+      upper.push(p);
+    }
+    lower.pop();
+    upper.pop();
+    return lower.concat(upper);
+  }
 
   const api = {
     domElement: canvas,
@@ -835,33 +858,21 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
         canvas.style.height = `${h}px`;
       }
     },
-
+    // Minimal clear color support
     setClearColor(hex, alpha = 1) {
       api._clearColor = { hex, alpha };
     },
     _clearColor: { hex: 0x000000, alpha: 1 },
 
-    // controls for vertex-box rendering
-    options: {
-      useVertexBoxes: true,          // global default: render vertex boxes for meshes when possible
-      vertexSampleCap: 2000,         // max vertex boxes per object (sampling cap)
-      vertexBaseSizePx: 6,           // default box size in px (scaled with distance)
-      maxScreenSizePx: 2048          // clamp extreme screen sizes
-    },
-    setOptions(opts = {}) { Object.assign(api.options, opts); },
-
-    // max render distance (world units)
-    setMaxRenderDistance(d) { api._maxRenderDistance = Number.isFinite(d) ? d : Infinity; },
-    _maxRenderDistance: Infinity,
-
+    // Basic render: draw sprites (material.map.image) and approximated shapes for meshes
     render(scene, camera) {
-      // prepare frustum
+      // prepare camera/frustum once per-frame for accurate culling
       camera.updateMatrixWorld && camera.updateMatrixWorld();
       const projScreenMatrix = new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
       const frustum = new THREE.Frustum();
       frustum.setFromProjectionMatrix(projScreenMatrix);
 
-      // clear canvas
+      // Clear with the clear color (converted to CSS)
       const c = api._clearColor;
       const r = (c.hex >> 16) & 0xff;
       const g = (c.hex >> 8) & 0xff;
@@ -872,128 +883,82 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
       ctx.fillRect(0, 0, canvas.width, canvas.height);
       ctx.restore();
 
+      // collect drawables (so we can sort by depth)
       const drawables = [];
 
-      // helper: project a world-space vector to screen (returns null if behind clip)
-      function projectToScreen(v) {
-        proj.copy(v).project(camera);
-        if (proj.z > 1 || proj.z < -1) return null;
-        return {
-          x: (proj.x * 0.5 + 0.5) * canvas.width,
-          y: (-proj.y * 0.5 + 0.5) * canvas.height,
-          z: proj.z,
-        };
-      }
-
-      // sample vertex positions for a geometry (returns array of THREE.Vector3 world-space)
-      function sampleVertexWorldPoints(geom, worldMatrix, sampleLimit) {
-        const pts = [];
-        if (!geom || !geom.attributes || !geom.attributes.position) return pts;
-        const posAttr = geom.attributes.position;
-        const count = posAttr.count;
-        if (count === 0) return pts;
-
-        // sampling step
-        const cap = Math.max(1, Math.floor(sampleLimit || api.options.vertexSampleCap));
-        const step = Math.max(1, Math.floor(count / Math.min(count, cap)));
-
-        for (let i = 0, taken = 0; i < count && taken < cap; i += step, taken++) {
-          tmpVec.set(posAttr.getX(i), posAttr.getY(i), posAttr.getZ(i)).applyMatrix4(worldMatrix);
-          pts.push(tmpVec.clone());
-        }
-        return pts;
-      }
-
-      // scene traverse: collect vertex-box drawables (no triangles anywhere)
       scene.traverse((obj) => {
         if (!obj.visible) return;
         if (obj.isCamera || obj.isLight) return;
 
-        // compute object/world center and quick distance cull
+        // Handle InstancedMesh (optional — limited, but better than skipping)
+        if (obj.isInstancedMesh) {
+          const maxInstances = obj.userData?.instanceLimit ?? obj.count; // allow limiting in userData
+          const matrix = new THREE.Matrix4();
+          for (let i = 0; i < Math.min(maxInstances, obj.count); i++) {
+            obj.getMatrixAt(i, matrix); // local instance matrix
+            tmpMat.copy(matrix).multiply(obj.matrixWorld); // instance world matrix = obj.matrixWorld * instanceMatrix
+            tmpPos.setFromMatrixPosition(tmpMat);
+            // frustum test
+            if (!frustum.containsPoint(tmpPos) && !obj.userData?.alwaysRender) continue;
+
+            // project
+            proj.copy(tmpPos).project(camera);
+            const sx = (proj.x * 0.5 + 0.5) * canvas.width;
+            const sy = (-proj.y * 0.5 + 0.5) * canvas.height;
+            const dist = camera.position.distanceTo(tmpPos);
+            // prefer instance-specific visual if provided, otherwise fallback to obj
+            const mapImage = (obj.material && obj.material.map && obj.material.map.image) ? obj.material.map.image : null;
+            drawables.push({ type: 'inst', obj, sx, sy, dist, projZ: proj.z, mapImage, instanceMatrix: tmpMat.clone(), instanceId: i });
+          }
+          return; // continue scene traversal (don't treat instanced as normal mesh)
+        }
+
+        // World position (center)
         obj.getWorldPosition(tmpPos);
-        const center = tmpPos.clone();
-        const distToCenter = camera.position.distanceTo(center);
-        if (distToCenter > (obj.userData?.maxRenderDistance ?? api._maxRenderDistance) && !obj.userData?.alwaysRender) return;
 
-        // surface color / alpha
-        const color = obj.userData?.color || (obj.material && obj.material.color ? (obj.material.color.getStyle ? obj.material.color.getStyle() : `#${obj.material.color.getHexString()}`) : 'white');
-        const alpha = obj.userData?.opacity ?? (obj.material && typeof obj.material.opacity === 'number' ? obj.material.opacity : 1);
+        // Quick center-frustum test first (but not only test) to avoid projecting everything.
+        if (!frustum.containsPoint(tmpPos)) {
+          // if object has bounding geometry, we will test its world points below — but if no geometry and not alwaysRender, skip
+          if (!obj.geometry && !obj.userData?.alwaysRender) return;
+        }
 
-        // handle InstancedMesh: sample vertices per-instance
-        if (obj.isInstancedMesh && obj.geometry && api.options.useVertexBoxes) {
-          const geom = obj.geometry;
-          if (!geom.attributes || !geom.attributes.position) {
-            // fallback: treat instance as center marker
-            const mat = new THREE.Matrix4();
-            const instLimit = Math.min(obj.count, obj.userData?.instanceLimit || obj.count);
-            for (let i = 0; i < instLimit; i++) {
-              obj.getMatrixAt(i, mat);
-              tmpMat.copy(obj.matrixWorld).multiply(mat);
-              const worldCenter = new THREE.Vector3().setFromMatrixPosition(tmpMat);
-              const p = projectToScreen(worldCenter);
-              if (!p) continue;
-              // small marker per instance
-              drawables.push({ type: 'rect', x: p.x, y: p.y, z: p.z, size: obj.userData?.markerSizePx ?? 6, color, alpha, obj });
-            }
+        // screen coords of center (used for some fallbacks)
+        proj.copy(tmpPos).project(camera); // NDC -1..1
+        const sx = (proj.x * 0.5 + 0.5) * canvas.width;
+        const sy = (-proj.y * 0.5 + 0.5) * canvas.height;
+
+        // distance for depth sorting
+        const dist = camera.position.distanceTo(tmpPos);
+
+        // check for texture (Sprites and textured materials)
+        let mapImage = null;
+        if (obj.isSprite) {
+          // Sprites use material.map.image
+          mapImage = obj.material && obj.material.map && obj.material.map.image ? obj.material.map.image : null;
+          if (mapImage) {
+            drawables.push({ type: 'sprite', obj, sx, sy, dist, projZ: proj.z, mapImage });
             return;
           }
-
-          const instLimit = Math.min(obj.count, obj.userData?.instanceLimit || obj.count);
-          const perInstanceCap = Math.max(1, Math.floor((obj.userData?.vertexSampleLimit || api.options.vertexSampleCap) / Math.max(1, instLimit)));
-          const localCorners = []; // not used; we'll use actual vertices
-
-          for (let i = 0; i < instLimit; i++) {
-            const mat = new THREE.Matrix4();
-            obj.getMatrixAt(i, mat);
-            tmpMat.copy(obj.matrixWorld).multiply(mat); // world transform for instance
-            // sample vertices (transformed by the instance world matrix)
-            const worldPts = sampleVertexWorldPoints(obj.geometry, tmpMat, perInstanceCap);
-            if (worldPts.length === 0) continue;
-            for (let wp of worldPts) {
-              const ps = projectToScreen(wp);
-              if (!ps) continue;
-              // size scaling: user override, else based on distance to camera
-              const base = obj.userData?.vertexBoxSizePx ?? api.options.vertexBaseSizePx;
-              // distance = world distance from camera to wp
-              const d = camera.position.distanceTo(wp);
-              const size = Math.max(1, Math.min(obj.userData?.maxScreenSizePx ?? api.options.maxScreenSizePx, Math.round(base * (1 / Math.max(0.05, d * 0.025)))));
-              drawables.push({ type: 'vbox', x: ps.x, y: ps.y, z: ps.z, size, color, alpha, obj });
-            }
+        } else {
+          mapImage = obj.material && obj.material.map && obj.material.map.image ? obj.material.map.image : null;
+          if (mapImage) {
+            drawables.push({ type: 'image', obj, sx, sy, dist, projZ: proj.z, mapImage });
+            return;
           }
-          return;
         }
 
-        // non-instanced meshes
-        if (obj.isMesh && obj.geometry && api.options.useVertexBoxes && ((obj.userData?.useVertexBoxes !== undefined) ? obj.userData.useVertexBoxes : true)) {
+        // If mesh with geometry, compute accurate world-space sample points (boundingBox preferred)
+        if (obj.isMesh && obj.geometry) {
           const geom = obj.geometry;
-          // world matrix for object
-          const worldM = obj.matrixWorld;
-          const sampleLimit = obj.userData?.vertexSampleLimit ?? api.options.vertexSampleCap;
-          const worldPts = sampleVertexWorldPoints(geom, worldM, sampleLimit);
-          if (worldPts.length === 0) return;
+          if (!geom.boundingBox) geom.computeBoundingBox && geom.computeBoundingBox();
+          if (!geom.boundingSphere) geom.computeBoundingSphere && geom.computeBoundingSphere();
 
-          for (let wp of worldPts) {
-            // distance cull per-vertex (in case vertices are far)
-            const d = camera.position.distanceTo(wp);
-            if (d > (obj.userData?.maxRenderDistance ?? api._maxRenderDistance) && !obj.userData?.alwaysRender) continue;
-            const p = projectToScreen(wp);
-            if (!p) continue;
-            const base = obj.userData?.vertexBoxSizePx ?? api.options.vertexBaseSizePx;
-            const size = Math.max(1, Math.min(obj.userData?.maxScreenSizePx ?? api.options.maxScreenSizePx, Math.round(base * (1 / Math.max(0.05, d * 0.025)))));
-            drawables.push({ type: 'vbox', x: p.x, y: p.y, z: p.z, size, color, alpha, obj });
-          }
-          return;
-        }
-
-        // if not using vertex boxes (or mesh lacks positions), fallback to previous image/polygon/marker behaviour
-        // TEXTURED SPRITES / MESHES: draw projected image rect if texture present and user didn't request vertex boxes
-        const mapImage = obj.material && obj.material.map && obj.material.map.image ? obj.material.map.image : null;
-        if (mapImage) {
-          // compute projected rectangle using bounding box or center
-          let sampleWorldPts = [];
-          if (obj.geometry && obj.geometry.boundingBox) {
-            const bb = obj.geometry.boundingBox;
-            const min = bb.min, max = bb.max;
+          const worldPoints = [];
+          if (geom.boundingBox) {
+            const bb = geom.boundingBox;
+            const min = bb.min;
+            const max = bb.max;
+            // corners in local space
             const corners = [
               [min.x, min.y, min.z],
               [min.x, min.y, max.z],
@@ -1004,88 +969,184 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
               [max.x, max.y, min.z],
               [max.x, max.y, max.z],
             ];
-            for (let c of corners) sampleWorldPts.push(tmpVec.set(c[0], c[1], c[2]).applyMatrix4(obj.matrixWorld).clone());
+            for (let c of corners) {
+              tmpVec.set(c[0], c[1], c[2]).applyMatrix4(obj.matrixWorld);
+              worldPoints.push(tmpVec.clone());
+            }
+          } else if (geom.boundingSphere) {
+            const bs = geom.boundingSphere;
+            const center = bs.center.clone().applyMatrix4(obj.matrixWorld);
+            // scale radius properly using object's matrixWorld scale
+            const scale = obj.matrixWorld.getMaxScaleOnAxis ? obj.matrixWorld.getMaxScaleOnAxis() : 1;
+            const r = bs.radius * scale;
+            worldPoints.push(center.clone());
+            worldPoints.push(center.clone().add(new THREE.Vector3(r, 0, 0)));
+            worldPoints.push(center.clone().add(new THREE.Vector3(-r, 0, 0)));
+            worldPoints.push(center.clone().add(new THREE.Vector3(0, r, 0)));
+            worldPoints.push(center.clone().add(new THREE.Vector3(0, -r, 0)));
+            worldPoints.push(center.clone().add(new THREE.Vector3(0, 0, r)));
+            worldPoints.push(center.clone().add(new THREE.Vector3(0, 0, -r)));
           } else {
-            obj.getWorldPosition(tmpPos);
-            sampleWorldPts.push(tmpPos.clone());
+            const posAttr = geom.attributes && geom.attributes.position;
+            if (posAttr && posAttr.count > 0) {
+              // sample up to 12 positions evenly across the position attribute
+              const step = Math.max(1, Math.floor(posAttr.count / 12));
+              for (let i = 0; i < Math.min(posAttr.count, 12 * step); i += step) {
+                tmpVec.set(
+                  posAttr.getX(i),
+                  posAttr.getY(i),
+                  posAttr.getZ(i)
+                ).applyMatrix4(obj.matrixWorld);
+                worldPoints.push(tmpVec.clone());
+              }
+            } else {
+              worldPoints.push(tmpPos.clone());
+            }
           }
 
-          // project sample pts
-          const projPts = [];
-          for (let wp of sampleWorldPts) {
-            const p = projectToScreen(wp);
-            if (p) projPts.push(p);
+          // project worldPoints to screen-space 2D points and do frustum test using frustum.containsPoint
+          const pts2d = [];
+          let anyVisible = false;
+          for (let wp of worldPoints) {
+            if (frustum.containsPoint(wp)) anyVisible = true;
+            proj.copy(wp).project(camera);
+            // skip very far off points (outside clip)
+            if (proj.z > 1 || proj.z < -1) continue;
+            const px = (proj.x * 0.5 + 0.5) * canvas.width;
+            const py = (-proj.y * 0.5 + 0.5) * canvas.height;
+            pts2d.push({ x: px, y: py });
           }
-          if (projPts.length === 0) return;
-          let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, avgZ = 0;
-          for (let p of projPts) { minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x); minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y); avgZ += p.z; }
-          avgZ /= projPts.length;
-          drawables.push({ type: 'imageRect', rect: { minX, minY, width: maxX - minX, height: maxY - minY, avgZ }, mapImage, color, alpha, obj });
-          return;
+
+          // if none of the sampled points project on-screen, skip unless object forces marker
+          if (pts2d.length === 0) {
+            if (obj.userData?.forceMarker) {
+              drawables.push({ type: 'rect', obj, sx, sy, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
+            }
+            return;
+          } else {
+            const hull = convexHull(pts2d);
+            if (hull.length >= 3) {
+              drawables.push({ type: 'poly', obj, pts: hull, dist, projZ: proj.z });
+            } else if (hull.length === 2) {
+              drawables.push({ type: 'line', obj, pts: hull, dist });
+            } else {
+              // single point fallback: draw marker if forced
+              if (obj.userData?.forceMarker) {
+                drawables.push({ type: 'rect', obj, sx: pts2d[0].x, sy: pts2d[0].y, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
+              } else {
+                // otherwise draw a small hull point (use hull as 1-pt polygon) to help accuracy
+                drawables.push({ type: 'rect', obj, sx: pts2d[0].x, sy: pts2d[0].y, dist, sizePx: Math.max(3, 8 - Math.floor(dist * 0.01)) });
+              }
+            }
+            return;
+          }
         }
 
-        // fallback: center marker
-        const pc = projectToScreen(center);
-        if (!pc) return;
-        drawables.push({ type: 'rect', x: pc.x, y: pc.y, z: pc.z, size: obj.userData?.markerSizePx ?? 6, color, alpha, obj });
+        // fallback: unknown object type -> draw marker if requested
+        if (obj.userData?.forceMarker) {
+          drawables.push({ type: 'rect', obj, sx, sy, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
+        }
       });
 
-      // depth sort by projected z (far -> near)
-      drawables.sort((a, b) => {
-        const za = (typeof a.z === 'number') ? a.z : (a.rect ? a.rect.avgZ : 0);
-        const zb = (typeof b.z === 'number') ? b.z : (b.rect ? b.rect.avgZ : 0);
-        return zb - za;
-      });
+      // Painter's order: furthest first (larger distance)
+      drawables.sort((a, b) => b.dist - a.dist);
 
-      // draw loop (only vbox, imageRect, rect)
-      for (let d of drawables) {
-        if (d.type === 'vbox') {
-          ctx.save();
-          ctx.globalAlpha = Math.max(0.05, Math.min(1, d.alpha));
-          ctx.fillStyle = d.color;
-          // axis-aligned rectangle centered at (x,y)
-          const s = d.size;
-          // optionally, draw as filled rect or outline depending on user preference
-          if (d.obj.userData?.vertexBoxOutline) {
-            ctx.lineWidth = d.obj.userData?.vertexBoxOutlineWidth ?? 1;
-            ctx.strokeStyle = d.color;
-            ctx.strokeRect(d.x - s / 2, d.y - s / 2, s, s);
+      // draw
+      for (let i = 0; i < drawables.length; i++) {
+        const d = drawables[i];
+        const { obj, dist } = d;
+
+        // common color selection (respect material.color when available)
+        let color = obj.userData?.color;
+        if (!color && obj.material && obj.material.color) {
+          try {
+            color = obj.material.color.getStyle ? obj.material.color.getStyle() : (`#${obj.material.color.getHexString()}`);
+          } catch (e) {
+            color = obj.userData?.color || 'white';
+          }
+        }
+        color = color || obj.userData?.color || 'white';
+
+        // get effective alpha (respect material.transparent & material.opacity)
+        const effectiveAlpha = (obj.userData?.opacity ?? (obj.material && typeof obj.material.opacity !== 'undefined' ? obj.material.opacity : 1));
+
+        if ((d.type === 'image' || d.type === 'sprite' || d.type === 'inst') && d.mapImage && d.mapImage.width) {
+          let size;
+          // for instanced meshes we might not have geometry bounding box computed the way we want,
+          // so fall back to a size derived from distance for those.
+          if (obj.geometry && obj.geometry.boundingBox && d.type !== 'inst') {
+            const bb = obj.geometry.boundingBox;
+            const corners = [
+              [bb.min.x, bb.min.y, bb.min.z],
+              [bb.max.x, bb.max.y, bb.max.z]
+            ];
+            const screenPts = [];
+            for (let c of corners) {
+              tmpVec.set(c[0], c[1], c[2]).applyMatrix4(obj.matrixWorld);
+              const p = tmpVec.project(camera);
+              screenPts.push({ x: (p.x * 0.5 + 0.5) * canvas.width, y: (-p.y * 0.5 + 0.5) * canvas.height });
+            }
+            const wPx = Math.abs(screenPts[0].x - screenPts[1].x);
+            const hPx = Math.abs(screenPts[0].y - screenPts[1].y);
+            size = Math.max(8, obj.userData?.sizePx ?? Math.max(wPx, hPx, 32));
           } else {
-            ctx.fillRect(d.x - s / 2, d.y - s / 2, s, s);
+            const baseSize = obj.userData?.sizePx ?? 300;
+            size = Math.max(8, baseSize * (1 / Math.max(0.1, dist * 0.05)));
+          }
+          ctx.save();
+          ctx.translate(d.sx, d.sy);
+          const rot = obj.userData?.rotation ?? (obj.rotation?.z ?? 0);
+          if (rot) ctx.rotate(rot);
+          ctx.globalAlpha = effectiveAlpha;
+          // If sprite, optionally scale by sprite.scale if available
+          if (d.type === 'sprite' && obj.scale) {
+            const scaleFactor = Math.max(0.1, (obj.scale.x + obj.scale.y) / 2);
+            ctx.drawImage(d.mapImage, -size / 2 * scaleFactor, -size / 2 * scaleFactor, size * scaleFactor, size * scaleFactor);
+          } else {
+            ctx.drawImage(d.mapImage, -size / 2, -size / 2, size, size);
           }
           ctx.restore();
-          continue;
-        }
-
-        if (d.type === 'imageRect' && d.mapImage) {
+        } else if (d.type === 'poly' && d.pts) {
           ctx.save();
-          ctx.globalAlpha = Math.max(0, Math.min(1, d.alpha));
-          let w = Math.max(1, d.rect.width), h = Math.max(1, d.rect.height);
-          const maxScreen = Math.max(256, Math.min(8192, d.obj.userData?.maxScreenSizePx ?? api.options.maxScreenSizePx));
-          if (w > maxScreen || h > maxScreen) {
-            const sc = maxScreen / Math.max(w, h);
-            w *= sc; h *= sc;
-          }
-          ctx.drawImage(d.mapImage, d.rect.minX, d.rect.minY, w, h);
+          ctx.beginPath();
+          ctx.moveTo(d.pts[0].x, d.pts[0].y);
+          for (let j = 1; j < d.pts.length; j++) ctx.lineTo(d.pts[j].x, d.pts[j].y);
+          ctx.closePath();
+          ctx.globalAlpha = Math.max(0.2, Math.min(1, (effectiveAlpha * (1 - (dist * 0.002)))));
+          ctx.fillStyle = color;
+          ctx.fill();
+          ctx.globalAlpha = Math.min(0.9, effectiveAlpha * 0.6);
+          ctx.lineWidth = Math.max(1, 2 - (dist * 0.001));
+          ctx.strokeStyle = 'rgba(0,0,0,0.6)';
+          ctx.stroke();
           ctx.restore();
-          continue;
-        }
-
-        if (d.type === 'rect') {
+        } else if (d.type === 'line' && d.pts && d.pts.length === 2) {
+          ctx.beginPath();
+          ctx.moveTo(d.pts[0].x, d.pts[0].y);
+          ctx.lineTo(d.pts[1].x, d.pts[1].y);
+          ctx.strokeStyle = color;
+          ctx.lineWidth = obj.userData?.lineWidth ?? 3;
+          ctx.globalAlpha = Math.max(0.1, effectiveAlpha * (1 - Math.min(0.9, dist * 0.002)));
+          ctx.stroke();
+        } else if (d.type === 'rect') {
+          // small centered rectangle marker
+          const size = d.sizePx ?? Math.max(2, Math.round(12 * (1 / Math.max(0.1, dist * 0.05))));
+          const x = (d.sx || d.sx === 0) ? d.sx : 0;
+          const y = (d.sy || d.sy === 0) ? d.sy : 0;
           ctx.save();
-          ctx.globalAlpha = Math.max(0.05, Math.min(1, d.alpha));
-          ctx.fillStyle = d.color;
-          const s = d.size;
-          ctx.fillRect(d.x - s / 2, d.y - s / 2, s, s);
+          ctx.globalAlpha = Math.max(0.15, Math.min(1, effectiveAlpha * (1 - (dist * 0.001))));
+          ctx.fillStyle = color;
+          ctx.fillRect(x - size / 2, y - size / 2, size, size);
           ctx.restore();
+        } else {
+          // intentionally no automatic sphere/arc drawing — keep visualizations focused and accurate.
         }
       }
-    } // render end
-  }; // api end
+    }
+  };
 
   return api;
 }
-
 
 
 /* ---------- Updated scene initializers (CPU renderer) ---------- */
@@ -3188,9 +3249,6 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
-
-
-
 
 
 
