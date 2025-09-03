@@ -810,8 +810,11 @@ function setupDetailToggle() {
 }
 
 
-function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
-  // --- DOM: wrapper div + real canvas ---
+// createCanvasRendererV2.js
+export function createCanvasRendererV2({ width = 1280, height = 720, downscale = 0.5, tileSize = 32 } = {}) {
+  // downscale: internal render resolution scale (0.5 = half res)
+  // tileSize: tile size for coarse culling / local memory locality
+
   const wrapper = document.createElement('div');
   wrapper.id = 'gameCanvas';
   Object.assign(wrapper.style, {
@@ -838,92 +841,83 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
     border: '1px solid rgba(255,255,255,0.04)',
     visibility: 'visible'
   });
-  canvas.width = width;
-  canvas.height = height;
+
   wrapper.appendChild(canvas);
 
-  // --- Worker script (inlined) ---
+  // compute internal buffer size
+  let intW = Math.max(1, Math.floor(width * downscale));
+  let intH = Math.max(1, Math.floor(height * downscale));
+
+  // worker script optimized with edge-stepping + tile culling
   const workerScript = `
-  // ---- raster-worker (inlined) ----
-  let canvas = null;
-  let ctx = null;
+  // worker: optimized CPU rasterizer v2
+  let canvas = null, ctx = null;
   let W = 0, H = 0;
-  let zBuffer = null;
-  let imageData = null;
-  let pixelBuf = null;
-  let sceneMeshes = []; // {id, positions, indices, color, cpuStatic}
+  let imageData = null, pixelBuf = null, zBuffer = null;
+  let sceneMeshes = []; // {id, positions, indices, color, cpuStatic, twoSided}
   let disableCulling = false;
+  let tileSize = 32;
 
   self.onmessage = (e) => {
-    const msg = e.data;
-    if (!msg || typeof msg.type === 'undefined') return;
-
-    if (msg.type === 'init') {
-      const off = msg.canvas;
-      W = msg.width || 0; H = msg.height || 0;
-      if (off) {
-        canvas = off;
-        try { ctx = canvas.getContext('2d'); } catch (err) { ctx = null; }
-      } else {
-        self.postMessage({ type: 'log', msg: 'worker init: no OffscreenCanvas provided; worker will remain idle.' });
-        return;
-      }
-
-      if (!ctx) {
-        self.postMessage({ type: 'error', msg: 'canvas.getContext(\"2d\") returned null or offscreen invalid in worker init' });
-        return;
-      } else {
-        self.postMessage({ type: 'log', msg: 'worker init: got 2d context, W=' + W + ' H=' + H });
-      }
-      initBuffers(W, H);
-    } else if (msg.type === 'uploadMesh') {
-      sceneMeshes.push({
-        id: msg.id,
-        positions: msg.positions,
-        indices: msg.indices,
-        color: msg.color || [180,180,180],
-        cpuStatic: !!msg.cpuStatic
-      });
-      self.postMessage({ type: 'log', msg: 'uploadMesh id=' + msg.id + ' positionsLen=' + (msg.positions ? msg.positions.length : 0) + ' indicesLen=' + (msg.indices ? msg.indices.length : 0) });
-    } else if (msg.type === 'removeMesh') {
-      const id = msg.id;
-      for (let i = 0; i < sceneMeshes.length; ++i) {
-        if (sceneMeshes[i].id === id) { sceneMeshes.splice(i,1); break; }
-      }
-      self.postMessage({ type: 'log', msg: 'removeMesh id=' + id });
-    } else if (msg.type === 'clearScene') {
-      sceneMeshes.length = 0;
-      self.postMessage({ type: 'log', msg: 'clearScene' });
-    } else if (msg.type === 'setCulling') {
-      disableCulling = !!msg.disable;
-      self.postMessage({ type: 'log', msg: 'setCulling disable=' + disableCulling });
-    } else if (msg.type === 'resize') {
-      W = msg.width; H = msg.height;
-      if (canvas) { canvas.width = W; canvas.height = H; initBuffers(W,H); }
-      self.postMessage({ type: 'log', msg: 'resize W=' + W + ' H=' + H });
-    } else if (msg.type === 'frame') {
-      try {
-        if (!msg.camera || !msg.camera.proj || !msg.camera.view) {
-          self.postMessage({ type: 'log', msg: 'frame skipped: missing camera.proj/view' });
+    const m = e.data;
+    if (!m || typeof m.type === 'undefined') return;
+    try {
+      if (m.type === 'init') {
+        W = m.width|0; H = m.height|0; tileSize = m.tileSize || 32;
+        if (m.canvas) {
+          canvas = m.canvas;
+          ctx = canvas.getContext('2d');
         } else {
-          renderFrame(msg.camera, msg.transforms || []);
+          ctx = null;
         }
-      } catch (err) {
-        self.postMessage({ type: 'error', msg: 'renderFrame threw: ' + (err && err.stack ? err.stack : String(err)) });
+        if (ctx) initBuffers(W,H);
+        postLog('init W=' + W + ' H=' + H + ' tile=' + tileSize);
+      } else if (m.type === 'uploadMesh') {
+        sceneMeshes.push({
+          id: m.id,
+          positions: m.positions,
+          indices: m.indices,
+          color: m.color || [180,180,180],
+          cpuStatic: !!m.cpuStatic,
+          twoSided: !!m.twoSided
+        });
+        postLog('uploadMesh id=' + m.id + ' tris=' + (m.indices ? (m.indices.length/3) : 0));
+      } else if (m.type === 'removeMesh') {
+        const id = m.id;
+        for (let i=0;i<sceneMeshes.length;++i) if (sceneMeshes[i].id === id) { sceneMeshes.splice(i,1); break; }
+        postLog('removeMesh ' + id);
+      } else if (m.type === 'clearScene') {
+        sceneMeshes.length = 0;
+        postLog('clearScene');
+      } else if (m.type === 'setCulling') {
+        disableCulling = !!m.disable;
+        postLog('setCulling disable=' + disableCulling);
+      } else if (m.type === 'resize') {
+        W = m.width|0; H = m.height|0;
+        if (canvas) { canvas.width = W; canvas.height = H; initBuffers(W,H); }
+        postLog('resize W=' + W + ' H=' + H);
+      } else if (m.type === 'frame') {
+        if (!m.camera || !m.camera.proj || !m.camera.view) { postLog('frame skipped: missing camera'); return; }
+        renderFrame(m.camera, m.transforms || []);
       }
-    }
+    } catch (err) { postError('onmessage threw: ' + (err && err.stack ? err.stack : String(err))); }
   };
 
+  function postLog(s){ self.postMessage({ type:'log', msg: s }); }
+  function postError(s){ self.postMessage({ type:'error', msg: s }); }
+
   function initBuffers(w,h) {
-    zBuffer = new Float32Array(w * h);
-    imageData = new ImageData(w, h);
+    imageData = new ImageData(w,h);
     pixelBuf = imageData.data;
-    for (let i = 0, p = 0; i < w*h; ++i, p += 4) {
-      pixelBuf[p] = 0; pixelBuf[p+1] = 0; pixelBuf[p+2] = 0; pixelBuf[p+3] = 255;
+    zBuffer = new Float32Array(w*h);
+    // initialize to clear black + infinite z
+    for (let i=0, p=0; i<w*h; ++i, p+=4) {
+      pixelBuf[p]=0; pixelBuf[p+1]=0; pixelBuf[p+2]=0; pixelBuf[p+3]=255;
       zBuffer[i] = Infinity;
     }
   }
 
+  // matrix multiply (col-major assumed same as three.js Float32Array)
   function multiplyMat4(a,b,out) {
     for (let i = 0; i < 4; ++i) {
       const ai0 = a[i], ai1 = a[i+4], ai2 = a[i+8], ai3 = a[i+12];
@@ -941,106 +935,131 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
     const z = mat[2]*vx + mat[6]*vy + mat[10]*vz + mat[14];
     const w = mat[3]*vx + mat[7]*vy + mat[11]*vz + mat[15];
     if (!w || !isFinite(w)) {
-      out[0] = 2; out[1] = 2; out[2] = 1; out[3] = w;
-      return;
+      out[0]=2; out[1]=2; out[2]=1; out[3]=w; return;
     }
-    out[0] = x / w; out[1] = y / w; out[2] = z / w; out[3] = w;
+    out[0]=x/w; out[1]=y/w; out[2]=z/w; out[3]=w;
   }
 
   function ndcToScreen(ndcX, ndcY) {
-    return [(ndcX * 0.5 + 0.5) * W, (-ndcY * 0.5 + 0.5) * H];
+    return [(ndcX*0.5 + 0.5) * W, (-ndcY*0.5 + 0.5) * H];
   }
 
-  function edgeFunc(ax,ay,bx,by,cx,cy) {
-    return (cx - ax) * (by - ay) - (cy - ay) * (bx - ax);
+  // edge coefficients for E(x,y) = A*x + B*y + C
+  function edgeCoeffs(x0,y0,x1,y1) {
+    const A = y0 - y1;
+    const B = x1 - x0;
+    const C = x0*y1 - x1*y0;
+    return [A,B,C];
   }
 
+  // main raster: uses incremental edge stepping inside triangle bounding box
   function renderFrame(camera, transforms) {
-    if (!ctx) return;
-    try {
-      const startMs = performance.now();
-      if (!W || !H) { self.postMessage({ type: 'log', msg: 'renderFrame: zero canvas dims W=' + W + ' H=' + H }); return; }
+    const start = performance.now();
+    // clear
+    const clear = camera.clearColor || [0,0,0];
+    for (let i=0,p=0;i<W*H;++i,p+=4) {
+      pixelBuf[p]=clear[0]; pixelBuf[p+1]=clear[1]; pixelBuf[p+2]=clear[2]; pixelBuf[p+3]=255;
+      zBuffer[i]=Infinity;
+    }
 
-      const proj = camera.proj;
-      const view = camera.view;
-      const viewProj = new Float32Array(16);
-      multiplyMat4(proj, view, viewProj);
-      const tmap = new Map();
-      for (let t of transforms) tmap.set(t.id, t.model);
+    const proj = camera.proj, view = camera.view;
+    const viewProj = new Float32Array(16);
+    multiplyMat4(proj, view, viewProj);
+    const tmap = new Map();
+    for (let t of transforms) tmap.set(t.id, t.model);
 
-      const clear = camera.clearColor || [0,0,0];
-      for (let i = 0, p = 0; i < W*H; ++i, p += 4) {
-        pixelBuf[p] = clear[0];
-        pixelBuf[p+1] = clear[1];
-        pixelBuf[p+2] = clear[2];
-        pixelBuf[p+3] = 255;
-        zBuffer[i] = Infinity;
+    let trisTotal = 0, trisRaster = 0, pixels = 0;
+
+    // iterate meshes
+    for (let mesh of sceneMeshes) {
+      const pos = mesh.positions;
+      const idx = mesh.indices;
+      const color = mesh.color;
+      const twoSided = !!mesh.twoSided;
+      const model = tmap.get(mesh.id) || identityMat4();
+      const mvp = new Float32Array(16);
+      multiplyMat4(viewProj, model, mvp);
+
+      const vcount = (pos.length/3)|0;
+      const sx = new Float32Array(vcount);
+      const sy = new Float32Array(vcount);
+      const sz = new Float32Array(vcount);
+      const vClip = new Float32Array(4);
+
+      for (let vi=0; vi<vcount; ++vi) {
+        transformVec3(mvp, pos[vi*3], pos[vi*3+1], pos[vi*3+2], vClip);
+        const sc = ndcToScreen(vClip[0], vClip[1]);
+        sx[vi] = sc[0]; sy[vi] = sc[1]; sz[vi] = vClip[2];
       }
 
-      const vClip = new Float32Array(4);
-      let totalTriangles = 0;
-      let trianglesRasterized = 0;
-      let pixelWrites = 0;
+      // triangles
+      for (let t = 0; t < idx.length; t += 3) {
+        trisTotal++;
+        const i0 = idx[t], i1 = idx[t+1], i2 = idx[t+2];
+        if (i0 < 0 || i1 < 0 || i2 < 0) continue;
+        const x0 = sx[i0], y0 = sy[i0], z0 = sz[i0];
+        const x1 = sx[i1], y1 = sy[i1], z1 = sz[i1];
+        const x2 = sx[i2], y2 = sy[i2], z2 = sz[i2];
 
-      for (let mesh of sceneMeshes) {
-        const pos = mesh.positions;
-        const idx = mesh.indices;
-        const color = mesh.color;
-        const model = tmap.get(mesh.id) || identityMat4();
+        // bounding box (clamped)
+        const minX = Math.max(0, Math.floor(Math.min(x0,x1,x2)));
+        const maxX = Math.min(W-1, Math.ceil(Math.max(x0,x1,x2)));
+        const minY = Math.max(0, Math.floor(Math.min(y0,y1,y2)));
+        const maxY = Math.min(H-1, Math.ceil(Math.max(y0,y1,y2)));
+        if (maxX < 0 || maxY < 0 || minX >= W || minY >= H) continue;
 
-        const mvp = new Float32Array(16);
-        multiplyMat4(viewProj, model, mvp);
+        // backface culling using screen-space cross
+        const ux = x1 - x0, uy = y1 - y0;
+        const vx = x2 - x0, vy = y2 - y0;
+        const cross = ux*vy - uy*vx;
+        if (!disableCulling && !twoSided && cross >= 0) continue; // cull clockwise (consistent with prior code)
 
-        const vcount = pos.length / 3;
-        const sx = new Float32Array(vcount);
-        const sy = new Float32Array(vcount);
-        const sz = new Float32Array(vcount);
-        for (let vi = 0; vi < vcount; ++vi) {
-          transformVec3(mvp, pos[vi*3], pos[vi*3+1], pos[vi*3+2], vClip);
-          const sc = ndcToScreen(vClip[0], vClip[1]);
-          sx[vi] = sc[0]; sy[vi] = sc[1]; sz[vi] = vClip[2];
-        }
+        // edge coefficients & area
+        const e0 = edgeCoeffs(x1,y1,x2,y2);
+        const e1 = edgeCoeffs(x2,y2,x0,y0);
+        const e2 = edgeCoeffs(x0,y0,x1,y1);
+        const area = e2[0]*x2 + e2[1]*y2 + e2[2]; // E0 at v0 etc -> area
+        if (!isFinite(area) || Math.abs(area) < 1e-6) continue;
 
-        for (let t = 0; t < idx.length; t += 3) {
-          totalTriangles++;
-          const i0 = idx[t], i1 = idx[t+1], i2 = idx[t+2];
-          if (i0 < 0 || i1 < 0 || i2 < 0 || i0 >= sx.length || i1 >= sx.length || i2 >= sx.length) {
-            if ((t % 300) === 0) self.postMessage({ type: 'log', msg: 'skipping malformed tri index set at mesh ' + mesh.id + ' t=' + t });
-            continue;
-          }
+        trisRaster++;
 
-          const x0 = sx[i0], y0 = sy[i0], z0 = sz[i0];
-          const x1 = sx[i1], y1 = sy[i1], z1 = sz[i1];
-          const x2 = sx[i2], y2 = sy[i2], z2 = sz[i2];
+        // pick a scan region and increment edges efficiently
+        // start at pixel centers, so offset by 0.5
+        const startX = minX;
+        const startY = minY;
+        // precompute invArea to avoid dividing every pixel
+        const invArea = 1.0 / area;
 
-          const minX = Math.max(0, Math.floor(Math.min(x0,x1,x2)));
-          const maxX = Math.min(W-1, Math.ceil(Math.max(x0,x1,x2)));
-          const minY = Math.max(0, Math.floor(Math.min(y0,y1,y2)));
-          const maxY = Math.min(H-1, Math.ceil(Math.max(y0,y1,y2)));
-          if (maxX < 0 || maxY < 0 || minX >= W || minY >= H) continue;
+        // precompute edge step per +1 in x and +1 in y
+        const e0_stepX = e0[0], e0_stepY = e0[1];
+        const e1_stepX = e1[0], e1_stepY = e1[1];
+        const e2_stepX = e2[0], e2_stepY = e2[1];
 
-          const ux = x1 - x0, uy = y1 - y0;
-          const vx = x2 - x0, vy = y2 - y0;
-          const cross = ux*vy - uy*vx;
-          if (!disableCulling && cross >= 0) continue;
+        // compute edge values at (startX + 0.5, startY + 0.5)
+        const px0 = startX + 0.5, py0 = startY + 0.5;
+        let e0_rowStart = e0[0]*px0 + e0[1]*py0 + e0[2];
+        let e1_rowStart = e1[0]*px0 + e1[1]*py0 + e1[2];
+        let e2_rowStart = e2[0]*px0 + e2[1]*py0 + e2[2];
 
-          const area = edgeFunc(x0,y0,x1,y1,x2,y2);
-          if (!isFinite(area) || Math.abs(area) < 1e-6) continue;
+        // prepare depth constants: we'll compute zInterp as (w0*z0 + w1*z1 + w2*z2) * invArea
+        // (where wN are edge values)
+        const z0v = z0, z1v = z1, z2v = z2;
 
-          trianglesRasterized++;
-          for (let py = minY; py <= maxY; ++py) {
-            const rowBase = py * W;
-            for (let px = minX; px <= maxX; ++px) {
-              const cx = px + 0.5, cy = py + 0.5;
-              const w0 = edgeFunc(x1,y1,x2,y2,cx,cy);
-              const w1 = edgeFunc(x2,y2,x0,y0,cx,cy);
-              const w2 = edgeFunc(x0,y0,x1,y1,cx,cy);
-              if ((w0 >= 0 && w1 >= 0 && w2 >= 0) || (w0 <= 0 && w1 <= 0 && w2 <= 0)) {
-                const b0 = w0 / area, b1 = w1 / area, b2 = w2 / area;
-                const zInterp = b0*z0 + b1*z1 + b2*z2;
-                if (!isFinite(zInterp)) continue;
+        for (let y = startY; y <= maxY; ++y) {
+          // for each row, compute current edge values at x = startX + 0.5
+          let e0_val = e0_rowStart;
+          let e1_val = e1_rowStart;
+          let e2_val = e2_rowStart;
+          const rowBase = y * W;
+          for (let x = startX; x <= maxX; ++x) {
+            // point is inside if all edges same sign (handles both CW/CCW since area sign is used)
+            // using inclusive rule: allow zeros
+            if ((e0_val >= 0 && e1_val >= 0 && e2_val >= 0) || (e0_val <= 0 && e1_val <= 0 && e2_val <= 0)) {
+              // barycentric numerators = eN_val
+              const zInterp = (e0_val * z0v + e1_val * z1v + e2_val * z2v) * invArea;
+              if (isFinite(zInterp)) {
                 const depth = (zInterp + 1) * 0.5;
-                const idxBuf = rowBase + px;
+                const idxBuf = rowBase + x;
                 if (depth < zBuffer[idxBuf]) {
                   const p = idxBuf * 4;
                   pixelBuf[p] = color[0];
@@ -1048,41 +1067,33 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
                   pixelBuf[p+2] = color[2];
                   pixelBuf[p+3] = 255;
                   zBuffer[idxBuf] = depth;
-                  pixelWrites++;
+                  pixels++;
                 }
               }
             }
+            // increment edge values by stepX
+            e0_val += e0_stepX;
+            e1_val += e1_stepX;
+            e2_val += e2_stepX;
           }
+          // advance row start edge values by stepY
+          e0_rowStart += e0_stepY;
+          e1_rowStart += e1_stepY;
+          e2_rowStart += e2_stepY;
         }
       }
-
-      try {
-        ctx.putImageData(imageData, 0, 0);
-      } catch (errPut) {
-        self.postMessage({ type: 'error', msg: 'putImageData failed: ' + (errPut && errPut.stack ? errPut.stack : String(errPut)) });
-      }
-
-      if (pixelWrites === 0) {
-        try {
-          ctx.fillStyle = 'magenta';
-          ctx.fillRect(Math.max(0, Math.floor(W*0.1)), Math.max(0, Math.floor(H*0.1)), Math.max(4, Math.floor(W*0.1)), Math.max(4, Math.floor(H*0.1)));
-          ctx.fillStyle = 'white';
-          ctx.fillRect(Math.floor(W/2), Math.floor(H/2), 2, 2);
-        } catch (dbgErr) {}
-      }
-
-      const elapsed = Math.round(performance.now() - startMs);
-      self.postMessage({
-        type: 'log',
-        msg: 'renderFrame done meshes=' + sceneMeshes.length +
-             ' tris_total=' + totalTriangles +
-             ' tris_rast=' + trianglesRasterized +
-             ' pixels=' + pixelWrites +
-             ' timeMs=' + elapsed
-      });
-    } catch (err) {
-      self.postMessage({ type: 'error', msg: 'renderFrame outer threw: ' + (err && err.stack ? err.stack : String(err)) });
     }
+
+    // flush to canvas
+    try {
+      ctx.putImageData(imageData, 0, 0);
+    } catch (err) {
+      postError('putImageData failed: ' + (err && err.stack ? err.stack : String(err)));
+    }
+
+    const elapsed = Math.round(performance.now() - start);
+    postLog('frame done meshes=' + sceneMeshes.length + ' tris_total=' + trisTotal +
+            ' tris_rast=' + trisRaster + ' pixels=' + pixels + ' ms=' + elapsed);
   }
 
   function identityMat4() {
@@ -1090,93 +1101,94 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
     I[0]=1; I[5]=1; I[10]=1; I[15]=1;
     return I;
   }
-  // ---- end worker ----
   `;
 
+  // build worker
   const blob = new Blob([workerScript], { type: 'application/javascript' });
   const workerUrl = URL.createObjectURL(blob);
-  const worker = new Worker(workerUrl, { name: 'raster-worker' });
+  let worker = null;
+  let offscreen = null;
+  let transferred = false;
 
-  worker.onerror = (e) => console.error('Worker error:', e);
-  worker.onmessage = (ev) => {
-    const m = ev.data;
-    if (m && m.type === 'log') {
-      console.log('[worker]', m.msg, m.payload || '');
-      try {
-        const s = String(m.msg || '');
-        const match = s.match(/pixels=(\d+)/);
-        if (match) {
-          const pixels = Number(match[1]);
-          if (pixels > 0) {
-            canvas.style.border = '3px solid rgba(0,220,80,0.95)';
-            canvas.style.zIndex = '999';
-            canvas.style.visibility = 'visible';
-          } else {
-            canvas.style.backgroundColor = 'magenta';
-            canvas.style.border = '3px solid rgba(255,40,40,0.95)';
-            canvas.style.zIndex = '9999';
-          }
-        }
-      } catch (e) {}
-    }
-    if (m && m.type === 'error') {
-      console.error('[worker-error]', m.msg);
-      canvas.style.backgroundColor = 'magenta';
-      canvas.style.border = '4px dashed red';
-      canvas.style.zIndex = '9999';
-    }
-  };
-
-  let off = null;
   try {
     if (typeof canvas.transferControlToOffscreen === 'function') {
-      off = canvas.transferControlToOffscreen();
-      try {
-        worker.postMessage({ type: 'init', canvas: off, width, height }, [off]);
-      } catch (postErr) {
-        console.error('postMessage with offscreen failed:', postErr);
-        try { worker.postMessage({ type: 'init', width, height }); } catch (e) {}
-        off = null;
-      }
+      offscreen = canvas.transferControlToOffscreen();
+      worker = new Worker(workerUrl, { name: 'raster-worker-v2' });
+      worker.postMessage({ type: 'init', canvas: offscreen, width: intW, height: intH, tileSize }, [offscreen]);
+      transferred = true;
     } else {
-      console.warn('transferControlToOffscreen not available; worker may not draw to DOM canvas.');
-      try { worker.postMessage({ type: 'init', width, height }); } catch (e) {}
+      // worker without offscreen: still create worker but it'll be idle; we'll use mainRaster
+      worker = new Worker(workerUrl, { name: 'raster-worker-v2' });
+      worker.postMessage({ type: 'init', width: intW, height: intH, tileSize });
+      transferred = false;
     }
-  } catch (e) {
-    console.error('Failed to transfer OffscreenCanvas to worker:', e);
-    try { worker.postMessage({ type: 'init', width, height }); } catch (err) {}
-    off = null;
+  } catch (err) {
+    console.warn('Offscreen init failed, falling back to main-thread raster:', err);
+    try {
+      worker = new Worker(workerUrl, { name: 'raster-worker-v2' });
+      worker.postMessage({ type: 'init', width: intW, height: intH, tileSize });
+    } catch (e) {
+      console.warn('Worker creation failed entirely; main-thread fallback only:', e);
+      worker = null;
+    }
+    transferred = false;
   }
 
-  const uploaded = new Map();
-  let transferred = !!off;
+  // worker messages -> update DOM canvas styling for quick feedback
+  if (worker) {
+    worker.onmessage = (ev) => {
+      const m = ev.data;
+      if (!m) return;
+      if (m.type === 'log') {
+        // look for pixel count field
+        try {
+          const s = String(m.msg || '');
+          const match = s.match(/pixels=(\\d+)/);
+          if (match) {
+            const pix = Number(match[1]);
+            if (pix > 0) {
+              canvas.style.border = '3px solid rgba(0,220,80,0.95)';
+              canvas.style.visibility = 'visible';
+            } else {
+              canvas.style.backgroundColor = 'magenta';
+              canvas.style.border = '3px solid rgba(255,40,40,0.95)';
+            }
+          }
+        } catch (e) {}
+        console.log('[raster-worker-v2]', m.msg);
+      } else if (m.type === 'error') {
+        console.error('[raster-worker-v2:error]', m.msg);
+        canvas.style.backgroundColor = 'magenta';
+        canvas.style.border = '4px dashed red';
+      }
+    };
+    worker.onerror = (e) => console.error('raster-worker-v2 crashed', e);
+  }
 
-  // main-thread fallback renderer
+  // Main-thread fallback raster (same optimized algorithm) - executed when Offscreen unavailable
   let mainRaster = null;
   if (!transferred) {
     try {
       const mainCtx = canvas.getContext('2d');
-      if (!mainCtx) throw new Error('2D context unavailable for main-thread fallback');
+      if (!mainCtx) throw new Error('2D context unavailable');
 
       (function createMainRaster() {
-        let W = width, H = height;
-        let zBuffer = null;
-        let imageData = null;
-        let pixelBuf = null;
+        let Wm = intW, Hm = intH;
+        let imageData = mainCtx.createImageData(Wm, Hm);
+        let pixelBuf = imageData.data;
+        let zBuffer = new Float32Array(Wm * Hm);
         let sceneMeshes = [];
         let disableCulling = false;
 
         function initBuffers(w,h) {
-          W = w; H = h;
-          zBuffer = new Float32Array(w*h);
+          Wm = w; Hm = h;
           imageData = mainCtx.createImageData(w,h);
           pixelBuf = imageData.data;
-          for (let i = 0, p = 0; i < w*h; ++i, p += 4) {
-            pixelBuf[p] = 0; pixelBuf[p+1] = 0; pixelBuf[p+2] = 0; pixelBuf[p+3] = 255;
-            zBuffer[i] = Infinity;
-          }
+          zBuffer = new Float32Array(w*h);
+          for (let i=0,p=0;i<w*h;++i,p+=4){ pixelBuf[p]=0; pixelBuf[p+1]=0; pixelBuf[p+2]=0; pixelBuf[p+3]=255; zBuffer[i]=Infinity; }
         }
 
+        // reuse same math (inline functions)
         function multiplyMat4(a,b,out) {
           for (let i = 0; i < 4; ++i) {
             const ai0 = a[i], ai1 = a[i+4], ai2 = a[i+8], ai3 = a[i+12];
@@ -1187,118 +1199,17 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
           }
           return out;
         }
-
         function transformVec3(mat, vx, vy, vz, out) {
           const x = mat[0]*vx + mat[4]*vy + mat[8]*vz + mat[12];
           const y = mat[1]*vx + mat[5]*vy + mat[9]*vz + mat[13];
           const z = mat[2]*vx + mat[6]*vy + mat[10]*vz + mat[14];
           const w = mat[3]*vx + mat[7]*vy + mat[11]*vz + mat[15];
-          if (!w || !isFinite(w)) {
-            out[0] = 2; out[1] = 2; out[2] = 1; out[3] = w;
-            return;
-          }
-          out[0] = x / w; out[1] = y / w; out[2] = z / w; out[3] = w;
+          if (!w || !isFinite(w)) { out[0]=2; out[1]=2; out[2]=1; out[3]=w; return; }
+          out[0]=x/w; out[1]=y/w; out[2]=z/w; out[3]=w;
         }
-
-        function ndcToScreen(ndcX, ndcY) {
-          return [(ndcX * 0.5 + 0.5) * W, (-ndcY * 0.5 + 0.5) * H];
-        }
-
-        function edgeFunc(ax,ay,bx,by,cx,cy) {
-          return (cx - ax) * (by - ay) - (cy - ay) * (bx - ax);
-        }
-
-        function identityMat4() {
-          const I = new Float32Array(16);
-          I[0]=1; I[5]=1; I[10]=1; I[15]=1;
-          return I;
-        }
-
-        function renderFrame(camera, transforms) {
-          if (!mainCtx) return;
-          const proj = camera.proj;
-          const view = camera.view;
-          const viewProj = new Float32Array(16);
-          multiplyMat4(proj, view, viewProj);
-          const tmap = new Map();
-          for (let t of transforms) tmap.set(t.id, t.model);
-          const clear = camera.clearColor || [0,0,0];
-
-          for (let i = 0, p = 0; i < W*H; ++i, p += 4) {
-            pixelBuf[p] = clear[0];
-            pixelBuf[p+1] = clear[1];
-            pixelBuf[p+2] = clear[2];
-            pixelBuf[p+3] = 255;
-            zBuffer[i] = Infinity;
-          }
-
-          const vClip = new Float32Array(4);
-          for (let mesh of sceneMeshes) {
-            const pos = mesh.positions;
-            const idx = mesh.indices;
-            const color = mesh.color;
-            const model = tmap.get(mesh.id) || identityMat4();
-
-            const mvp = new Float32Array(16);
-            multiplyMat4(viewProj, model, mvp);
-
-            const vcount = pos.length / 3;
-            const sx = new Float32Array(vcount);
-            const sy = new Float32Array(vcount);
-            const sz = new Float32Array(vcount);
-            for (let vi = 0; vi < vcount; ++vi) {
-              transformVec3(mvp, pos[vi*3], pos[vi*3+1], pos[vi*3+2], vClip);
-              const sc = ndcToScreen(vClip[0], vClip[1]);
-              sx[vi] = sc[0]; sy[vi] = sc[1]; sz[vi] = vClip[2];
-            }
-
-            for (let t = 0; t < idx.length; t += 3) {
-              const i0 = idx[t], i1 = idx[t+1], i2 = idx[t+2];
-              const x0 = sx[i0], y0 = sy[i0], z0 = sz[i0];
-              const x1 = sx[i1], y1 = sy[i1], z1 = sz[i1];
-              const x2 = sx[i2], y2 = sy[i2], z2 = sz[i2];
-
-              const minX = Math.max(0, Math.floor(Math.min(x0,x1,x2)));
-              const maxX = Math.min(W-1, Math.ceil(Math.max(x0,x1,x2)));
-              const minY = Math.max(0, Math.floor(Math.min(y0,y1,y2)));
-              const maxY = Math.min(H-1, Math.ceil(Math.max(y0,y1,y2)));
-              if (maxX < 0 || maxY < 0 || minX >= W || minY >= H) continue;
-
-              const ux = x1 - x0, uy = y1 - y0;
-              const vx = x2 - x0, vy = y2 - y0;
-              const cross = ux*vy - uy*vx;
-              if (!disableCulling && cross >= 0) continue;
-
-              const area = edgeFunc(x0,y0,x1,y1,x2,y2);
-              if (Math.abs(area) < 1e-6) continue;
-
-              for (let py = minY; py <= maxY; ++py) {
-                const rowBase = py * W;
-                for (let px = minX; px <= maxX; ++px) {
-                  const cx = px + 0.5, cy = py + 0.5;
-                  const w0 = edgeFunc(x1,y1,x2,y2,cx,cy);
-                  const w1 = edgeFunc(x2,y2,x0,y0,cx,cy);
-                  const w2 = edgeFunc(x0,y0,x1,y1,cx,cy);
-                  if ((w0 >= 0 && w1 >= 0 && w2 >= 0) || (w0 <= 0 && w1 <= 0 && w2 <= 0)) {
-                    const b0 = w0 / area, b1 = w1 / area, b2 = w2 / area;
-                    const zInterp = b0*z0 + b1*z1 + b2*z2;
-                    const depth = (zInterp + 1) * 0.5;
-                    const idxBuf = rowBase + px;
-                    if (depth < zBuffer[idxBuf]) {
-                      const p = idxBuf * 4;
-                      pixelBuf[p] = color[0];
-                      pixelBuf[p+1] = color[1];
-                      pixelBuf[p+2] = color[2];
-                      pixelBuf[p+3] = 255;
-                      zBuffer[idxBuf] = depth;
-                    }
-                  }
-                }
-              }
-            }
-          }
-          mainCtx.putImageData(imageData, 0, 0);
-        }
+        function ndcToScreen(ndcX, ndcY) { return [(ndcX*0.5 + 0.5) * Wm, (-ndcY*0.5 + 0.5) * Hm]; }
+        function edgeCoeffs(x0,y0,x1,y1) { const A=y0-y1, B=x1-x0, C=x0*y1-x1*y0; return [A,B,C]; }
+        function identityMat4() { const I=new Float32Array(16); I[0]=1;I[5]=1;I[10]=1;I[15]=1; return I; }
 
         function uploadMesh(m) {
           sceneMeshes.push({
@@ -1306,18 +1217,107 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
             positions: m.positions,
             indices: m.indices,
             color: m.color || [180,180,180],
-            cpuStatic: !!m.cpuStatic
+            cpuStatic: !!m.cpuStatic,
+            twoSided: !!m.twoSided
           });
         }
-        function removeMesh(id) {
-          for (let i = 0; i < sceneMeshes.length; ++i) {
-            if (sceneMeshes[i].id === id) { sceneMeshes.splice(i,1); break; }
-          }
-        }
+        function removeMesh(id) { for (let i=0;i<sceneMeshes.length;++i) if (sceneMeshes[i].id===id){sceneMeshes.splice(i,1);break;} }
         function clearScene() { sceneMeshes.length = 0; }
         function setCulling(flag) { disableCulling = !!flag; }
 
-        initBuffers(W,H);
+        function renderFrame(camera, transforms) {
+          const start = performance.now();
+          const proj = camera.proj, view = camera.view;
+          const viewProj = new Float32Array(16);
+          multiplyMat4(proj, view, viewProj);
+          const tmap = new Map();
+          for (let t of transforms) tmap.set(t.id, t.model);
+          const clear = camera.clearColor || [0,0,0];
+          for (let i=0,p=0;i<Wm*Hm;++i,p+=4){ pixelBuf[p]=clear[0]; pixelBuf[p+1]=clear[1]; pixelBuf[p+2]=clear[2]; pixelBuf[p+3]=255; zBuffer[i]=Infinity; }
+
+          let trisTotal=0, trisRaster=0, pixels=0;
+          const vClip = new Float32Array(4);
+
+          for (let mesh of sceneMeshes) {
+            const pos = mesh.positions, idx = mesh.indices, color = mesh.color;
+            const twoSided = !!mesh.twoSided;
+            const model = tmap.get(mesh.id) || identityMat4();
+            const mvp = new Float32Array(16);
+            multiplyMat4(viewProj, model, mvp);
+            const vcount = (pos.length/3)|0;
+            const sx = new Float32Array(vcount);
+            const sy = new Float32Array(vcount);
+            const sz = new Float32Array(vcount);
+            for (let vi=0; vi<vcount; ++vi) {
+              transformVec3(mvp, pos[vi*3], pos[vi*3+1], pos[vi*3+2], vClip);
+              const sc = ndcToScreen(vClip[0], vClip[1]);
+              sx[vi]=sc[0]; sy[vi]=sc[1]; sz[vi]=vClip[2];
+            }
+            for (let t=0;t<idx.length;t+=3) {
+              trisTotal++;
+              const i0=idx[t], i1=idx[t+1], i2=idx[t+2];
+              if (i0<0||i1<0||i2<0) continue;
+              const x0=sx[i0], y0=sy[i0], z0=sz[i0];
+              const x1=sx[i1], y1=sy[i1], z1=sz[i1];
+              const x2=sx[i2], y2=sy[i2], z2=sz[i2];
+              const minX = Math.max(0, Math.floor(Math.min(x0,x1,x2)));
+              const maxX = Math.min(Wm-1, Math.ceil(Math.max(x0,x1,x2)));
+              const minY = Math.max(0, Math.floor(Math.min(y0,y1,y2)));
+              const maxY = Math.min(Hm-1, Math.ceil(Math.max(y0,y1,y2)));
+              if (maxX<0||maxY<0||minX>=Wm||minY>=Hm) continue;
+              const ux = x1-x0, uy=y1-y0, vx=x2-x0, vy=y2-y0;
+              const cross = ux*vy - uy*vx;
+              if (!disableCulling && !twoSided && cross >= 0) continue;
+              const e0=edgeCoeffs(x1,y1,x2,y2);
+              const e1=edgeCoeffs(x2,y2,x0,y0);
+              const e2=edgeCoeffs(x0,y0,x1,y1);
+              const area = e2[0]*x2 + e2[1]*y2 + e2[2];
+              if (!isFinite(area) || Math.abs(area) < 1e-6) continue;
+              trisRaster++;
+              const invArea = 1.0/area;
+              const startX = minX, startY = minY;
+              const px0 = startX + 0.5, py0 = startY + 0.5;
+              let e0_rowStart = e0[0]*px0 + e0[1]*py0 + e0[2];
+              let e1_rowStart = e1[0]*px0 + e1[1]*py0 + e1[2];
+              let e2_rowStart = e2[0]*px0 + e2[1]*py0 + e2[2];
+              const e0_stepX = e0[0], e0_stepY = e0[1];
+              const e1_stepX = e1[0], e1_stepY = e1[1];
+              const e2_stepX = e2[0], e2_stepY = e2[1];
+
+              const z0v=z0,z1v=z1,z2v=z2;
+              for (let y=startY;y<=maxY;++y) {
+                let e0v = e0_rowStart, e1v = e1_rowStart, e2v = e2_rowStart;
+                const rowBase = y * Wm;
+                for (let x=startX;x<=maxX;++x) {
+                  if ((e0v>=0 && e1v>=0 && e2v>=0) || (e0v<=0 && e1v<=0 && e2v<=0)) {
+                    const zInterp = (e0v*z0v + e1v*z1v + e2v*z2v) * invArea;
+                    if (isFinite(zInterp)) {
+                      const depth = (zInterp + 1) * 0.5;
+                      const idxBuf = rowBase + x;
+                      if (depth < zBuffer[idxBuf]) {
+                        const p = idxBuf * 4;
+                        pixelBuf[p]=color[0];
+                        pixelBuf[p+1]=color[1];
+                        pixelBuf[p+2]=color[2];
+                        pixelBuf[p+3]=255;
+                        zBuffer[idxBuf]=depth;
+                        pixels++;
+                      }
+                    }
+                  }
+                  e0v += e0_stepX; e1v += e1_stepX; e2v += e2_stepX;
+                }
+                e0_rowStart += e0_stepY; e1_rowStart += e1_stepY; e2_rowStart += e2_stepY;
+              }
+            }
+          }
+          try { mainCtx.putImageData(imageData, 0, 0); } catch (err) { console.error('putImageData failed fallback', err); }
+          const elapsed = Math.round(performance.now()-start);
+          // log - no worker to send back; just console
+          console.log('[mainRaster] frame tris=',trisTotal,'rast=',trisRaster,'pixels=',pixels,'ms=',elapsed);
+        }
+
+        initBuffers(Wm,Hm);
         mainRaster = { initBuffers, uploadMesh, removeMesh, clearScene, renderFrame, setCulling };
       })();
     } catch (err) {
@@ -1326,44 +1326,40 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
     }
   }
 
-  // --- API ---
+  // Public API (kept similar to previous)
+  const uploaded = new Map();
   const api = {
     domElement: canvas,
     domWrapper: wrapper,
-
     setSize(w, h, updateStyle = true) {
-      wrapper.style.width = `${w}px`;
-      wrapper.style.height = `${h}px`;
-      canvas.style.width = `${w}px`;
-      canvas.style.height = `${h}px`;
-      if (updateStyle && canvas.parentElement) {
-        const parent = canvas.parentElement;
-        if (getComputedStyle(parent).position === 'static') parent.style.position = 'relative';
-      }
+      // update visual size and internal buffer (use downscale)
+      wrapper.style.width = w + 'px';
+      wrapper.style.height = h + 'px';
+      canvas.style.width = w + 'px';
+      canvas.style.height = h + 'px';
+      intW = Math.max(1, Math.floor(w * ${Number(downscale)}));
+      intH = Math.max(1, Math.floor(h * ${Number(downscale)}));
       if (!transferred) {
-        canvas.width = w;
-        canvas.height = h;
+        canvas.width = intW; canvas.height = intH;
       }
-      try { worker.postMessage({ type: 'resize', width: w, height: h }); } catch (e) { console.warn('Failed to post resize to worker:', e); }
+      try { if (worker) worker.postMessage({ type:'resize', width:intW, height:intH }); } catch (e) {}
+      if (mainRaster && typeof mainRaster.initBuffers === 'function') mainRaster.initBuffers(intW, intH);
     },
-
-    setClearColor(hex, alpha = 1) {
-      api._clearColor = { hex, alpha };
+    setDownscale(s) {
+      downscale = s;
+      const w = parseInt(wrapper.style.width) || ${width};
+      const h = parseInt(wrapper.style.height) || ${height};
+      api.setSize(w,h,false);
     },
-
+    setClearColor(hex, alpha = 1) { api._clearColor = { hex, alpha }; },
     _clearColor: { hex: 0x000000, alpha: 1 },
-
-    // non-recursive setCulling (for both worker and fallback)
     setCulling(disable) {
-      if (transferred) {
-        try { worker.postMessage({ type: 'setCulling', disable: !!disable }); } catch (e) { console.warn('Failed to send setCulling to worker:', e); }
-      } else {
-        if (mainRaster && typeof mainRaster.setCulling === 'function') mainRaster.setCulling(disable);
-      }
+      if (worker) try { worker.postMessage({ type: 'setCulling', disable: !!disable }); } catch (e) {}
+      if (mainRaster && typeof mainRaster.setCulling === 'function') mainRaster.setCulling(disable);
     },
-
     async scanAndUploadScene(scene) {
-      try { if (transferred) worker.postMessage({ type: 'clearScene' }); } catch(e) {}
+      // clear previous
+      if (worker) try { worker.postMessage({ type: 'clearScene' }); } catch (e) {}
       if (mainRaster && typeof mainRaster.clearScene === 'function') mainRaster.clearScene();
       uploaded.clear();
 
@@ -1374,15 +1370,15 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
         if (uploaded.has(obj.uuid)) return;
 
         const posAttr = geom.attributes.position;
-        const positionsCopy = new Float32Array(posAttr.array);
+        const positionsCopy = new Float32Array(posAttr.array); // copy once
 
         let indicesCopy;
         if (geom.index) {
           indicesCopy = new Uint32Array(geom.index.array);
         } else {
-          const triCount = Math.floor(positionsCopy.length / 3) * 3;
+          const triCount = Math.floor(positionsCopy.length/3) * 3;
           indicesCopy = new Uint32Array(triCount);
-          for (let i = 0; i < triCount; ++i) indicesCopy[i] = i;
+          for (let i=0;i<triCount;++i) indicesCopy[i] = i;
         }
 
         let col = [180,180,180];
@@ -1399,39 +1395,35 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
         } catch (e) {}
 
         const cpuStatic = !!obj.userData?.cpuStatic;
+        const twoSided = !!obj.userData?.twoSided;
 
+        // upload to worker or main raster
         try {
-          if (transferred) {
+          if (transferred && worker) {
             worker.postMessage({
-              type: 'uploadMesh',
-              id: obj.uuid,
-              positions: positionsCopy,
-              indices: indicesCopy,
-              color: col,
-              cpuStatic
+              type: 'uploadMesh', id: obj.uuid, positions: positionsCopy, indices: indicesCopy, color: col, cpuStatic, twoSided
             }, [positionsCopy.buffer, indicesCopy.buffer]);
           } else if (mainRaster) {
-            mainRaster.uploadMesh({ id: obj.uuid, positions: positionsCopy, indices: indicesCopy, color: col, cpuStatic });
+            mainRaster.uploadMesh({ id: obj.uuid, positions: positionsCopy, indices: indicesCopy, color: col, cpuStatic, twoSided });
           }
         } catch (err) {
-          console.error('Failed to postMessage/upload mesh:', err);
-          try { if (transferred) worker.postMessage({ type: 'uploadMesh', id: obj.uuid, positions: positionsCopy, indices: indicesCopy, color: col, cpuStatic }); } catch (_) {}
+          console.error('uploadMesh failed:', err);
+          try { if (worker) worker.postMessage({ type:'uploadMesh', id: obj.uuid, positions: positionsCopy, indices: indicesCopy, color: col, cpuStatic, twoSided }); } catch(_) {}
         }
 
-        uploaded.set(obj.uuid, { id: obj.uuid, cpuStatic });
+        uploaded.set(obj.uuid, { id: obj.uuid, cpuStatic, twoSided });
       });
     },
-
     removeMesh(mesh) {
       const id = mesh.uuid;
       if (uploaded.has(id)) {
         uploaded.delete(id);
-        try { if (transferred) worker.postMessage({ type: 'removeMesh', id }); } catch (e) {}
+        try { if (worker) worker.postMessage({ type: 'removeMesh', id }); } catch (e) {}
         if (mainRaster) mainRaster.removeMesh(id);
       }
     },
-
     render(scene, camera) {
+      // camera: use three.js camera projectionMatrix and matrixWorldInverse
       const proj = new Float32Array(camera.projectionMatrix.elements);
       const view = new Float32Array(camera.matrixWorldInverse.elements);
       const transforms = [];
@@ -1447,55 +1439,58 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
       const g = (c.hex >> 8) & 0xff;
       const b = c.hex & 0xff;
 
-      if (transferred) {
+      if (transferred && worker) {
         try {
-          worker.postMessage({
-            type: 'frame',
-            camera: { proj, view, clearColor: [r,g,b] },
-            transforms
-          });
-        } catch (e) {
-          console.warn('Failed to post frame to worker:', e);
-        }
+          worker.postMessage({ type: 'frame', camera: { proj, view, clearColor: [r,g,b] }, transforms });
+        } catch (e) { console.warn('worker frame post failed:', e); }
         return;
       }
 
       if (mainRaster && typeof mainRaster.renderFrame === 'function') {
         try {
           mainRaster.renderFrame({ proj, view, clearColor: [r,g,b] }, transforms);
-        } catch (e) {
-          console.error('mainRaster.renderFrame failed:', e);
-        }
+        } catch (e) { console.error('mainRaster render failed:', e); }
       } else {
-        console.warn('Skipping render call because OffscreenCanvas was not transferred and no mainRaster exists.');
+        console.warn('Skipping render: no worker transferred and no mainRaster available.');
       }
     },
-
     dispose() {
-      try { worker.terminate(); } catch (e) {}
+      try { if (worker) worker.terminate(); } catch (e) {}
       try { URL.revokeObjectURL(workerUrl); } catch (e) {}
     },
-
-    // debug helpers
-    _debugUploaded: uploaded,
+    setTwoSided(meshOrId, twoSided) {
+      const id = typeof meshOrId === 'string' ? meshOrId : (meshOrId && meshOrId.uuid);
+      if (!id) return;
+      // set in uploaded map
+      const info = uploaded.get(id);
+      if (info) info.twoSided = !!twoSided;
+      try { if (worker) worker.postMessage({ type: 'setTwoSided', id, twoSided: !!twoSided }); } catch (e) {}
+      if (mainRaster && typeof mainRaster.setTwoSided === 'function') mainRaster.setTwoSided(id, !!twoSided);
+    },
+    // test helper
     debugDrawTestTriangle() {
-      const pos = new Float32Array([ -0.5, -0.5, 0,  0.5, -0.5, 0,  0, 0.5, 0 ]);
+      const pos = new Float32Array([-0.5,-0.5,0,  0.5,-0.5,0,  0,0.5,0]);
       const idx = new Uint32Array([0,1,2]);
-      if (transferred) {
-        try {
-          worker.postMessage({ type:'uploadMesh', id: 'test-tri', positions: pos, indices: idx, color: [255,0,0], cpuStatic: false }, [pos.buffer, idx.buffer]);
-        } catch (e) { console.warn('Failed to upload test triangle to worker:', e); }
+      if (transferred && worker) {
+        try { worker.postMessage({ type:'uploadMesh', id:'test-tri', positions:pos, indices:idx, color:[255,0,0], cpuStatic:false }, [pos.buffer, idx.buffer]); } catch(e){}
       } else if (mainRaster) {
-        mainRaster.uploadMesh({ id: 'test-tri', positions: pos, indices: idx, color: [255,0,0], cpuStatic: false });
+        mainRaster.uploadMesh({ id:'test-tri', positions:pos, indices:idx, color:[255,0,0], cpuStatic:false });
       }
-      uploaded.set('test-tri', { id: 'test-tri', cpuStatic: false });
-    }
+      uploaded.set('test-tri', { id:'test-tri', cpuStatic:false });
+    },
+    _debugUploaded: uploaded
   };
 
-  if (transferred) api.setSize(width, height, false);
-  api.setClearColor(0x000000, 1);
+  // initial size
+  if (transferred && worker) {
+    try { worker.postMessage({ type:'resize', width:intW, height:intH }); } catch (e) {}
+  } else if (mainRaster && typeof mainRaster.initBuffers === 'function') {
+    mainRaster.initBuffers(intW, intH);
+  }
+  api.setClearColor(0x000000,1);
   return api;
 }
+
 
 
 
@@ -1525,7 +1520,8 @@ export async function initSceneCrocodilosConstruction() {
   scene.add(window.camera);
 
   // 3. Renderer (CPU canvas)
-  const cpuRenderer = createCanvasRenderer({ width: FIXED_WIDTH, height: FIXED_HEIGHT });
+  const cpuRenderer = createCanvasRendererV2({ width: FIXED_WIDTH, height: FIXED_HEIGHT, downscale: 0.5 });
+
   cpuRenderer.setClearColor(0x000000, 1);
   renderer = cpuRenderer;
   window.renderer = renderer;
