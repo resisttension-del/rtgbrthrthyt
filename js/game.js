@@ -886,14 +886,13 @@ function setupDetailToggle() {
                         proj.copy(tmpPos).project(camera); // NDC -1..1
 
                         // quick NDC cull (if center far off-screen, skip). We allow some slack for large objects.
-                        if (proj.z > 1 || proj.z < -1 || proj.x < -2 || proj.x > 2 || proj.y < -2 || proj.y > 2) {
-                            // still allow meshes that have explicit userData.alwaysRender = true
-                            if (!obj.userData?.alwaysRender) return;
-                        }
+    if (proj.z > 1 || proj.z < -1 || proj.x < -10 || proj.x > 10 || proj.y < -10 || proj.y > 10) {
+        if (!obj.userData?.alwaysRender) return;
+    }
 
-                        // screen coords
-                        const sx = (proj.x * 0.5 + 0.5) * canvas.width;
-                        const sy = (-proj.y * 0.5 + 0.5) * canvas.height;
+    // screen coords
+    const sx = (proj.x * 0.5 + 0.5) * canvas.width;
+    const sy = (-proj.y * 0.5 + 0.5) * canvas.height;
 
                         // distance for depth sorting
                         const dist = camera.position.distanceTo(tmpPos);
@@ -3150,6 +3149,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
