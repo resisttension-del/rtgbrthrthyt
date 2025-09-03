@@ -851,6 +851,16 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
     return lower.concat(upper);
   }
 
+  // helper: intersect ray (origin->target) with plane (planePoint + planeNormal)
+  function intersectRayPlane(origin, target, planePoint, planeNormal) {
+    const dir = target.clone().sub(origin);
+    const denom = planeNormal.dot(dir);
+    if (Math.abs(denom) < 1e-8) return null; // parallel
+    const t = planeNormal.dot(planePoint.clone().sub(origin)) / denom;
+    if (t < 0 || t > 1) return null;
+    return origin.clone().add(dir.multiplyScalar(t));
+  }
+
   const api = {
     domElement: canvas,
     setSize(w, h, updateStyle = true) {
@@ -884,6 +894,11 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
       projScreenMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
       frustum.setFromProjectionMatrix(projScreenMatrix);
 
+      // compute camera near-plane in world space for intersections
+      const camForward = camera.getWorldDirection(tmpVec); // tmpVec is forward
+      const nearPlanePoint = camera.position.clone().add(camForward.clone().multiplyScalar(camera.near));
+      const nearPlaneNormal = camForward.clone(); // points forward
+
       // collect drawables (so we can sort by depth)
       const drawables = [];
       scene.traverse((obj) => {
@@ -891,26 +906,30 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
         if (obj.isCamera || obj.isLight) return;
 
         // World position (center)
-        obj.getWorldPosition(tmpPos); // tmpPos = world center
+        obj.getWorldPosition(tmpPos);
 
         // === FRUSTUM / VISIBILITY TEST ===
         let inFrustum = true;
+        let cameraInside = false;
         if (obj.geometry) {
           const geom = obj.geometry;
-          // ensure boundingSphere exists
           if (!geom.boundingSphere) geom.computeBoundingSphere();
-          // boundingSphere is in local space; transform to world
+
+          // boundingSphere (local) -> world
           const bsCenterWorld = geom.boundingSphere.center.clone().applyMatrix4(obj.matrixWorld);
           // extract scale from matrixWorld by decomposing
           obj.matrixWorld.decompose(tmpVec2 /*pos*/, tmpQuat /*quat*/, tmpVec /*scale*/);
           const maxScale = Math.max(Math.abs(tmpVec.x), Math.abs(tmpVec.y), Math.abs(tmpVec.z), 1e-6);
           const radiusScaled = geom.boundingSphere.radius * maxScale;
           const sphere = new THREE.Sphere(bsCenterWorld, radiusScaled);
+
+          const camDistToSphereCenter = camera.position.distanceTo(bsCenterWorld);
+          cameraInside = camDistToSphereCenter < radiusScaled;
+
           inFrustum = frustum.intersectsSphere(sphere);
         } else {
-          // fallback: test the center point in NDC with a little slack
+          // fallback relaxed center test
           proj.copy(tmpPos).project(camera);
-          // allow a bit of slack so large sprites near the edge don't get culled
           inFrustum = !(proj.z > 1 || proj.z < -1 || proj.x < -1.3 || proj.x > 1.3 || proj.y < -1.3 || proj.y > 1.3);
         }
 
@@ -957,10 +976,58 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
           const pts2d = [];
           for (let wp of worldPoints) {
             proj.copy(wp).project(camera);
-            if (proj.z > 1 || proj.z < -1) continue;
+            if (proj.z > 1 || proj.z < -1) continue; // normally skip clipped points
             const px = (proj.x * 0.5 + 0.5) * canvas.width;
             const py = (-proj.y * 0.5 + 0.5) * canvas.height;
             pts2d.push({ x: px, y: py });
+          }
+
+          // If no projected vertices but camera is inside the object's bounding sphere,
+          // attempt to compute intersections between camera->corner rays and the near plane.
+          if (pts2d.length === 0 && cameraInside) {
+            // Prefer boundingBox corners if available (8 corners)
+            if (geom.boundingBox === undefined) geom.computeBoundingBox();
+            const bb = geom.boundingBox;
+            if (bb) {
+              const cornersLocal = [
+                [bb.min.x, bb.min.y, bb.min.z],
+                [bb.min.x, bb.min.y, bb.max.z],
+                [bb.min.x, bb.max.y, bb.min.z],
+                [bb.min.x, bb.max.y, bb.max.z],
+                [bb.max.x, bb.min.y, bb.min.z],
+                [bb.max.x, bb.min.y, bb.max.z],
+                [bb.max.x, bb.max.y, bb.min.z],
+                [bb.max.x, bb.max.y, bb.max.z],
+              ];
+              for (let c of cornersLocal) {
+                const worldCorner = new THREE.Vector3(c[0], c[1], c[2]).applyMatrix4(obj.matrixWorld);
+                // If corner projects normally (in front), include it directly
+                proj.copy(worldCorner).project(camera);
+                if (!(proj.z > 1 || proj.z < -1)) {
+                  pts2d.push({ x: (proj.x * 0.5 + 0.5) * canvas.width, y: (-proj.y * 0.5 + 0.5) * canvas.height });
+                  continue;
+                }
+                // otherwise, try intersection of ray (camera -> corner) with near plane
+                const inter = intersectRayPlane(camera.position, worldCorner, nearPlanePoint, nearPlaneNormal);
+                if (inter) {
+                  proj.copy(inter).project(camera);
+                  if (!(proj.z > 1 || proj.z < -1)) {
+                    pts2d.push({ x: (proj.x * 0.5 + 0.5) * canvas.width, y: (-proj.y * 0.5 + 0.5) * canvas.height });
+                  }
+                }
+              }
+            } else {
+              // fallback: try intersections with the sampled worldPoints themselves
+              for (let wp of worldPoints) {
+                const inter = intersectRayPlane(camera.position, wp, nearPlanePoint, nearPlaneNormal);
+                if (inter) {
+                  proj.copy(inter).project(camera);
+                  if (!(proj.z > 1 || proj.z < -1)) {
+                    pts2d.push({ x: (proj.x * 0.5 + 0.5) * canvas.width, y: (-proj.y * 0.5 + 0.5) * canvas.height });
+                  }
+                }
+              }
+            }
           }
 
           if (pts2d.length === 0) {
@@ -1075,7 +1142,6 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
 
   return api;
 }
-
 
 
 /* ---------- Updated scene initializers (CPU renderer) ---------- */
@@ -3178,6 +3244,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
