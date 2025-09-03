@@ -260,7 +260,7 @@ export async function createSigmaCity(scene, physicsController) {
     // Define scaling and initial spawn points for the map
     const SCALE = 2;
     const rawSpawnPoints = [
-        new THREE.Vector3(0, 10, 0)
+        new THREE.Vector3(0, 20, 0)
      //   new THREE.Vector3(-1, 3, -4), // 1
     //    new THREE.Vector3(-55, -1, -6), // 2
      //   new THREE.Vector3(13, 5, 47), // 3
