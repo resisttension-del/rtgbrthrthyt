@@ -104,7 +104,7 @@ export async function createCrocodilosConstruction(scene, physicsController) {
     loaderUI.show('Loading CrocodilosConstruction Map...', mapLoadPercentages);
 
     // Define scaling and initial spawn points for the map
-    const SCALE = 1;
+    const SCALE = 3;
     const rawSpawnPoints = [
         new THREE.Vector3(-14, 7, -36), // 1
         new THREE.Vector3(-2, 2, 37), // 2
