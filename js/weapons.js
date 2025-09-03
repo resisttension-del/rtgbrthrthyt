@@ -1526,7 +1526,7 @@ checkMeleeHit(collidables) {
 
 buildKnife(onProgressRegistrar) {
     const loader = new GLTFLoader();
-    const url = 'https://raw.githubusercontent.com/thearthd/3d-models/main/karambitf.glb';
+    const url = 'https://raw.githubusercontent.com/thearthd/3d-models/main/Weapon/voidffa_knifeV2.glb';
     let prog = () => {};
     const promise = new Promise((res, rej) => {
       loader.load(
