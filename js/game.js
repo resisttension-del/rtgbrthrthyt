@@ -846,6 +846,50 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
     return lower.concat(upper);
   }
 
+  // helper: clip a polygon against screen boundaries (Sutherland-Hodgman algorithm)
+  function clipPoly(poly) {
+    // We clip against the 4 screen boundaries: top, bottom, left, right
+    const screenBounds = [
+      { x: 0, y: 0, dx: 1, dy: 0, normal: { x: 0, y: 1 } }, // bottom (y > 0)
+      { x: 0, y: canvas.height, dx: 1, dy: 0, normal: { x: 0, y: -1 } }, // top (y < height)
+      { x: 0, y: 0, dx: 0, dy: 1, normal: { x: 1, y: 0 } }, // left (x > 0)
+      { x: canvas.width, y: 0, dx: 0, dy: 1, normal: { x: -1, y: 0 } }, // right (x < width)
+    ];
+
+    let clippedPoly = poly;
+    for (const clipEdge of screenBounds) {
+      const newPoly = [];
+      if (clippedPoly.length === 0) break;
+      let prevPt = clippedPoly[clippedPoly.length - 1];
+      for (const currentPt of clippedPoly) {
+        const prevInside = (currentPt.x - clipEdge.x) * clipEdge.normal.x + (currentPt.y - clipEdge.y) * clipEdge.normal.y >= 0;
+        const currInside = (prevPt.x - clipEdge.x) * clipEdge.normal.x + (prevPt.y - clipEdge.y) * clipEdge.normal.y >= 0;
+
+        if (currInside) {
+          if (!prevInside) {
+            // Intersection point
+            const intersection = {
+              x: prevPt.x + (currentPt.x - prevPt.x) * ((clipEdge.x - prevPt.x) * clipEdge.normal.x + (clipEdge.y - prevPt.y) * clipEdge.normal.y) / ((currentPt.x - prevPt.x) * clipEdge.normal.x + (currentPt.y - prevPt.y) * clipEdge.normal.y),
+              y: prevPt.y + (currentPt.y - prevPt.y) * ((clipEdge.x - prevPt.x) * clipEdge.normal.x + (clipEdge.y - prevPt.y) * clipEdge.normal.y) / ((currentPt.x - prevPt.x) * clipEdge.normal.x + (currentPt.y - prevPt.y) * clipEdge.normal.y),
+            };
+            newPoly.push(intersection);
+          }
+          newPoly.push(currentPt);
+        } else if (prevInside) {
+          // Intersection point
+          const intersection = {
+            x: prevPt.x + (currentPt.x - prevPt.x) * ((clipEdge.x - prevPt.x) * clipEdge.normal.x + (clipEdge.y - prevPt.y) * clipEdge.normal.y) / ((currentPt.x - prevPt.x) * clipEdge.normal.x + (currentPt.y - prevPt.y) * clipEdge.normal.y),
+            y: prevPt.y + (currentPt.y - prevPt.y) * ((clipEdge.x - prevPt.x) * clipEdge.normal.x + (clipEdge.y - prevPt.y) * clipEdge.normal.y) / ((currentPt.x - prevPt.x) * clipEdge.normal.x + (currentPt.y - prevPt.y) * clipEdge.normal.y),
+          };
+          newPoly.push(intersection);
+        }
+        prevPt = currentPt;
+      }
+      clippedPoly = newPoly;
+    }
+    return clippedPoly;
+  }
+
   const api = {
     domElement: canvas,
     setSize(w, h, updateStyle = true) {
@@ -856,13 +900,10 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
         canvas.style.height = `${h}px`;
       }
     },
-    // Minimal clear color support
     setClearColor(hex, alpha = 1) {
       api._clearColor = { hex, alpha };
     },
     _clearColor: { hex: 0x000000, alpha: 1 },
-
-    // Basic render: draw sprites (material.map.image) and approximated shapes for meshes
     render(scene, camera) {
       // Clear with the clear color (converted to CSS)
       const c = api._clearColor;
@@ -885,106 +926,52 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
         obj.getWorldPosition(tmpPos);
         proj.copy(tmpPos).project(camera); // NDC -1..1
 
-        // quick NDC cull (if center far off-screen, skip). We allow some slack for large objects.
-        if (proj.z > 1 || proj.z < -1 || proj.x < -2 || proj.x > 2 || proj.y < -2 || proj.y > 2) {
-          // still allow meshes that have explicit userData.alwaysRender = true
-          if (!obj.userData?.alwaysRender) return;
-        }
-
-        // screen coords
+        // screen coords for distance & fallback
         const sx = (proj.x * 0.5 + 0.5) * canvas.width;
         const sy = (-proj.y * 0.5 + 0.5) * canvas.height;
-
-        // distance for depth sorting
         const dist = camera.position.distanceTo(tmpPos);
 
-        // check for texture
         const mapImage = obj.material && obj.material.map && obj.material.map.image ? obj.material.map.image : null;
-
-        // categorize drawable
         if (mapImage) {
           drawables.push({ type: 'image', obj, sx, sy, dist, projZ: proj.z, mapImage });
         } else if (obj.isMesh && obj.geometry) {
           const geom = obj.geometry;
-          if (!geom.boundingBox) geom.computeBoundingBox && geom.computeBoundingBox();
-          if (!geom.boundingSphere) geom.computeBoundingSphere && geom.computeBoundingSphere();
+          const posAttr = geom.attributes && geom.attributes.position;
 
-          const worldPoints = [];
-          if (geom.boundingBox) {
-            const bb = geom.boundingBox;
-            const min = bb.min;
-            const max = bb.max;
-            const corners = [
-              [min.x, min.y, min.z],
-              [min.x, min.y, max.z],
-              [min.x, max.y, min.z],
-              [min.x, max.y, max.z],
-              [max.x, min.y, min.z],
-              [max.x, min.y, max.z],
-              [max.x, max.y, min.z],
-              [max.x, max.y, max.z],
-            ];
-            for (let c of corners) {
-              tmpVec.set(c[0], c[1], c[2]).applyMatrix4(obj.matrixWorld);
-              worldPoints.push(tmpVec.clone());
+          if (!posAttr || posAttr.count === 0) {
+            if (obj.userData?.forceMarker) {
+              drawables.push({ type: 'rect', obj, sx, sy, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
             }
-          } else if (geom.boundingSphere) {
-            const bs = geom.boundingSphere;
-            const center = bs.center.clone().applyMatrix4(obj.matrixWorld);
-            const r = bs.radius * (obj.matrixWorld.getMaxScaleOnAxis ? obj.matrixWorld.getMaxScaleOnAxis() : 1);
-            worldPoints.push(center.clone());
-            worldPoints.push(center.clone().add(new THREE.Vector3(r, 0, 0)));
-            worldPoints.push(center.clone().add(new THREE.Vector3(-r, 0, 0)));
-            worldPoints.push(center.clone().add(new THREE.Vector3(0, r, 0)));
-            worldPoints.push(center.clone().add(new THREE.Vector3(0, -r, 0)));
-            worldPoints.push(center.clone().add(new THREE.Vector3(0, 0, r)));
-            worldPoints.push(center.clone().add(new THREE.Vector3(0, 0, -r)));
-          } else {
-            const posAttr = geom.attributes && geom.attributes.position;
-            if (posAttr && posAttr.count > 0) {
-              for (let i = 0; i < Math.min(12, posAttr.count); i += Math.max(1, Math.floor(posAttr.count / 12))) {
-                tmpVec.set(
-                  posAttr.getX(i),
-                  posAttr.getY(i),
-                  posAttr.getZ(i)
-                ).applyMatrix4(obj.matrixWorld);
-                worldPoints.push(tmpVec.clone());
-              }
-            } else {
-              worldPoints.push(tmpPos.clone());
-            }
+            return;
           }
 
-          // project worldPoints to screen-space 2D points
+          const worldPoints = [];
+          // Sample more points for a better hull
+          const sampleCount = Math.min(posAttr.count, 64);
+          for (let i = 0; i < sampleCount; i += Math.max(1, Math.floor(posAttr.count / sampleCount))) {
+            tmpVec.set(posAttr.getX(i), posAttr.getY(i), posAttr.getZ(i)).applyMatrix4(obj.matrixWorld);
+            worldPoints.push(tmpVec.clone());
+          }
+
           const pts2d = [];
           for (let wp of worldPoints) {
             proj.copy(wp).project(camera);
-            if (proj.z > 1 || proj.z < -1) continue;
+            // Don't discard points off-screen; they are needed for the hull
             const px = (proj.x * 0.5 + 0.5) * canvas.width;
             const py = (-proj.y * 0.5 + 0.5) * canvas.height;
             pts2d.push({ x: px, y: py });
           }
 
-          // if no good projected points, skip drawing (no more spheres)
-          if (pts2d.length === 0) {
-            // If you want a fallback marker instead of skipping, set userData.forceMarker = true
-            if (obj.userData?.forceMarker) {
-              drawables.push({ type: 'rect', obj, sx, sy, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
-            }
-            return;
-          } else {
+          if (pts2d.length > 0) {
             const hull = convexHull(pts2d);
             if (hull.length >= 3) {
-              drawables.push({ type: 'poly', obj, pts: hull, dist, projZ: proj.z });
-            } else if (hull.length === 2) {
-              drawables.push({ type: 'line', obj, pts: hull, dist });
-            } else {
-              // single point fallback: only draw if explicitly requested
-              if (obj.userData?.forceMarker) {
-                drawables.push({ type: 'rect', obj, sx: pts2d[0].x, sy: pts2d[0].y, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
+              const clippedHull = clipPoly(hull);
+              if (clippedHull.length >= 3) {
+                drawables.push({ type: 'poly', obj, pts: clippedHull, dist, projZ: proj.z });
               }
+            } else if (hull.length === 2) {
+              drawables.push({ type: 'line', obj, pts: clipPoly(hull), dist });
             }
-            return;
           }
         } else {
           // unknown / fallback: only draw marker if explicitly requested
@@ -1014,6 +1001,7 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
         color = color || obj.userData?.color || 'white';
 
         if (d.type === 'image' && d.mapImage && d.mapImage.width) {
+          // Image drawing logic remains the same, as it doesn't rely on the hull
           let size;
           if (obj.geometry && obj.geometry.boundingBox) {
             const bb = obj.geometry.boundingBox;
@@ -1064,7 +1052,6 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
           ctx.globalAlpha = 1 - Math.min(0.9, dist * 0.002);
           ctx.stroke();
         } else if (d.type === 'rect') {
-          // small centered rectangle marker (replaces prior circle/sphere)
           const size = d.sizePx ?? Math.max(2, Math.round(12 * (1 / Math.max(0.1, dist * 0.05))));
           const x = (d.sx || d.sx === 0) ? d.sx : 0;
           const y = (d.sy || d.sy === 0) ? d.sy : 0;
@@ -1073,8 +1060,6 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
           ctx.fillStyle = color;
           ctx.fillRect(x - size / 2, y - size / 2, size, size);
           ctx.restore();
-        } else {
-          // nothing - we've removed automatic sphere/arc drawing
         }
       }
     }
@@ -3178,6 +3163,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
