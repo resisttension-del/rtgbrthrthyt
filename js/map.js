@@ -106,14 +106,15 @@ export async function createCrocodilosConstruction(scene, physicsController) {
     // Define scaling and initial spawn points for the map
     const SCALE = 2;
     const rawSpawnPoints = [
-        new THREE.Vector3(-14, 7, -36), // 1
-        new THREE.Vector3(-2, 2, 37), // 2
-        new THREE.Vector3(0, 2, 0), // 3
-        new THREE.Vector3(2, 7, 34), // 4
-        new THREE.Vector3(-5, 2, -38), // 5
-        new THREE.Vector3(-18, 2, 12), // 6
-        new THREE.Vector3(11, 2, 23), // 7
-        new THREE.Vector3(-7, 7, -1), // 8
+        new THREE.Vector3(0, 7, 0),
+     //  new THREE.Vector3(-14, 7, -36), // 1
+      //  new THREE.Vector3(-2, 2, 37), // 2
+     //  new THREE.Vector3(0, 2, 0), // 3
+      //  new THREE.Vector3(2, 7, 34), // 4
+      //  new THREE.Vector3(-5, 2, -38), // 5
+     //   new THREE.Vector3(-18, 2, 12), // 6
+    //    new THREE.Vector3(11, 2, 23), // 7
+     //   new THREE.Vector3(-7, 7, -1), // 8
     ];
     const spawnPoints = rawSpawnPoints.map(p => p.clone().multiplyScalar(SCALE / 5));
 
@@ -260,15 +261,14 @@ export async function createSigmaCity(scene, physicsController) {
     // Define scaling and initial spawn points for the map
     const SCALE = 2;
     const rawSpawnPoints = [
-        new THREE.Vector3(0, 20, 0)
-     //   new THREE.Vector3(-1, 3, -4), // 1
-    //    new THREE.Vector3(-55, -1, -6), // 2
-     //   new THREE.Vector3(13, 5, 47), // 3
-     //   new THREE.Vector3(1, 5, -66), // 4
-     //   new THREE.Vector3(21, 5, -45), // 5
-    //    new THREE.Vector3(0, 10, 22), // 6
-    //    new THREE.Vector3(43, 1, -35), // 7
-     //   new THREE.Vector3(24, 3, -14), // 8
+        new THREE.Vector3(-1, 3, -4), // 1
+        new THREE.Vector3(-55, -1, -6), // 2
+        new THREE.Vector3(13, 5, 47), // 3
+        new THREE.Vector3(1, 5, -66), // 4
+        new THREE.Vector3(21, 5, -45), // 5
+        new THREE.Vector3(0, 10, 22), // 6
+        new THREE.Vector3(43, 1, -35), // 7
+        new THREE.Vector3(24, 3, -14), // 8
     ];
     const spawnPoints = rawSpawnPoints.map(p => p.clone().multiplyScalar(SCALE / 2));
 
