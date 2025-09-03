@@ -819,62 +819,48 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
     canvas.height = height;
     const ctx = canvas.getContext('2d');
 
-    // Scratch vectors
+    // Scratch vars
     const proj = new THREE.Vector3();
+    const tmpPos = new THREE.Vector3();
     const tmpVec = new THREE.Vector3();
-    const tmpVec2 = new THREE.Vector3();
-    const tmpVec3 = new THREE.Vector3();
 
-    // Software Z-buffer (1D float array)
-    let zBuffer = new Float32Array(width * height);
-
-    // Helper: project 3D to screen space
-    function projectToScreen(vec, camera, w, h) {
-        proj.copy(vec).project(camera);
-        return {
-            x: (proj.x * 0.5 + 0.5) * w,
-            y: (-proj.y * 0.5 + 0.5) * h,
-            z: proj.z
-        };
+    // Convex hull helper (monotone chain)
+    function convexHull(points) {
+        if (points.length <= 1) return points.slice();
+        const pts = points.slice().sort((a, b) => a.x === b.x ? a.y - b.y : a.x - b.x);
+        const cross = (o, a, b) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+        const lower = [];
+        for (let p of pts) {
+            while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop();
+            lower.push(p);
+        }
+        const upper = [];
+        for (let i = pts.length - 1; i >= 0; i--) {
+            const p = pts[i];
+            while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop();
+            upper.push(p);
+        }
+        lower.pop(); upper.pop();
+        return lower.concat(upper);
     }
 
-    // Helper: barycentric inside triangle test
-    function pointInTriangle(px, py, ax, ay, bx, by, cx, cy) {
-        const v0x = cx - ax, v0y = cy - ay;
-        const v1x = bx - ax, v1y = by - ay;
-        const v2x = px - ax, v2y = py - ay;
-        const dot00 = v0x * v0x + v0y * v0y;
-        const dot01 = v0x * v1x + v0y * v1y;
-        const dot02 = v0x * v2x + v0y * v2y;
-        const dot11 = v1x * v1x + v1y * v1y;
-        const dot12 = v1x * v2x + v1y * v2y;
-        const invDenom = 1 / (dot00 * dot11 - dot01 * dot01);
-        const u = (dot11 * dot02 - dot01 * dot12) * invDenom;
-        const v = (dot00 * dot12 - dot01 * dot02) * invDenom;
-        return u >= 0 && v >= 0 && (u + v) <= 1;
-    }
-
-    // Main API
     const api = {
         domElement: canvas,
-
         setSize(w, h, updateStyle = true) {
             canvas.width = w;
             canvas.height = h;
-            zBuffer = new Float32Array(w * h); // resize z-buffer
             if (updateStyle) {
                 canvas.style.width = `${w}px`;
                 canvas.style.height = `${h}px`;
             }
         },
-
         setClearColor(hex, alpha = 1) {
             api._clearColor = { hex, alpha };
         },
         _clearColor: { hex: 0x000000, alpha: 1 },
 
         render(scene, camera) {
-            // 1. Clear color and z-buffer
+            // Clear
             const c = api._clearColor;
             const r = (c.hex >> 16) & 0xff;
             const g = (c.hex >> 8) & 0xff;
@@ -884,120 +870,140 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
             ctx.fillStyle = `rgba(${r},${g},${b},${c.alpha})`;
             ctx.fillRect(0, 0, canvas.width, canvas.height);
             ctx.restore();
-            zBuffer.fill(Number.POSITIVE_INFINITY);
 
-            // 2. Collect drawables (triangles, images, etc.)
-            const drawTris = [];
+            const drawables = [];
             scene.traverse((obj) => {
                 if (!obj.visible || obj.isCamera || obj.isLight) return;
 
-                // Only Meshes for triangle rendering
-                if (obj.isMesh && obj.geometry && obj.geometry.isBufferGeometry) {
-                    // Get geometry and material
-                    const geom = obj.geometry;
-                    const posAttr = geom.attributes.position;
-                    const idxAttr = geom.index;
-                    if (!posAttr) return;
+                // Get world position (center)
+                obj.getWorldPosition(tmpPos);
+                proj.copy(tmpPos).project(camera);
 
-                    // Get color
-                    let color = obj.userData?.color;
-                    if (!color && obj.material && obj.material.color) {
-                        color = obj.material.color.getStyle ? obj.material.color.getStyle() : `#${obj.material.color.getHexString()}`;
-                    }
-                    color = color || 'white';
-
-                    // For each triangle
-                    const triCount = idxAttr ? idxAttr.count / 3 : posAttr.count / 3;
-                    for (let i = 0; i < triCount; i++) {
-                        let ai, bi, ci;
-                        if (idxAttr) {
-                            ai = idxAttr.getX(i * 3 + 0);
-                            bi = idxAttr.getX(i * 3 + 1);
-                            ci = idxAttr.getX(i * 3 + 2);
-                        } else {
-                            ai = i * 3 + 0;
-                            bi = i * 3 + 1;
-                            ci = i * 3 + 2;
-                        }
-
-                        // World positions
-                        tmpVec.set(posAttr.getX(ai), posAttr.getY(ai), posAttr.getZ(ai)).applyMatrix4(obj.matrixWorld);
-                        tmpVec2.set(posAttr.getX(bi), posAttr.getY(bi), posAttr.getZ(bi)).applyMatrix4(obj.matrixWorld);
-                        tmpVec3.set(posAttr.getX(ci), posAttr.getY(ci), posAttr.getZ(ci)).applyMatrix4(obj.matrixWorld);
-
-                        // Project to screen
-                        const vA = projectToScreen(tmpVec, camera, canvas.width, canvas.height);
-                        const vB = projectToScreen(tmpVec2, camera, canvas.width, canvas.height);
-                        const vC = projectToScreen(tmpVec3, camera, canvas.width, canvas.height);
-
-                        // Cull if all points far offscreen (speed)
-                        if (
-                            (vA.x < -100 || vA.x > canvas.width + 100 || vA.y < -100 || vA.y > canvas.height + 100) &&
-                            (vB.x < -100 || vB.x > canvas.width + 100 || vB.y < -100 || vB.y > canvas.height + 100) &&
-                            (vC.x < -100 || vC.x > canvas.width + 100 || vC.y < -100 || vC.y > canvas.height + 100)
-                        ) continue;
-
-                        // Backface culling
-                        const ax = vA.x, ay = vA.y, bx = vB.x, by = vB.y, cx = vC.x, cy = vC.y;
-                        const cross = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
-                        if (cross < 0) continue; // skip backfaces (for non-trans parents)
-
-                        // Depth for sorting
-                        const avgZ = (vA.z + vB.z + vC.z) / 3;
-                        const avgDist = camera.position.distanceTo(tmpVec) + camera.position.distanceTo(tmpVec2) + camera.position.distanceTo(tmpVec3);
-
-                        // Triangle data
-                        drawTris.push({
-                            ax, ay, az: vA.z,
-                            bx, by, bz: vB.z,
-                            cx, cy, cz: vC.z,
-                            color,
-                            opacity: obj.material?.opacity ?? 1,
-                            dist: avgDist,
-                            obj
-                        });
-                    }
+                // Cull objects far offscreen
+                if (proj.z > 1 || proj.z < -1 || proj.x < -2 || proj.x > 2 || proj.y < -2 || proj.y > 2) {
+                    if (!obj.userData?.alwaysRender) return;
                 }
-                // You can add sprite/image support here as needed
-            });
 
-            // 3. Sort triangles painter's order (far to near)
-            drawTris.sort((a, b) => b.dist - a.dist);
+                // Screen coords
+                const sx = (proj.x * 0.5 + 0.5) * canvas.width;
+                const sy = (-proj.y * 0.5 + 0.5) * canvas.height;
+                const dist = camera.position.distanceTo(tmpPos);
 
-            // 4. Rasterize triangles (optimized: tight pixel loop, minimal allocations)
-            for (let t = 0; t < drawTris.length; t++) {
-                const tri = drawTris[t];
-                const { ax, ay, az, bx, by, bz, cx, cy, cz, color, opacity } = tri;
-                // Bounding box for triangle
-                const minX = Math.max(0, Math.floor(Math.min(ax, bx, cx)));
-                const maxX = Math.min(canvas.width - 1, Math.ceil(Math.max(ax, bx, cx)));
-                const minY = Math.max(0, Math.floor(Math.min(ay, by, cy)));
-                const maxY = Math.min(canvas.height - 1, Math.ceil(Math.max(ay, by, cy)));
+                const mapImage = obj.material?.map?.image || null;
 
-                ctx.save();
-                ctx.globalAlpha = opacity;
-                ctx.fillStyle = color;
-                for (let y = minY; y <= maxY; ++y) {
-                    for (let x = minX; x <= maxX; ++x) {
-                        if (pointInTriangle(x + 0.5, y + 0.5, ax, ay, bx, by, cx, cy)) {
-                            // Depth interpolate
-                            // Barycentric weights for Z
-                            const denom = ((by - cy) * (ax - cx) + (cx - bx) * (ay - cy));
-                            let wA = ((by - cy) * (x - cx) + (cx - bx) * (y - cy)) / (denom || 1);
-                            let wB = ((cy - ay) * (x - cx) + (ax - cx) * (y - cy)) / (denom || 1);
-                            let wC = 1 - wA - wB;
-                            const z = wA * az + wB * bz + wC * cz;
+                if (mapImage) {
+                    drawables.push({ type: 'image', obj, sx, sy, dist, mapImage });
+                } else if (obj.isMesh && obj.geometry) {
+                    // Sample vertices for silhouette
+                    const worldPoints = [];
+                    const geom = obj.geometry;
+                    const posAttr = geom.attributes?.position;
+                    if (posAttr && posAttr.count > 0) {
+                        // Only sample up to 32 vertices (for speed & enough detail)
+                        const stride = Math.max(1, Math.floor(posAttr.count / 32));
+                        for (let i = 0; i < posAttr.count; i += stride) {
+                            tmpVec.set(
+                                posAttr.getX(i),
+                                posAttr.getY(i),
+                                posAttr.getZ(i)
+                            ).applyMatrix4(obj.matrixWorld);
+                            worldPoints.push(tmpVec.clone());
+                        }
+                    } else {
+                        worldPoints.push(tmpPos.clone());
+                    }
 
-                            // Z-buffer test
-                            const idx = (y | 0) * canvas.width + (x | 0);
-                            if (z < zBuffer[idx]) {
-                                zBuffer[idx] = z;
-                                ctx.fillRect(x, y, 1, 1);
+                    // Project to 2D
+                    const pts2d = [];
+                    for (let wp of worldPoints) {
+                        proj.copy(wp).project(camera);
+                        if (proj.z > 1 || proj.z < -1) continue;
+                        const px = (proj.x * 0.5 + 0.5) * canvas.width;
+                        const py = (-proj.y * 0.5 + 0.5) * canvas.height;
+                        pts2d.push({ x: px, y: py });
+                    }
+
+                    if (pts2d.length === 0) {
+                        if (obj.userData?.forceMarker) {
+                            drawables.push({ type: 'rect', obj, sx, sy, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
+                        }
+                        return;
+                    } else {
+                        // Use convex hull for fast silhouette
+                        const hull = convexHull(pts2d);
+                        if (hull.length >= 3) {
+                            drawables.push({ type: 'poly', obj, pts: hull, dist });
+                        } else if (hull.length === 2) {
+                            drawables.push({ type: 'line', obj, pts: hull, dist });
+                        } else {
+                            if (obj.userData?.forceMarker) {
+                                drawables.push({ type: 'rect', obj, sx: pts2d[0].x, sy: pts2d[0].y, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
                             }
                         }
+                        return;
+                    }
+                } else {
+                    if (obj.userData?.forceMarker) {
+                        drawables.push({ type: 'rect', obj, sx, sy, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
                     }
                 }
-                ctx.restore();
+            });
+
+            // Sort painter's order (furthest first)
+            drawables.sort((a, b) => b.dist - a.dist);
+
+            // Draw
+            for (let i = 0; i < drawables.length; i++) {
+                const d = drawables[i];
+                const obj = d.obj;
+                let color = obj.userData?.color;
+                if (!color && obj.material?.color) {
+                    try {
+                        color = obj.material.color.getStyle ? obj.material.color.getStyle() : (`#${obj.material.color.getHexString()}`);
+                    } catch (e) {
+                        color = obj.userData?.color || 'white';
+                    }
+                }
+                color = color || obj.userData?.color || 'white';
+
+                if (d.type === 'image' && d.mapImage && d.mapImage.width) {
+                    let size = obj.userData?.sizePx ?? 64;
+                    ctx.save();
+                    ctx.translate(d.sx, d.sy);
+                    const rot = obj.userData?.rotation ?? (obj.rotation?.z ?? 0);
+                    if (rot) ctx.rotate(rot);
+                    ctx.globalAlpha = obj.userData?.opacity ?? (obj.material?.opacity ?? 1);
+                    ctx.drawImage(d.mapImage, -size / 2, -size / 2, size, size);
+                    ctx.restore();
+                } else if (d.type === 'poly' && d.pts) {
+                    ctx.save();
+                    ctx.beginPath();
+                    ctx.moveTo(d.pts[0].x, d.pts[0].y);
+                    for (let j = 1; j < d.pts.length; j++) ctx.lineTo(d.pts[j].x, d.pts[j].y);
+                    ctx.closePath();
+                    ctx.globalAlpha = obj.material?.opacity ?? 1;
+                    ctx.fillStyle = color;
+                    ctx.fill();
+                    ctx.lineWidth = 1;
+                    ctx.strokeStyle = 'rgba(0,0,0,0.5)';
+                    ctx.stroke();
+                    ctx.restore();
+                } else if (d.type === 'line' && d.pts && d.pts.length === 2) {
+                    ctx.beginPath();
+                    ctx.moveTo(d.pts[0].x, d.pts[0].y);
+                    ctx.lineTo(d.pts[1].x, d.pts[1].y);
+                    ctx.strokeStyle = color;
+                    ctx.lineWidth = 2;
+                    ctx.globalAlpha = 1;
+                    ctx.stroke();
+                } else if (d.type === 'rect') {
+                    const size = d.sizePx ?? 8;
+                    ctx.save();
+                    ctx.globalAlpha = obj.material?.opacity ?? 1;
+                    ctx.fillStyle = color;
+                    ctx.fillRect(d.sx - size / 2, d.sy - size / 2, size, size);
+                    ctx.restore();
+                }
             }
         }
     };
@@ -3105,6 +3111,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
