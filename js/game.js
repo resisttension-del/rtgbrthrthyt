@@ -811,7 +811,7 @@ function setupDetailToggle() {
 }
 
 
-function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
+function createCanvasRenderer({ width = 1280, height = 720, maxFaces = 500 } = {}) {
     const canvas = document.createElement('canvas');
     canvas.width = width;
     canvas.height = height;
@@ -838,7 +838,7 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
         setClearColor(hex, alpha = 1) {
             api._clearColor = { hex, alpha };
         },
-        _clearColor: { hex: 0x000000, alpha: 1 },
+        _clearColor: { hex: 0x10141a, alpha: 1 },
 
         render(scene, camera) {
             // Clear canvas
@@ -848,9 +848,6 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
             ctx.fillStyle = `rgba(${(c.hex>>16)&255},${(c.hex>>8)&255},${c.hex&255},${c.alpha})`;
             ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-            // Collect drawables (faces), painter's sort by average Z
-            const drawFaces = [];
-
             scene.traverse((obj) => {
                 if (!obj.visible || obj.isCamera || obj.isLight) return;
                 if (!(obj.isMesh && obj.geometry && obj.geometry.isBufferGeometry)) return;
@@ -859,16 +856,20 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
                 const posAttr = geom.attributes.position;
                 const idxAttr = geom.index;
 
-                // Get color
+                // Get color (fixed palette, fallback to white)
                 let color = obj.userData?.color;
                 if (!color && obj.material?.color) {
                     color = obj.material.color.getStyle ? obj.material.color.getStyle() : `#${obj.material.color.getHexString()}`;
                 }
                 color = color || 'white';
 
-                // For each triangle
+                // Opacity
+                let opacity = obj.material?.opacity ?? 1;
+
+                // For each triangle (sample maxFaces for perf)
                 const triCount = idxAttr ? idxAttr.count / 3 : posAttr.count / 3;
-                for (let i = 0; i < triCount; i++) {
+                const stride = Math.max(1, Math.floor(triCount / maxFaces));
+                for (let i = 0; i < triCount; i += stride) {
                     let ai, bi, ci;
                     if (idxAttr) {
                         ai = idxAttr.getX(i * 3 + 0);
@@ -888,56 +889,37 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
                     proj.copy(tmpVec).project(camera);
                     const ax = (proj.x * 0.5 + 0.5) * canvas.width;
                     const ay = (-proj.y * 0.5 + 0.5) * canvas.height;
-                    const az = proj.z;
                     proj.copy(tmpVec2).project(camera);
                     const bx = (proj.x * 0.5 + 0.5) * canvas.width;
                     const by = (-proj.y * 0.5 + 0.5) * canvas.height;
-                    const bz = proj.z;
                     proj.copy(tmpVec3).project(camera);
                     const cx = (proj.x * 0.5 + 0.5) * canvas.width;
                     const cy = (-proj.y * 0.5 + 0.5) * canvas.height;
-                    const cz = proj.z;
 
-                    // Quick cull: if all points are behind camera, skip
-                    if (az > 1 && bz > 1 && cz > 1) continue;
+                    // Cull if triangle is way off-screen
+                    if ((ax < -100 && bx < -100 && cx < -100) || (ax > canvas.width+100 && bx > canvas.width+100 && cx > canvas.width+100) ||
+                        (ay < -100 && by < -100 && cy < -100) || (ay > canvas.height+100 && by > canvas.height+100 && cy > canvas.height+100)) {
+                        continue;
+                    }
 
-                    // Optional: backface culling for non-transparent objects
+                    // Backface culling (optional, disables if you want to see inside faces)
                     const cross = (bx-ax)*(cy-ay) - (by-ay)*(cx-ax);
+                    // If you want to see inside geometry, **remove this if** below!
                     if (cross < 0) continue;
 
-                    // Average depth for painter's order
-                    const avgZ = (az + bz + cz) / 3;
-
-                    drawFaces.push({
-                        pts: [
-                            {x: ax, y: ay},
-                            {x: bx, y: by},
-                            {x: cx, y: cy}
-                        ],
-                        color,
-                        opacity: obj.material?.opacity ?? 1,
-                        avgZ
-                    });
+                    // Draw the triangle as a filled polygon
+                    ctx.save();
+                    ctx.globalAlpha = opacity;
+                    ctx.beginPath();
+                    ctx.moveTo(ax, ay);
+                    ctx.lineTo(bx, by);
+                    ctx.lineTo(cx, cy);
+                    ctx.closePath();
+                    ctx.fillStyle = color;
+                    ctx.fill();
+                    ctx.restore();
                 }
             });
-
-            // Painter's order from farthest to nearest
-            drawFaces.sort((a, b) => b.avgZ - a.avgZ);
-
-            // Draw all triangle faces as filled polygons
-            for (let i = 0; i < drawFaces.length; i++) {
-                const { pts, color, opacity } = drawFaces[i];
-                ctx.save();
-                ctx.globalAlpha = opacity;
-                ctx.beginPath();
-                ctx.moveTo(pts[0].x, pts[0].y);
-                ctx.lineTo(pts[1].x, pts[1].y);
-                ctx.lineTo(pts[2].x, pts[2].y);
-                ctx.closePath();
-                ctx.fillStyle = color;
-                ctx.fill();
-                ctx.restore();
-            }
         }
     };
     return api;
@@ -3043,6 +3025,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
