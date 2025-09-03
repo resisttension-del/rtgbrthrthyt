@@ -1099,10 +1099,6 @@ export async function initSceneCrocodilosConstruction() {
     side: THREE.BackSide,
     fog: false
   });
-  const skyColor = new THREE.Color(0x111122);
-  scene.background = skyColor;
-  skyMesh = new THREE.Mesh(skyGeo, skyMat);
-  scene.add(skyMesh);
   window.scene = scene;
 
   window.camera.rotation.order = "YXZ";
@@ -3185,6 +3181,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
