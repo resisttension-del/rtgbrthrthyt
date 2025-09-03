@@ -1707,7 +1707,7 @@ addDebugMuzzleDot(muzzleObject3D, dotSize = 0.5) {
 
     buildAK47(onProgressRegistrar) {
         const loader = new GLTFLoader();
-        const url = 'https://raw.githubusercontent.com/thearthd/3d-models/main/Weapon/voidffa_AK47.glb';
+        const url = 'https://raw.githubusercontent.com/thearthd/3d-models/main/Weapon/voidffa_AK47_V2.glb';
         let prog = () => {};
         const promise = new Promise((res, rej) => {
             loader.load(
