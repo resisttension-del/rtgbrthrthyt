@@ -1272,7 +1272,7 @@ export async function initSceneCrocodilosConstruction() {
   scene.add(window.camera);
 
   // 3. Renderer (CPU canvas)
-  const cpuRenderer = createCanvasRendererV2({ width: FIXED_WIDTH, height: FIXED_HEIGHT, downscale: 0.5 });
+  const cpuRenderer = createCanvasRendererCustom({ width: FIXED_WIDTH, height: FIXED_HEIGHT, downscale: 0.5 });
 
   cpuRenderer.setClearColor(0x000000, 1);
   renderer = cpuRenderer;
@@ -3320,6 +3320,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
