@@ -877,6 +877,14 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
 
       // collect drawables (so we can sort by depth)
       const drawables = [];
+
+      // Ensure camera matrices are up-to-date for camera-space operations
+      camera.updateMatrixWorld();
+      if (camera.updateMatrixWorldInverse) camera.updateMatrixWorldInverse();
+      // fallback invert if matrixWorldInverse not present
+      const camInv = camera.matrixWorldInverse || (new THREE.Matrix4().copy(camera.matrixWorld).invert());
+      const near = camera.near;
+
       scene.traverse((obj) => {
         if (!obj.visible) return;
         if (obj.isCamera || obj.isLight) return;
@@ -891,7 +899,7 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
           if (!obj.userData?.alwaysRender) return;
         }
 
-        // screen coords
+        // screen coords (center)
         const sx = (proj.x * 0.5 + 0.5) * canvas.width;
         const sy = (-proj.y * 0.5 + 0.5) * canvas.height;
 
@@ -955,39 +963,118 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
             }
           }
 
-          // project worldPoints to screen-space 2D points
+          // --------- NEW: clip worldPoints against camera near plane in camera-space ----------
           const pts2d = [];
-          for (let wp of worldPoints) {
-            proj.copy(wp).project(camera);
+          const clippedWorldPts = [];
 
-            // skip broken projections
-            if (!isFinite(proj.x) || !isFinite(proj.y)) continue;
-
-            // allow points even if they are behind the near/far clip (so we can render hull when camera is inside)
-            // but clamp to avoid extreme off-screen coordinates which can produce very large polygons
-            const ndcX = Math.max(-10, Math.min(10, proj.x));
-            const ndcY = Math.max(-10, Math.min(10, proj.y));
-            const px = (ndcX * 0.5 + 0.5) * canvas.width;
-            const py = (-ndcY * 0.5 + 0.5) * canvas.height;
-            pts2d.push({ x: px, y: py });
+          // helper: project a world-space Vector3 to screen coords (returns null on non-finite)
+          function projectWorldToScreen(wp) {
+            const p = wp.clone().project(camera);
+            if (!isFinite(p.x) || !isFinite(p.y)) return null;
+            return { x: (p.x * 0.5 + 0.5) * canvas.width, y: (-p.y * 0.5 + 0.5) * canvas.height, ndcZ: p.z };
           }
 
-          // if no good projected points, fallback to center marker (so object remains visible when camera is inside)
+          // If we have an 8-corner bbox, use its known edge list; otherwise do a generic pairwise clipping.
+          if (worldPoints.length === 8) {
+            const edges = [
+              [0,1],[0,2],[0,4],
+              [1,3],[1,5],
+              [2,3],[2,6],
+              [3,7],
+              [4,5],[4,6],
+              [5,7],
+              [6,7]
+            ];
+
+            // compute camera-space copies for tests
+            const camPts = worldPoints.map(wp => wp.clone().applyMatrix4(camInv));
+
+            // include points that are in front of near plane (camera-space z <= -near)
+            for (let i = 0; i < worldPoints.length; i++) {
+              if (camPts[i].z <= -near) clippedWorldPts.push(worldPoints[i].clone());
+            }
+
+            // for edges crossing near plane, compute intersection in world-space by lerp and include
+            for (let [a, b] of edges) {
+              const A = camPts[a], B = camPts[b];
+              const Afront = A.z <= -near;
+              const Bfront = B.z <= -near;
+              if (Afront !== Bfront) {
+                const denom = (B.z - A.z);
+                if (Math.abs(denom) > 1e-8) {
+                  const t = (-near - A.z) / denom;
+                  const tt = Math.max(0, Math.min(1, t));
+                  const inter = worldPoints[a].clone().lerp(worldPoints[b], tt);
+                  clippedWorldPts.push(inter);
+                }
+              }
+            }
+          } else if (worldPoints.length >= 2) {
+            // generic pairwise clipping (walk edges)
+            const camPts = worldPoints.map(wp => wp.clone().applyMatrix4(camInv));
+            const L = worldPoints.length;
+            for (let i = 0; i < L; i++) {
+              const j = (i + 1) % L;
+              const A = camPts[i], B = camPts[j];
+              const Aw = worldPoints[i], Bw = worldPoints[j];
+              const Afront = A.z <= -near;
+              const Bfront = B.z <= -near;
+              if (Afront) clippedWorldPts.push(Aw.clone());
+              if (Afront !== Bfront) {
+                const denom = (B.z - A.z);
+                if (Math.abs(denom) > 1e-8) {
+                  const t = (-near - A.z) / denom;
+                  const tt = Math.max(0, Math.min(1, t));
+                  clippedWorldPts.push(Aw.clone().lerp(Bw, tt));
+                }
+              }
+            }
+          } else {
+            // too few samples - leave clippedWorldPts empty to trigger fallback
+          }
+
+          // project clipped points to 2D
+          for (let wp of clippedWorldPts) {
+            const s = projectWorldToScreen(wp);
+            if (s) {
+              // clamp to a reasonable range to avoid enormous polygons
+              const clamp = (v, mn, mx) => Math.max(mn, Math.min(mx, v));
+              s.x = clamp(s.x, -canvas.width * 3, canvas.width * 4);
+              s.y = clamp(s.y, -canvas.height * 3, canvas.height * 4);
+              pts2d.push({ x: s.x, y: s.y });
+            }
+          }
+
+          // fallback: if clipping produced nothing, try to project some original points (sanitized),
+          // otherwise fall back to center marker so object does not vanish
+          if (pts2d.length === 0) {
+            // attempt to project original worldPoints but sanitize/protect against behind-camera points
+            for (let wp of worldPoints) {
+              const p = wp.clone().project(camera);
+              if (!isFinite(p.x) || !isFinite(p.y)) continue;
+              // clamp NDC so behind-camera extremes become finite screen coords
+              const ndcX = Math.max(-10, Math.min(10, p.x));
+              const ndcY = Math.max(-10, Math.min(10, p.y));
+              pts2d.push({ x: (ndcX * 0.5 + 0.5) * canvas.width, y: (-ndcY * 0.5 + 0.5) * canvas.height });
+            }
+          }
+
+          // If still empty -> center marker fallback
           if (pts2d.length === 0) {
             drawables.push({ type: 'rect', obj, sx, sy, dist, sizePx: obj.userData?.markerSizePx ?? 12 });
             return;
-          } else {
-            const hull = convexHull(pts2d);
-            if (hull.length >= 3) {
-              drawables.push({ type: 'poly', obj, pts: hull, dist, projZ: proj.z });
-            } else if (hull.length === 2) {
-              drawables.push({ type: 'line', obj, pts: hull, dist });
-            } else {
-              // single point fallback: draw a marker
-              drawables.push({ type: 'rect', obj, sx: pts2d[0].x, sy: pts2d[0].y, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
-            }
-            return;
           }
+
+          // build hull from pts2d and add appropriate drawable
+          const hull = convexHull(pts2d);
+          if (hull.length >= 3) {
+            drawables.push({ type: 'poly', obj, pts: hull, dist, projZ: proj.z });
+          } else if (hull.length === 2) {
+            drawables.push({ type: 'line', obj, pts: hull, dist });
+          } else {
+            drawables.push({ type: 'rect', obj, sx: pts2d[0].x, sy: pts2d[0].y, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
+          }
+          return;
         } else {
           // unknown / fallback: only draw marker if explicitly requested
           if (obj.userData?.forceMarker) {
@@ -1084,7 +1171,6 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
 
   return api;
 }
-
 
 /* ---------- Updated scene initializers (CPU renderer) ---------- */
 
@@ -3182,6 +3268,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
