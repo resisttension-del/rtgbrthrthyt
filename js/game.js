@@ -810,7 +810,6 @@ function setupDetailToggle() {
   
 }
 
-
 function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
   const canvas = document.createElement('canvas');
   canvas.style.position = 'relative';
@@ -824,8 +823,8 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
   const tmpPos = new THREE.Vector3();
   const tmpVec = new THREE.Vector3();
   const tmpVec2 = new THREE.Vector3();
-  const tmpMat = new THREE.Matrix4();
-  const tmpBoxCorner = new THREE.Vector3();
+  const tmpMatrix = new THREE.Matrix4();
+  const tmpSphere = new THREE.Sphere();
 
   // helper: build convex hull (Andrew monotone chain) of 2D points
   function convexHull(points) {
@@ -864,14 +863,7 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
     },
     _clearColor: { hex: 0x000000, alpha: 1 },
 
-    // Basic render: draw sprites (material.map.image) and approximated shapes for meshes
     render(scene, camera) {
-      // prepare camera/frustum once per-frame for accurate culling
-      camera.updateMatrixWorld && camera.updateMatrixWorld();
-      const projScreenMatrix = new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
-      const frustum = new THREE.Frustum();
-      frustum.setFromProjectionMatrix(projScreenMatrix);
-
       // Clear with the clear color (converted to CSS)
       const c = api._clearColor;
       const r = (c.hex >> 16) & 0xff;
@@ -885,100 +877,49 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
 
       // collect drawables (so we can sort by depth)
       const drawables = [];
-
       scene.traverse((obj) => {
         if (!obj.visible) return;
         if (obj.isCamera || obj.isLight) return;
 
-        // Handle InstancedMesh (optional — limited, but better than skipping)
-        if (obj.isInstancedMesh) {
-          const maxInstances = obj.userData?.instanceLimit ?? obj.count; // allow limiting in userData
-          const matrix = new THREE.Matrix4();
-          for (let i = 0; i < Math.min(maxInstances, obj.count); i++) {
-            obj.getMatrixAt(i, matrix); // local instance matrix
-            tmpMat.copy(matrix).multiply(obj.matrixWorld); // instance world matrix = obj.matrixWorld * instanceMatrix
-            tmpPos.setFromMatrixPosition(tmpMat);
-            // frustum test
-            if (!frustum.containsPoint(tmpPos) && !obj.userData?.alwaysRender) continue;
-
-            // project
-            proj.copy(tmpPos).project(camera);
-            const sx = (proj.x * 0.5 + 0.5) * canvas.width;
-            const sy = (-proj.y * 0.5 + 0.5) * canvas.height;
-            const dist = camera.position.distanceTo(tmpPos);
-            // prefer instance-specific visual if provided, otherwise fallback to obj
-            const mapImage = (obj.material && obj.material.map && obj.material.map.image) ? obj.material.map.image : null;
-            drawables.push({ type: 'inst', obj, sx, sy, dist, projZ: proj.z, mapImage, instanceMatrix: tmpMat.clone(), instanceId: i });
-          }
-          return; // continue scene traversal (don't treat instanced as normal mesh)
+        // Use the bounding sphere for accurate culling
+        if (obj.geometry) {
+            if (!obj.geometry.boundingSphere) {
+                obj.geometry.computeBoundingSphere();
+            }
+            if (obj.geometry.boundingSphere) {
+                tmpSphere.copy(obj.geometry.boundingSphere).applyMatrix4(obj.matrixWorld);
+                if (camera.isPerspectiveCamera) {
+                    if (!camera.frustum.containsSphere(tmpSphere)) {
+                        return; // Frustum culling
+                    }
+                }
+            }
         }
-
+        
         // World position (center)
         obj.getWorldPosition(tmpPos);
-
-        // Quick center-frustum test first (but not only test) to avoid projecting everything.
-        if (!frustum.containsPoint(tmpPos)) {
-          // if object has bounding geometry, we will test its world points below — but if no geometry and not alwaysRender, skip
-          if (!obj.geometry && !obj.userData?.alwaysRender) return;
-        }
-
-        // screen coords of center (used for some fallbacks)
-        proj.copy(tmpPos).project(camera); // NDC -1..1
-        const sx = (proj.x * 0.5 + 0.5) * canvas.width;
-        const sy = (-proj.y * 0.5 + 0.5) * canvas.height;
-
-        // distance for depth sorting
         const dist = camera.position.distanceTo(tmpPos);
 
-        // check for texture (Sprites and textured materials)
-        let mapImage = null;
-        if (obj.isSprite) {
-          // Sprites use material.map.image
-          mapImage = obj.material && obj.material.map && obj.material.map.image ? obj.material.map.image : null;
-          if (mapImage) {
-            drawables.push({ type: 'sprite', obj, sx, sy, dist, projZ: proj.z, mapImage });
-            return;
-          }
-        } else {
-          mapImage = obj.material && obj.material.map && obj.material.map.image ? obj.material.map.image : null;
-          if (mapImage) {
-            drawables.push({ type: 'image', obj, sx, sy, dist, projZ: proj.z, mapImage });
-            return;
-          }
-        }
+        // check for texture
+        const mapImage = obj.material && obj.material.map && obj.material.map.image ? obj.material.map.image : null;
 
-        // If mesh with geometry, compute accurate world-space sample points (boundingBox preferred)
-        if (obj.isMesh && obj.geometry) {
+        // categorize drawable
+        if (mapImage) {
+          proj.copy(tmpPos).project(camera);
+          const sx = (proj.x * 0.5 + 0.5) * canvas.width;
+          const sy = (-proj.y * 0.5 + 0.5) * canvas.height;
+          drawables.push({ type: 'image', obj, sx, sy, dist, projZ: proj.z, mapImage });
+        } else if (obj.isMesh && obj.geometry) {
           const geom = obj.geometry;
-          if (!geom.boundingBox) geom.computeBoundingBox && geom.computeBoundingBox();
-          if (!geom.boundingSphere) geom.computeBoundingSphere && geom.computeBoundingSphere();
-
-          const worldPoints = [];
-          if (geom.boundingBox) {
-            const bb = geom.boundingBox;
-            const min = bb.min;
-            const max = bb.max;
-            // corners in local space
-            const corners = [
-              [min.x, min.y, min.z],
-              [min.x, min.y, max.z],
-              [min.x, max.y, min.z],
-              [min.x, max.y, max.z],
-              [max.x, min.y, min.z],
-              [max.x, min.y, max.z],
-              [max.x, max.y, min.z],
-              [max.x, max.y, max.z],
-            ];
-            for (let c of corners) {
-              tmpVec.set(c[0], c[1], c[2]).applyMatrix4(obj.matrixWorld);
-              worldPoints.push(tmpVec.clone());
-            }
-          } else if (geom.boundingSphere) {
+          if (!geom.boundingSphere) geom.computeBoundingSphere();
+          
+          if (geom.boundingSphere) {
+            const worldPoints = [];
             const bs = geom.boundingSphere;
             const center = bs.center.clone().applyMatrix4(obj.matrixWorld);
-            // scale radius properly using object's matrixWorld scale
-            const scale = obj.matrixWorld.getMaxScaleOnAxis ? obj.matrixWorld.getMaxScaleOnAxis() : 1;
-            const r = bs.radius * scale;
+            const r = bs.radius * (obj.matrixWorld.getMaxScaleOnAxis ? obj.matrixWorld.getMaxScaleOnAxis() : 1);
+            
+            // Generate a set of points from the bounding sphere
             worldPoints.push(center.clone());
             worldPoints.push(center.clone().add(new THREE.Vector3(r, 0, 0)));
             worldPoints.push(center.clone().add(new THREE.Vector3(-r, 0, 0)));
@@ -986,64 +927,35 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
             worldPoints.push(center.clone().add(new THREE.Vector3(0, -r, 0)));
             worldPoints.push(center.clone().add(new THREE.Vector3(0, 0, r)));
             worldPoints.push(center.clone().add(new THREE.Vector3(0, 0, -r)));
-          } else {
-            const posAttr = geom.attributes && geom.attributes.position;
-            if (posAttr && posAttr.count > 0) {
-              // sample up to 12 positions evenly across the position attribute
-              const step = Math.max(1, Math.floor(posAttr.count / 12));
-              for (let i = 0; i < Math.min(posAttr.count, 12 * step); i += step) {
-                tmpVec.set(
-                  posAttr.getX(i),
-                  posAttr.getY(i),
-                  posAttr.getZ(i)
-                ).applyMatrix4(obj.matrixWorld);
-                worldPoints.push(tmpVec.clone());
-              }
-            } else {
-              worldPoints.push(tmpPos.clone());
-            }
-          }
 
-          // project worldPoints to screen-space 2D points and do frustum test using frustum.containsPoint
-          const pts2d = [];
-          let anyVisible = false;
-          for (let wp of worldPoints) {
-            if (frustum.containsPoint(wp)) anyVisible = true;
-            proj.copy(wp).project(camera);
-            // skip very far off points (outside clip)
-            if (proj.z > 1 || proj.z < -1) continue;
-            const px = (proj.x * 0.5 + 0.5) * canvas.width;
-            const py = (-proj.y * 0.5 + 0.5) * canvas.height;
-            pts2d.push({ x: px, y: py });
-          }
-
-          // if none of the sampled points project on-screen, skip unless object forces marker
-          if (pts2d.length === 0) {
-            if (obj.userData?.forceMarker) {
-              drawables.push({ type: 'rect', obj, sx, sy, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
+            const pts2d = [];
+            for (let wp of worldPoints) {
+                proj.copy(wp).project(camera);
+                // No need for strict Z-cull here, frustum handles it
+                const px = (proj.x * 0.5 + 0.5) * canvas.width;
+                const py = (-proj.y * 0.5 + 0.5) * canvas.height;
+                pts2d.push({ x: px, y: py });
             }
-            return;
-          } else {
+
             const hull = convexHull(pts2d);
             if (hull.length >= 3) {
               drawables.push({ type: 'poly', obj, pts: hull, dist, projZ: proj.z });
-            } else if (hull.length === 2) {
-              drawables.push({ type: 'line', obj, pts: hull, dist });
             } else {
-              // single point fallback: draw marker if forced
-              if (obj.userData?.forceMarker) {
-                drawables.push({ type: 'rect', obj, sx: pts2d[0].x, sy: pts2d[0].y, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
-              } else {
-                // otherwise draw a small hull point (use hull as 1-pt polygon) to help accuracy
-                drawables.push({ type: 'rect', obj, sx: pts2d[0].x, sy: pts2d[0].y, dist, sizePx: Math.max(3, 8 - Math.floor(dist * 0.01)) });
-              }
+              // Fallback to a single point marker if polygon can't be formed
+              drawables.push({ type: 'rect', obj, sx: pts2d[0].x, sy: pts2d[0].y, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
             }
-            return;
+          } else {
+            // No bounding sphere, use marker
+            proj.copy(tmpPos).project(camera);
+            const sx = (proj.x * 0.5 + 0.5) * canvas.width;
+            const sy = (-proj.y * 0.5 + 0.5) * canvas.height;
+            drawables.push({ type: 'rect', obj, sx, sy, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
           }
-        }
-
-        // fallback: unknown object type -> draw marker if requested
-        if (obj.userData?.forceMarker) {
+        } else {
+          // unknown / fallback: draw marker
+          proj.copy(tmpPos).project(camera);
+          const sx = (proj.x * 0.5 + 0.5) * canvas.width;
+          const sy = (-proj.y * 0.5 + 0.5) * canvas.height;
           drawables.push({ type: 'rect', obj, sx, sy, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
         }
       });
@@ -1056,7 +968,7 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
         const d = drawables[i];
         const { obj, dist } = d;
 
-        // common color selection (respect material.color when available)
+        // common color selection
         let color = obj.userData?.color;
         if (!color && obj.material && obj.material.color) {
           try {
@@ -1067,28 +979,15 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
         }
         color = color || obj.userData?.color || 'white';
 
-        // get effective alpha (respect material.transparent & material.opacity)
-        const effectiveAlpha = (obj.userData?.opacity ?? (obj.material && typeof obj.material.opacity !== 'undefined' ? obj.material.opacity : 1));
-
-        if ((d.type === 'image' || d.type === 'sprite' || d.type === 'inst') && d.mapImage && d.mapImage.width) {
+        if (d.type === 'image' && d.mapImage && d.mapImage.width) {
           let size;
-          // for instanced meshes we might not have geometry bounding box computed the way we want,
-          // so fall back to a size derived from distance for those.
-          if (obj.geometry && obj.geometry.boundingBox && d.type !== 'inst') {
-            const bb = obj.geometry.boundingBox;
-            const corners = [
-              [bb.min.x, bb.min.y, bb.min.z],
-              [bb.max.x, bb.max.y, bb.max.z]
-            ];
-            const screenPts = [];
-            for (let c of corners) {
-              tmpVec.set(c[0], c[1], c[2]).applyMatrix4(obj.matrixWorld);
-              const p = tmpVec.project(camera);
-              screenPts.push({ x: (p.x * 0.5 + 0.5) * canvas.width, y: (-p.y * 0.5 + 0.5) * canvas.height });
-            }
-            const wPx = Math.abs(screenPts[0].x - screenPts[1].x);
-            const hPx = Math.abs(screenPts[0].y - screenPts[1].y);
-            size = Math.max(8, obj.userData?.sizePx ?? Math.max(wPx, hPx, 32));
+          if (obj.geometry && obj.geometry.boundingSphere) {
+            const bs = obj.geometry.boundingSphere;
+            tmpVec.copy(bs.center).add(new THREE.Vector3(bs.radius, 0, 0)).applyMatrix4(obj.matrixWorld).project(camera);
+            tmpVec2.copy(bs.center).sub(new THREE.Vector3(bs.radius, 0, 0)).applyMatrix4(obj.matrixWorld).project(camera);
+            const wPx = Math.abs((tmpVec.x - tmpVec2.x) * 0.5 * canvas.width);
+            const hPx = Math.abs((tmpVec.y - tmpVec2.y) * 0.5 * canvas.height);
+            size = Math.max(8, obj.userData?.sizePx ?? Math.max(wPx, hPx));
           } else {
             const baseSize = obj.userData?.sizePx ?? 300;
             size = Math.max(8, baseSize * (1 / Math.max(0.1, dist * 0.05)));
@@ -1097,14 +996,8 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
           ctx.translate(d.sx, d.sy);
           const rot = obj.userData?.rotation ?? (obj.rotation?.z ?? 0);
           if (rot) ctx.rotate(rot);
-          ctx.globalAlpha = effectiveAlpha;
-          // If sprite, optionally scale by sprite.scale if available
-          if (d.type === 'sprite' && obj.scale) {
-            const scaleFactor = Math.max(0.1, (obj.scale.x + obj.scale.y) / 2);
-            ctx.drawImage(d.mapImage, -size / 2 * scaleFactor, -size / 2 * scaleFactor, size * scaleFactor, size * scaleFactor);
-          } else {
-            ctx.drawImage(d.mapImage, -size / 2, -size / 2, size, size);
-          }
+          ctx.globalAlpha = obj.userData?.opacity ?? (obj.material?.opacity ?? 1);
+          ctx.drawImage(d.mapImage, -size / 2, -size / 2, size, size);
           ctx.restore();
         } else if (d.type === 'poly' && d.pts) {
           ctx.save();
@@ -1112,10 +1005,10 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
           ctx.moveTo(d.pts[0].x, d.pts[0].y);
           for (let j = 1; j < d.pts.length; j++) ctx.lineTo(d.pts[j].x, d.pts[j].y);
           ctx.closePath();
-          ctx.globalAlpha = Math.max(0.2, Math.min(1, (effectiveAlpha * (1 - (dist * 0.002)))));
+          ctx.globalAlpha = Math.max(0.2, Math.min(1, 1 - (dist * 0.002)));
           ctx.fillStyle = color;
           ctx.fill();
-          ctx.globalAlpha = Math.min(0.9, effectiveAlpha * 0.6);
+          ctx.globalAlpha = 0.6;
           ctx.lineWidth = Math.max(1, 2 - (dist * 0.001));
           ctx.strokeStyle = 'rgba(0,0,0,0.6)';
           ctx.stroke();
@@ -1126,20 +1019,18 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
           ctx.lineTo(d.pts[1].x, d.pts[1].y);
           ctx.strokeStyle = color;
           ctx.lineWidth = obj.userData?.lineWidth ?? 3;
-          ctx.globalAlpha = Math.max(0.1, effectiveAlpha * (1 - Math.min(0.9, dist * 0.002)));
+          ctx.globalAlpha = 1 - Math.min(0.9, dist * 0.002);
           ctx.stroke();
         } else if (d.type === 'rect') {
           // small centered rectangle marker
           const size = d.sizePx ?? Math.max(2, Math.round(12 * (1 / Math.max(0.1, dist * 0.05))));
-          const x = (d.sx || d.sx === 0) ? d.sx : 0;
-          const y = (d.sy || d.sy === 0) ? d.sy : 0;
+          const x = d.sx;
+          const y = d.sy;
           ctx.save();
-          ctx.globalAlpha = Math.max(0.15, Math.min(1, effectiveAlpha * (1 - (dist * 0.001))));
+          ctx.globalAlpha = Math.max(0.5, Math.min(1, 1 - (dist * 0.002)));
           ctx.fillStyle = color;
           ctx.fillRect(x - size / 2, y - size / 2, size, size);
           ctx.restore();
-        } else {
-          // intentionally no automatic sphere/arc drawing — keep visualizations focused and accurate.
         }
       }
     }
@@ -2435,6 +2326,10 @@ function round2(n) {
 
 
 
+// Add a global-level frustum variable
+const frustum = new THREE.Frustum();
+const matrix = new THREE.Matrix4();
+
 export function animate(timestamp) {
   // Schedule the next frame first
   requestAnimationFrame(animate);
@@ -2488,6 +2383,13 @@ export function animate(timestamp) {
       }
       if (respawnOverlay) respawnOverlay.style.display = "flex";
 
+      // --- FRUSTUM UPDATE FIX ---
+      if (window.camera) {
+        window.camera.updateMatrixWorld();
+        frustum.setFromProjectionMatrix(matrix.multiplyMatrices(window.camera.projectionMatrix, window.camera.matrixWorldInverse));
+        window.camera.frustum = frustum; // Attach the frustum to the camera
+      }
+      
       // Render final frame
       if (composer && typeof composer.render === 'function') {
         composer.render();
@@ -2648,6 +2550,13 @@ export function animate(timestamp) {
           });
         }
       }
+    }
+
+    // --- FRUSTUM UPDATE FIX ---
+    if (window.camera) {
+      window.camera.updateMatrixWorld();
+      frustum.setFromProjectionMatrix(matrix.multiplyMatrices(window.camera.projectionMatrix, window.camera.matrixWorldInverse));
+      window.camera.frustum = frustum; // Attach the frustum to the camera
     }
 
     // Render
@@ -3249,6 +3158,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
