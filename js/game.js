@@ -815,187 +815,213 @@ function createCanvasRenderer({ width = 1280, height = 720, opts = {} } = {}) {
   const canvas = document.createElement('canvas');
   canvas.style.position = 'relative';
   canvas.style.zIndex = '0';
-  canvas.width = width; canvas.height = height;
+  canvas.width = width;
+  canvas.height = height;
   const ctx = canvas.getContext('2d');
 
-  // Tunables
-  const MAX_VERTS_FOR_HULL = opts.maxVertsForHull ?? 800;
-  const MAX_TRIS_FOR_HULL  = opts.maxTrisForHull ?? 1000;
-  const MAX_DIST_FOR_HULL  = opts.maxDistForHull ?? 100;
-  const RADIAL_BINS = opts.radialBins ?? 64; // buckets for angle sweep
-  const BRIDGE_GAP_BINS = opts.bridgeGapBins ?? 3; // if gap <= this, bridge it
-
+  // Config: tune these for your performance envelope
+  const MAX_VERTS_FOR_HULL = opts.maxVertsForHull ?? 800;     // project+hull only if vertex count <= this
+  const MAX_TRIS_FOR_HULL  = opts.maxTrisForHull ?? 1000;    // or triangle count <= this
+  const MAX_DIST_FOR_HULL  = opts.maxDistForHull ?? 100;     // only do hull if object closer than this distance
+  const MIN_ALPHA_DIST     = opts.minAlphaDist ?? 600;       // distance where alpha reduces
   const tmpVec = new THREE.Vector3();
   const proj = new THREE.Vector3();
   const tmpPos = new THREE.Vector3();
-  const tmpInv = new THREE.Matrix4();
 
-  function drawPolyline(points, color, dist, close = true) {
-    if (!points || points.length === 0) return;
-    const centerZ = points.reduce((s, p) => s + p.z, 0) / points.length;
+  // Simple bbox wireframe (very cheap)
+  function drawBoundingBoxWireframe(points2d, color, dist) {
+    if (!points2d || points2d.length === 0) return;
+    const centerZ = points2d.reduce((s, p) => s + p.z, 0) / points2d.length;
     if (centerZ > 1) return;
+
     ctx.save();
-    ctx.globalAlpha = Math.max(0.2, Math.min(1, 1 - (dist / 600)));
+    ctx.globalAlpha = Math.max(0.15, Math.min(1, 1 - (dist / MIN_ALPHA_DIST)));
     ctx.strokeStyle = color;
     ctx.lineWidth = Math.max(1, 2 - (dist * 0.002));
+    // assume points2d order doesn't matter here; draw hull of bbox corners
     ctx.beginPath();
-    ctx.moveTo(points[0].x, points[0].y);
-    for (let i = 1; i < points.length; i++) ctx.lineTo(points[i].x, points[i].y);
-    if (close) ctx.closePath();
+    for (let i = 0; i < points2d.length; i++) {
+      const p = points2d[i];
+      if (i === 0) ctx.moveTo(p.x, p.y);
+      else ctx.lineTo(p.x, p.y);
+    }
+    ctx.closePath();
     ctx.stroke();
     ctx.restore();
   }
 
-  // radial silhouette: cheap and handles camera-inside nicely
-  function drawRadialSilhouette(obj, geom, color, dist, camera) {
-    const posAttr = geom.attributes && geom.attributes.position;
-    if (!posAttr) return false;
-    const vertCount = posAttr.count;
-    const indexAttr = geom.index;
-    const triCount = indexAttr ? indexAttr.count / 3 : vertCount / 3;
-    if (vertCount > MAX_VERTS_FOR_HULL || triCount > MAX_TRIS_FOR_HULL) return false; // too big
-
-    // check if camera is inside object's bounding box (cheap)
-    let cameraInside = false;
-    if (geom.boundingBox) {
-      tmpInv.copy(obj.matrixWorld).invert();
-      const camLocal = camera.position.clone().applyMatrix4(tmpInv);
-      const min = geom.boundingBox.min, max = geom.boundingBox.max;
-      cameraInside = (camLocal.x >= min.x && camLocal.x <= max.x &&
-                      camLocal.y >= min.y && camLocal.y <= max.y &&
-                      camLocal.z >= min.z && camLocal.z <= max.z);
+  // Minimal Andrew monotone chain convex hull on 2D points (returns array of points in hull order)
+  function convexHull2D(pts) {
+    if (pts.length <= 1) return pts.slice();
+    // sort by x, then y
+    pts.sort((a, b) => (a.x === b.x ? a.y - b.y : a.x - b.x));
+    const cross = (o, a, b) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+    const lower = [];
+    for (let p of pts) {
+      while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop();
+      lower.push(p);
     }
-
-    // We will run radial method if camera is inside OR object is close enough and small
-    if (!cameraInside && dist > MAX_DIST_FOR_HULL) return false;
-
-    // bin by angle around canvas center
-    const cx = canvas.width * 0.5;
-    const cy = canvas.height * 0.5;
-    const bins = new Array(RADIAL_BINS).fill(null);
-
-    for (let i = 0; i < posAttr.count; i++) {
-      tmpVec.fromBufferAttribute(posAttr, i).applyMatrix4(obj.matrixWorld);
-      proj.copy(tmpVec).project(camera);
-      const z = proj.z;
-      // skip vertices that are fully behind camera
-      if (z > 1) continue;
-      const sx = (proj.x * 0.5 + 0.5) * canvas.width;
-      const sy = (-proj.y * 0.5 + 0.5) * canvas.height;
-      // angle relative to center
-      const ang = Math.atan2(sy - cy, sx - cx);
-      const angNorm = ang < 0 ? ang + Math.PI * 2 : ang;
-      const bin = Math.floor((angNorm / (Math.PI * 2)) * RADIAL_BINS);
-      // distance metric = world-space distance from camera (farthest preferred)
-      const worldDist = camera.position.distanceTo(tmpVec);
-      const entry = bins[bin];
-      if (!entry || worldDist > entry.worldDist) {
-        bins[bin] = { x: sx, y: sy, z: z, worldDist, ang: angNorm, idx: i };
-      }
+    const upper = [];
+    for (let i = pts.length - 1; i >= 0; i--) {
+      const p = pts[i];
+      while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop();
+      upper.push(p);
     }
-
-    // collect ordered points, optionally bridge small gaps
-    const pts = [];
-    const nonEmptyIdxs = [];
-    for (let i = 0; i < RADIAL_BINS; i++) if (bins[i]) nonEmptyIdxs.push(i);
-
-    if (nonEmptyIdxs.length === 0) return false;
-
-    // optionally bridge tiny holes: if a gap of consecutive empty bins <= BRIDGE_GAP_BINS, fill by using nearest neighbor
-    if (BRIDGE_GAP_BINS > 0) {
-      let bridged = 0;
-      for (let start = 0; start < RADIAL_BINS; start++) {
-        if (bins[start]) continue;
-        // count length of empty run
-        let run = 1;
-        while (run <= BRIDGE_GAP_BINS && bins[(start + run) % RADIAL_BINS] === null) run++;
-        if (run <= BRIDGE_GAP_BINS) {
-          // find left and right filled neighbors
-          let left = (start - 1 + RADIAL_BINS) % RADIAL_BINS;
-          while (left !== start && !bins[left]) left = (left - 1 + RADIAL_BINS) % RADIAL_BINS;
-          let right = (start + run) % RADIAL_BINS;
-          while (right !== start && !bins[right]) right = (right + 1) % RADIAL_BINS;
-          if (bins[left] && bins[right]) {
-            // create pseudo entries across the gap by linear interpolation in screen space
-            for (let g = 0; g < run; g++) {
-              const t = (g + 1) / (run + 1);
-              const lx = bins[left].x, ly = bins[left].y;
-              const rx = bins[right].x, ry = bins[right].y;
-              const ix = lx + (rx - lx) * t;
-              const iy = ly + (ry - ly) * t;
-              const iz = Math.min(bins[left].z, bins[right].z); // conservative
-              bins[(start + g) % RADIAL_BINS] = { x: ix, y: iy, z: iz, worldDist: Math.max(bins[left].worldDist, bins[right].worldDist) };
-              bridged++;
-            }
-          }
-        }
-        start += run;
-      }
-    }
-
-    // final ordered collect
-    for (let i = 0; i < RADIAL_BINS; i++) {
-      const b = bins[i];
-      if (b) pts.push({ x: b.x, y: b.y, z: b.z });
-    }
-
-    if (pts.length === 0) return false;
-
-    // draw polyline (close loop)
-    drawPolyline(pts, color, dist, true);
-    return true;
+    lower.pop();
+    upper.pop();
+    return lower.concat(upper);
   }
 
-  // --- the rest of the renderer (clear, traverse, bounding box fallback) ---
+  // Draw hull polyline (fast)
+  function drawHull(hullPts, color, dist) {
+    if (!hullPts || hullPts.length === 0) return;
+    // cull if centroid behind camera
+    const centerZ = hullPts.reduce((s, p) => s + p.z, 0) / hullPts.length;
+    if (centerZ > 1) return;
+
+    ctx.save();
+    ctx.globalAlpha = Math.max(0.2, Math.min(1, 1 - (dist / MIN_ALPHA_DIST)));
+    ctx.strokeStyle = color;
+    ctx.lineWidth = Math.max(1, 2 - (dist * 0.002));
+    ctx.beginPath();
+    ctx.moveTo(hullPts[0].x, hullPts[0].y);
+    for (let i = 1; i < hullPts.length; i++) ctx.lineTo(hullPts[i].x, hullPts[i].y);
+    ctx.closePath();
+    ctx.stroke();
+    ctx.restore();
+  }
+
   const api = {
     domElement: canvas,
-    setSize(w, h, updateStyle = true) { canvas.width = w; canvas.height = h; if (updateStyle) { canvas.style.width = `${w}px`; canvas.style.height = `${h}px`; } },
-    setClearColor(hex, alpha = 1) { api._clearColor = { hex, alpha }; },
+    setSize(w, h, updateStyle = true) {
+      canvas.width = w;
+      canvas.height = h;
+      if (updateStyle) {
+        canvas.style.width = `${w}px`;
+        canvas.style.height = `${h}px`;
+      }
+    },
+    setClearColor(hex, alpha = 1) {
+      api._clearColor = { hex, alpha };
+    },
     _clearColor: { hex: 0x000000, alpha: 1 },
 
     render(scene, camera) {
+      // clear
       const c = api._clearColor;
-      const r = (c.hex >> 16) & 0xff, g = (c.hex >> 8) & 0xff, b = c.hex & 0xff;
-      ctx.save(); ctx.setTransform(1,0,0,1,0,0); ctx.fillStyle = `rgba(${r},${g},${b},${c.alpha})`; ctx.fillRect(0,0,canvas.width,canvas.height); ctx.restore();
+      const r = (c.hex >> 16) & 0xff;
+      const g = (c.hex >> 8) & 0xff;
+      const b = c.hex & 0xff;
+      ctx.save();
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.fillStyle = `rgba(${r},${g},${b},${c.alpha})`;
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.restore();
 
       const drawables = [];
+
       scene.traverse((obj) => {
         if (!obj.visible) return;
         if (obj.isCamera || obj.isLight) return;
         if (!obj.isMesh || !obj.geometry) return;
+
         obj.getWorldPosition(tmpPos);
         const dist = camera.position.distanceTo(tmpPos);
 
+        // cheap color resolution
         let color = obj.userData?.color;
         if (!color && obj.material && obj.material.color) {
-          try { color = obj.material.color.getStyle ? obj.material.color.getStyle() : `#${obj.material.color.getHexString()}`; } catch(e) { color = obj.userData?.color || 'white'; }
+          try { color = obj.material.color.getStyle ? obj.material.color.getStyle() : `#${obj.material.color.getHexString()}`; }
+          catch (e) { color = obj.userData?.color || 'white'; }
         }
         color = color || obj.userData?.color || 'white';
 
         const geom = obj.geometry;
+        // ensure bounding box available to do distance culling and cheap bbox fallback
         if (!geom.boundingBox && geom.computeBoundingBox) geom.computeBoundingBox();
         drawables.push({ obj, geom, dist, color, tmpPos: tmpPos.clone() });
       });
 
-      drawables.sort((a,b) => b.dist - a.dist);
+      // draw back-to-front to keep overlays readable
+      drawables.sort((a, b) => b.dist - a.dist);
 
       for (const d of drawables) {
-        const { obj, geom, dist, color } = d;
-        const posAttr = geom.attributes && geom.attributes.position;
-        const vertCount = posAttr ? posAttr.count : 0;
-        const triCount = geom.index ? geom.index.count / 3 : vertCount / 3;
-        const tryRadial = (vertCount <= MAX_VERTS_FOR_HULL && triCount <= MAX_TRIS_FOR_HULL);
+        const { obj, geom, dist, color, tmpPos } = d;
 
-        if (tryRadial) {
-          const ok = drawRadialSilhouette(obj, geom, color, dist, scene.camera || scene.userData.camera || (window.camera || null) || (typeof camera !== 'undefined' ? camera : null));
-          // note: above camera lookup is defensive; in your usage just pass camera to render()
-          // if radial method failed, or returned false, we fall back to bounding box below
-          if (ok) continue;
+        // If object far away, always use bbox (cheap)
+        if (dist > Math.max(MAX_DIST_FOR_HULL, MAX_DIST_FOR_HULL * 2)) {
+          // draw bbox fallback
+          if (geom.boundingBox) {
+            const bb = geom.boundingBox;
+            const min = bb.min, max = bb.max;
+            const corners = [
+              new THREE.Vector3(min.x, min.y, min.z),
+              new THREE.Vector3(min.x, min.y, max.z),
+              new THREE.Vector3(min.x, max.y, min.z),
+              new THREE.Vector3(min.x, max.y, max.z),
+              new THREE.Vector3(max.x, min.y, min.z),
+              new THREE.Vector3(max.x, min.y, max.z),
+              new THREE.Vector3(max.x, max.y, min.z),
+              new THREE.Vector3(max.x, max.y, max.z),
+            ];
+            const pts2d = [];
+            for (let c of corners) {
+              tmpVec.copy(c).applyMatrix4(obj.matrixWorld);
+              proj.copy(tmpVec).project(camera);
+              const px = (proj.x * 0.5 + 0.5) * canvas.width;
+              const py = (-proj.y * 0.5 + 0.5) * canvas.height;
+              pts2d.push({ x: px, y: py, z: proj.z });
+            }
+            drawBoundingBoxWireframe(pts2d, color, dist);
+          }
+          continue;
         }
 
-        // bounding box fallback (very cheap)
+        // Attempt cheap hull if geometry small & close enough
+        const posAttr = geom.attributes && geom.attributes.position;
+        const indexAttr = geom.index;
+        const vertCount = posAttr ? posAttr.count : 0;
+        const triCount = indexAttr ? (indexAttr.count / 3) : (vertCount / 3);
+
+        const tryHull = (vertCount <= MAX_VERTS_FOR_HULL && triCount <= MAX_TRIS_FOR_HULL && dist <= MAX_DIST_FOR_HULL);
+
+        if (tryHull && posAttr) {
+          // project vertices to 2D
+          const pts2d = [];
+          let zSum = 0;
+          for (let i = 0; i < posAttr.count; i++) {
+            tmpVec.fromBufferAttribute(posAttr, i).applyMatrix4(obj.matrixWorld);
+            proj.copy(tmpVec).project(camera);
+            const px = (proj.x * 0.5 + 0.5) * canvas.width;
+            const py = (-proj.y * 0.5 + 0.5) * canvas.height;
+            pts2d.push({ x: px, y: py, z: proj.z });
+            zSum += proj.z;
+          }
+          const avgZ = pts2d.length ? zSum / pts2d.length : 0;
+          // skip hull if mostly behind camera
+          if (avgZ <= 1 && pts2d.length > 2) {
+            // dedupe approximate points to reduce hull cost: round to 0.5 px and unique
+            const seen = new Set();
+            const uniq = [];
+            for (const p of pts2d) {
+              const key = `${Math.round(p.x*2)}_${Math.round(p.y*2)}`;
+              if (!seen.has(key)) { seen.add(key); uniq.push({ x: p.x, y: p.y, z: p.z }); }
+            }
+            if (uniq.length >= 3) {
+              const hull = convexHull2D(uniq);
+              // if hull is non-trivial, draw it
+              if (hull.length >= 3) {
+                drawHull(hull, color, dist);
+                continue;
+              }
+            }
+          }
+        }
+
+        // fallback: bounding box
         if (geom.boundingBox) {
-          const bb = geom.boundingBox; const min = bb.min, max = bb.max;
+          const bb = geom.boundingBox;
+          const min = bb.min, max = bb.max;
           const corners = [
             new THREE.Vector3(min.x, min.y, min.z),
             new THREE.Vector3(min.x, min.y, max.z),
@@ -1014,8 +1040,7 @@ function createCanvasRenderer({ width = 1280, height = 720, opts = {} } = {}) {
             const py = (-proj.y * 0.5 + 0.5) * canvas.height;
             pts2d.push({ x: px, y: py, z: proj.z });
           }
-          // draw a simple polyline of bbox corners (keeps it cheap)
-          drawPolyline(pts2d, color, dist, true);
+          drawBoundingBoxWireframe(pts2d, color, dist);
         }
       }
     }
@@ -3126,7 +3151,6 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
-
 
 
 
