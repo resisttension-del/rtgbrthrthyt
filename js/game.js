@@ -912,10 +912,9 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
           // Check if camera is inside bounding box
           let cameraInside = false;
           if (geom.boundingBox) {
-            const bb = geom.boundingBox;
-            const worldBB = bb.clone();
-            worldBB.applyMatrix4(obj.matrixWorld);
-            cameraInside = worldBB.containsPoint(camera.position);
+            const bb = geom.boundingBox.clone();
+            bb.applyMatrix4(obj.matrixWorld);
+            cameraInside = bb.containsPoint(camera.position);
           }
 
           const worldPoints = [];
@@ -937,8 +936,32 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
               tmpVec.set(c[0], c[1], c[2]).applyMatrix4(obj.matrixWorld);
               worldPoints.push(tmpVec.clone());
             }
+          } else if (geom.boundingSphere) {
+            const bs = geom.boundingSphere;
+            const center = bs.center.clone().applyMatrix4(obj.matrixWorld);
+            const r = bs.radius * (obj.matrixWorld.getMaxScaleOnAxis ? obj.matrixWorld.getMaxScaleOnAxis() : 1);
+            worldPoints.push(center.clone());
+            worldPoints.push(center.clone().add(new THREE.Vector3(r, 0, 0)));
+            worldPoints.push(center.clone().add(new THREE.Vector3(-r, 0, 0)));
+            worldPoints.push(center.clone().add(new THREE.Vector3(0, r, 0)));
+            worldPoints.push(center.clone().add(new THREE.Vector3(0, -r, 0)));
+            worldPoints.push(center.clone().add(new THREE.Vector3(0, 0, r)));
+            worldPoints.push(center.clone().add(new THREE.Vector3(0, 0, -r)));
+          } else {
+            const posAttr = geom.attributes && geom.attributes.position;
+            if (posAttr && posAttr.count > 0) {
+              for (let i = 0; i < Math.min(12, posAttr.count); i += Math.max(1, Math.floor(posAttr.count / 12))) {
+                tmpVec.set(
+                  posAttr.getX(i),
+                  posAttr.getY(i),
+                  posAttr.getZ(i)
+                ).applyMatrix4(obj.matrixWorld);
+                worldPoints.push(tmpVec.clone());
+              }
+            } else {
+              worldPoints.push(tmpPos.clone());
+            }
           }
-          // ... (boundingSphere and other cases as before) ...
 
           // If camera is inside, draw a marker at center
           if (cameraInside) {
@@ -953,7 +976,7 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
             return;
           }
 
-          // Otherwise, project worldPoints (but skip points behind the camera)
+          // Otherwise, project worldPoints (skip points behind camera)
           const pts2d = [];
           for (let wp of worldPoints) {
             proj.copy(wp).project(camera);
@@ -982,6 +1005,12 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
             }
             return;
           }
+        } else {
+          // unknown / fallback: only draw marker if explicitly requested
+          if (obj.userData?.forceMarker) {
+            drawables.push({ type: 'rect', obj, sx, sy, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
+          }
+        }
       });
 
       // Painter's order: furthest first (larger distance)
@@ -1072,7 +1101,6 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
 
   return api;
 }
-
 
 /* ---------- Updated scene initializers (CPU renderer) ---------- */
 
@@ -3170,6 +3198,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
