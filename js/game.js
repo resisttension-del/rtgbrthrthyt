@@ -823,7 +823,6 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
   const proj = new THREE.Vector3();
   const tmpPos = new THREE.Vector3();
   const tmpVec = new THREE.Vector3();
-  const tmpVec2 = new THREE.Vector3();
 
   // helper: build convex hull (Andrew monotone chain) of 2D points
   function convexHull(points) {
@@ -856,52 +855,38 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
         canvas.style.height = `${h}px`;
       }
     },
-    // Minimal clear color support
     setClearColor(hex, alpha = 1) {
       api._clearColor = { hex, alpha };
     },
     _clearColor: { hex: 0x000000, alpha: 1 },
 
-    // Basic render: draw sprites (material.map.image) and approximated shapes for meshes
     render(scene, camera) {
-      // Clear with the clear color (converted to CSS)
+      // Clear
       const c = api._clearColor;
-      const r = (c.hex >> 16) & 0xff;
-      const g = (c.hex >> 8) & 0xff;
-      const b = c.hex & 0xff;
       ctx.save();
       ctx.setTransform(1, 0, 0, 1, 0, 0);
-      ctx.fillStyle = `rgba(${r},${g},${b},${c.alpha})`;
+      ctx.fillStyle = `rgba(${(c.hex>>16)&255},${(c.hex>>8)&255},${c.hex&255},${c.alpha})`;
       ctx.fillRect(0, 0, canvas.width, canvas.height);
       ctx.restore();
 
-      // collect drawables (so we can sort by depth)
+      // Collect drawables for painter's order
       const drawables = [];
       scene.traverse((obj) => {
         if (!obj.visible) return;
         if (obj.isCamera || obj.isLight) return;
 
-        // World position (center)
         obj.getWorldPosition(tmpPos);
-        proj.copy(tmpPos).project(camera); // NDC -1..1
+        proj.copy(tmpPos).project(camera);
 
-        // quick NDC cull (if center far off-screen, skip). We allow some slack for large objects.
         if (proj.z > 1 || proj.z < -1 || proj.x < -2 || proj.x > 2 || proj.y < -2 || proj.y > 2) {
-          // still allow meshes that have explicit userData.alwaysRender = true
           if (!obj.userData?.alwaysRender) return;
         }
-
-        // screen coords
         const sx = (proj.x * 0.5 + 0.5) * canvas.width;
         const sy = (-proj.y * 0.5 + 0.5) * canvas.height;
-
-        // distance for depth sorting
         const dist = camera.position.distanceTo(tmpPos);
 
-        // check for texture
         const mapImage = obj.material && obj.material.map && obj.material.map.image ? obj.material.map.image : null;
 
-        // categorize drawable
         if (mapImage) {
           drawables.push({ type: 'image', obj, sx, sy, dist, projZ: proj.z, mapImage });
         } else if (obj.isMesh && obj.geometry) {
@@ -917,6 +902,7 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
             cameraInside = bb.containsPoint(camera.position);
           }
 
+          // Get corners
           const worldPoints = [];
           if (geom.boundingBox) {
             const bb = geom.boundingBox;
@@ -936,34 +922,9 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
               tmpVec.set(c[0], c[1], c[2]).applyMatrix4(obj.matrixWorld);
               worldPoints.push(tmpVec.clone());
             }
-          } else if (geom.boundingSphere) {
-            const bs = geom.boundingSphere;
-            const center = bs.center.clone().applyMatrix4(obj.matrixWorld);
-            const r = bs.radius * (obj.matrixWorld.getMaxScaleOnAxis ? obj.matrixWorld.getMaxScaleOnAxis() : 1);
-            worldPoints.push(center.clone());
-            worldPoints.push(center.clone().add(new THREE.Vector3(r, 0, 0)));
-            worldPoints.push(center.clone().add(new THREE.Vector3(-r, 0, 0)));
-            worldPoints.push(center.clone().add(new THREE.Vector3(0, r, 0)));
-            worldPoints.push(center.clone().add(new THREE.Vector3(0, -r, 0)));
-            worldPoints.push(center.clone().add(new THREE.Vector3(0, 0, r)));
-            worldPoints.push(center.clone().add(new THREE.Vector3(0, 0, -r)));
-          } else {
-            const posAttr = geom.attributes && geom.attributes.position;
-            if (posAttr && posAttr.count > 0) {
-              for (let i = 0; i < Math.min(12, posAttr.count); i += Math.max(1, Math.floor(posAttr.count / 12))) {
-                tmpVec.set(
-                  posAttr.getX(i),
-                  posAttr.getY(i),
-                  posAttr.getZ(i)
-                ).applyMatrix4(obj.matrixWorld);
-                worldPoints.push(tmpVec.clone());
-              }
-            } else {
-              worldPoints.push(tmpPos.clone());
-            }
           }
 
-          // If camera is inside, draw a marker at center
+          // If camera is inside, draw marker at center only
           if (cameraInside) {
             drawables.push({
               type: 'rect',
@@ -976,52 +937,49 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
             return;
           }
 
-          // Otherwise, project worldPoints (skip points behind camera)
+          // Otherwise, project only points in front of camera
           const pts2d = [];
           for (let wp of worldPoints) {
             proj.copy(wp).project(camera);
-            if (proj.z < 0) continue; // skip points behind camera
+            // Only project points in front of near plane
+            if (proj.z < 0.001) continue;
             const px = (proj.x * 0.5 + 0.5) * canvas.width;
             const py = (-proj.y * 0.5 + 0.5) * canvas.height;
             pts2d.push({ x: px, y: py });
           }
 
-          if (pts2d.length === 0) {
-            // fallback marker
-            if (obj.userData?.forceMarker) {
-              drawables.push({ type: 'rect', obj, sx, sy, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
-            }
-            return;
-          } else {
-            const hull = convexHull(pts2d);
-            if (hull.length >= 3) {
-              drawables.push({ type: 'poly', obj, pts: hull, dist, projZ: proj.z });
-            } else if (hull.length === 2) {
-              drawables.push({ type: 'line', obj, pts: hull, dist });
-            } else {
-              if (obj.userData?.forceMarker) {
-                drawables.push({ type: 'rect', obj, sx: pts2d[0].x, sy: pts2d[0].y, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
-              }
-            }
+          // If not enough points, fallback to marker
+          if (pts2d.length < 3) {
+            drawables.push({
+              type: 'rect',
+              obj,
+              sx,
+              sy,
+              dist,
+              sizePx: obj.userData?.markerSizePx ?? 18
+            });
             return;
           }
+
+          const hull = convexHull(pts2d);
+          drawables.push({ type: 'poly', obj, pts: hull, dist, projZ: proj.z });
+
         } else {
-          // unknown / fallback: only draw marker if explicitly requested
           if (obj.userData?.forceMarker) {
             drawables.push({ type: 'rect', obj, sx, sy, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
           }
         }
       });
 
-      // Painter's order: furthest first (larger distance)
+      // Painter's order: furthest first
       drawables.sort((a, b) => b.dist - a.dist);
 
-      // draw
+      // Draw all
       for (let i = 0; i < drawables.length; i++) {
         const d = drawables[i];
         const { obj, dist } = d;
 
-        // common color selection
+        // Color selection
         let color = obj.userData?.color;
         if (!color && obj.material && obj.material.color) {
           try {
@@ -1033,26 +991,7 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
         color = color || obj.userData?.color || 'white';
 
         if (d.type === 'image' && d.mapImage && d.mapImage.width) {
-          let size;
-          if (obj.geometry && obj.geometry.boundingBox) {
-            const bb = obj.geometry.boundingBox;
-            const corners = [
-              [bb.min.x, bb.min.y, bb.min.z],
-              [bb.max.x, bb.max.y, bb.max.z]
-            ];
-            const screenPts = [];
-            for (let c of corners) {
-              tmpVec.set(c[0], c[1], c[2]).applyMatrix4(obj.matrixWorld);
-              const p = tmpVec.project(camera);
-              screenPts.push({ x: (p.x * 0.5 + 0.5) * canvas.width, y: (-p.y * 0.5 + 0.5) * canvas.height });
-            }
-            const wPx = Math.abs(screenPts[0].x - screenPts[1].x);
-            const hPx = Math.abs(screenPts[0].y - screenPts[1].y);
-            size = Math.max(8, obj.userData?.sizePx ?? Math.max(wPx, hPx, 32));
-          } else {
-            const baseSize = obj.userData?.sizePx ?? 300;
-            size = Math.max(8, baseSize * (1 / Math.max(0.1, dist * 0.05)));
-          }
+          let size = obj.userData?.sizePx ?? 64;
           ctx.save();
           ctx.translate(d.sx, d.sy);
           const rot = obj.userData?.rotation ?? (obj.rotation?.z ?? 0);
@@ -1074,26 +1013,13 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
           ctx.strokeStyle = 'rgba(0,0,0,0.6)';
           ctx.stroke();
           ctx.restore();
-        } else if (d.type === 'line' && d.pts && d.pts.length === 2) {
-          ctx.beginPath();
-          ctx.moveTo(d.pts[0].x, d.pts[0].y);
-          ctx.lineTo(d.pts[1].x, d.pts[1].y);
-          ctx.strokeStyle = color;
-          ctx.lineWidth = obj.userData?.lineWidth ?? 3;
-          ctx.globalAlpha = 1 - Math.min(0.9, dist * 0.002);
-          ctx.stroke();
         } else if (d.type === 'rect') {
-          // small centered rectangle marker (replaces prior circle/sphere)
           const size = d.sizePx ?? Math.max(2, Math.round(12 * (1 / Math.max(0.1, dist * 0.05))));
-          const x = (d.sx || d.sx === 0) ? d.sx : 0;
-          const y = (d.sy || d.sy === 0) ? d.sy : 0;
           ctx.save();
           ctx.globalAlpha = Math.max(0.5, Math.min(1, 1 - (dist * 0.002)));
           ctx.fillStyle = color;
-          ctx.fillRect(x - size / 2, y - size / 2, size, size);
+          ctx.fillRect(d.sx - size / 2, d.sy - size / 2, size, size);
           ctx.restore();
-        } else {
-          // nothing - we've removed automatic sphere/arc drawing
         }
       }
     }
@@ -3198,6 +3124,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
