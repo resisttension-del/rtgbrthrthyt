@@ -810,6 +810,11 @@ function setupDetailToggle() {
   
 }
 
+// At the top of the function, modify:
+const MAX_RENDER_DISTANCE = 100; // Lower = better performance
+const maxSamples = dist < 20 ? 50 : dist < 50 ? 25 : 15; // Lower = better performance
+
+
 
 function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
     const canvas = document.createElement('canvas');
@@ -819,171 +824,51 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
     canvas.height = height;
     const ctx = canvas.getContext('2d');
 
-    // Optimized scratch variables - reuse to avoid GC
+    // Scratch vars for projections & temp math (UNCHANGED)
     const proj = new THREE.Vector3();
     const tmpPos = new THREE.Vector3();
     const tmpVec = new THREE.Vector3();
     const tmpVec2 = new THREE.Vector3();
-    const tmpMatrix = new THREE.Matrix4();
-    const tmpPlane = new THREE.Plane();
-    const tmpRay = new THREE.Ray();
 
-    // Performance settings for low-spec devices
-    const PERF_SETTINGS = {
-        maxVerticesPerMesh: 50,        // Reduced for better performance
-        maxRenderDistance: 100,        // Configurable render distance
-        frustumCullingEnabled: true,   // Enable frustum culling
-        backfaceCullingEnabled: true,  // Enable backface culling
-        lodEnabled: true,              // Level of detail based on distance
-        maxDrawablesPerFrame: 100      // Limit drawables per frame
-    };
+    // OPTIMIZATION: Configurable render distance
+    const MAX_RENDER_DISTANCE = 150; // Adjust this for performance
 
-    // Optimized convex hull with early exit for performance
+    // Helper: build convex hull (UNCHANGED - your original worked fine)
     function convexHull(points) {
         if (points.length <= 1) return points.slice();
-        if (points.length === 2) return points.slice();
-        
         const pts = points.slice().sort((a, b) => (a.x === b.x ? a.y - b.y : a.x - b.x));
         const cross = (o, a, b) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
-        
         const lower = [];
         for (let p of pts) {
-            while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) {
-                lower.pop();
-            }
+            while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop();
             lower.push(p);
         }
-        
         const upper = [];
         for (let i = pts.length - 1; i >= 0; i--) {
             const p = pts[i];
-            while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) {
-                upper.pop();
-            }
+            while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop();
             upper.push(p);
         }
-        
         lower.pop();
         upper.pop();
         return lower.concat(upper);
     }
 
-    // Fast frustum culling check
-    function isInFrustum(worldPos, camera, margin = 1.5) {
-        proj.copy(worldPos).project(camera);
-        return !(proj.z > 1 || proj.z < -1 || 
-                proj.x < -margin || proj.x > margin || 
-                proj.y < -margin || proj.y > margin);
-    }
-
-    // Check if camera is inside object bounds
-    function isCameraInsideObject(obj, camera) {
-        if (!obj.geometry || !obj.geometry.boundingBox) return false;
+    // NEW: Simple check if camera might be inside object bounds
+    function isLikelyInsideObject(obj, camera, distance) {
+        // Simple heuristic: if very close and object has significant size
+        if (distance > 5) return false;
         
-        // Transform camera position to object local space
-        tmpMatrix.copy(obj.matrixWorld).invert();
-        tmpPos.copy(camera.position).applyMatrix4(tmpMatrix);
-        
-        const bb = obj.geometry.boundingBox;
-        return tmpPos.x >= bb.min.x && tmpPos.x <= bb.max.x &&
-               tmpPos.y >= bb.min.y && tmpPos.y <= bb.max.y &&
-               tmpPos.z >= bb.min.z && tmpPos.z <= bb.max.z;
-    }
-
-    // Optimized face normal calculation for backface culling
-    function getFaceNormal(v1, v2, v3, normal) {
-        tmpVec.subVectors(v2, v1);
-        tmpVec2.subVectors(v3, v1);
-        normal.crossVectors(tmpVec, tmpVec2).normalize();
-        return normal;
-    }
-
-    // Process mesh geometry with proper face culling and hole handling
-    function processMeshGeometry(obj, camera) {
-        const geom = obj.geometry;
-        const posAttr = geom.attributes?.position;
-        const indexAttr = geom.index;
-        
-        if (!posAttr || posAttr.count === 0) return null;
-
-        const cameraInsideObject = isCameraInsideObject(obj, camera);
-        const worldPoints = [];
-        const processedFaces = [];
-
-        // Get camera direction for backface culling
-        const cameraDir = new THREE.Vector3();
-        camera.getWorldDirection(cameraDir);
-
-        if (indexAttr && indexAttr.count > 0) {
-            // Process indexed geometry (proper face handling)
-            const faceCount = Math.floor(indexAttr.count / 3);
-            const maxFaces = Math.min(faceCount, Math.floor(PERF_SETTINGS.maxVerticesPerMesh / 3));
-            const faceStep = Math.max(1, Math.floor(faceCount / maxFaces));
-
-            for (let i = 0; i < faceCount; i += faceStep) {
-                const faceIndex = i * 3;
-                const i1 = indexAttr.getX(faceIndex);
-                const i2 = indexAttr.getX(faceIndex + 1);
-                const i3 = indexAttr.getX(faceIndex + 2);
-
-                // Get face vertices in world space
-                const v1 = tmpVec.set(posAttr.getX(i1), posAttr.getY(i1), posAttr.getZ(i1))
-                    .applyMatrix4(obj.matrixWorld);
-                const v2 = tmpVec2.set(posAttr.getX(i2), posAttr.getY(i2), posAttr.getZ(i2))
-                    .applyMatrix4(obj.matrixWorld);
-                const v3 = tmpPos.set(posAttr.getX(i3), posAttr.getY(i3), posAttr.getZ(i3))
-                    .applyMatrix4(obj.matrixWorld);
-
-                // Calculate face normal
-                const faceNormal = new THREE.Vector3();
-                getFaceNormal(v1, v2, v3, faceNormal);
-
-                // Backface culling (skip faces facing away from camera)
-                const faceCenter = new THREE.Vector3()
-                    .addVectors(v1, v2).add(v3).multiplyScalar(1/3);
-                const viewDir = new THREE.Vector3().subVectors(camera.position, faceCenter).normalize();
-                
-                const dotProduct = faceNormal.dot(viewDir);
-                
-                // If camera is inside object, invert culling logic
-                const shouldCull = cameraInsideObject ? dotProduct > 0 : dotProduct < 0;
-                
-                if (PERF_SETTINGS.backfaceCullingEnabled && shouldCull) {
-                    continue;
-                }
-
-                // Add vertices to world points for silhouette
-                worldPoints.push(v1.clone(), v2.clone(), v3.clone());
-                processedFaces.push({ v1: v1.clone(), v2: v2.clone(), v3: v3.clone(), normal: faceNormal.clone() });
-            }
-        } else {
-            // Process non-indexed geometry
-            const vertexCount = posAttr.count;
-            const maxVertices = Math.min(vertexCount, PERF_SETTINGS.maxVerticesPerMesh);
-            const vertexStep = Math.max(1, Math.floor(vertexCount / maxVertices));
-
-            for (let i = 0; i < vertexCount; i += vertexStep) {
-                tmpVec.set(posAttr.getX(i), posAttr.getY(i), posAttr.getZ(i))
-                    .applyMatrix4(obj.matrixWorld);
-                worldPoints.push(tmpVec.clone());
-            }
+        if (obj.geometry && obj.geometry.boundingBox) {
+            const bb = obj.geometry.boundingBox;
+            const size = bb.max.distanceTo(bb.min);
+            return distance < size * 0.3; // If camera is very close relative to object size
         }
-
-        return { worldPoints, processedFaces, cameraInsideObject };
-    }
-
-    // Level of detail based on distance
-    function getLODLevel(distance) {
-        if (!PERF_SETTINGS.lodEnabled) return 1;
-        if (distance < 10) return 1;
-        if (distance < 25) return 0.7;
-        if (distance < 50) return 0.5;
-        return 0.3;
+        return distance < 2; // Fallback for objects without bounding box
     }
 
     const api = {
         domElement: canvas,
-        
         setSize(w, h, updateStyle = true) {
             canvas.width = w;
             canvas.height = h;
@@ -992,25 +877,17 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
                 canvas.style.height = `${h}px`;
             }
         },
-
         setClearColor(hex, alpha = 1) {
             api._clearColor = { hex, alpha };
         },
-        
         _clearColor: { hex: 0x000000, alpha: 1 },
 
-        // Update performance settings
-        setPerformanceSettings(settings) {
-            Object.assign(PERF_SETTINGS, settings);
-        },
-
         render(scene, camera) {
-            // Clear canvas
+            // Clear with the clear color (UNCHANGED)
             const c = api._clearColor;
             const r = (c.hex >> 16) & 0xff;
             const g = (c.hex >> 8) & 0xff;
             const b = c.hex & 0xff;
-            
             ctx.save();
             ctx.setTransform(1, 0, 0, 1, 0, 0);
             ctx.fillStyle = `rgba(${r},${g},${b},${c.alpha})`;
@@ -1018,199 +895,206 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
             ctx.restore();
 
             const drawables = [];
-            let drawableCount = 0;
-
             scene.traverse((obj) => {
-                if (!obj.visible || drawableCount >= PERF_SETTINGS.maxDrawablesPerFrame) return;
+                if (!obj.visible) return;
                 if (obj.isCamera || obj.isLight) return;
 
-                // Get world position
+                // World position (UNCHANGED)
                 obj.getWorldPosition(tmpPos);
-                const distance = camera.position.distanceTo(tmpPos);
+                const dist = camera.position.distanceTo(tmpPos);
 
-                // Distance culling
-                if (distance > PERF_SETTINGS.maxRenderDistance) return;
+                // NEW: Distance culling for better performance
+                if (dist > MAX_RENDER_DISTANCE) return;
 
-                // Frustum culling
-                if (PERF_SETTINGS.frustumCullingEnabled && !isInFrustum(tmpPos, camera)) {
-                    if (!obj.userData?.alwaysRender) return;
+                proj.copy(tmpPos).project(camera);
+
+                // FIXED: More lenient culling, especially for close objects
+                const isClose = dist < 10;
+                const cullMargin = isClose ? 3 : 2; // More lenient when close
+                
+                if (proj.z > 1 || proj.x < -cullMargin || proj.x > cullMargin || proj.y < -cullMargin || proj.y > cullMargin) {
+                    if (!obj.userData?.alwaysRender && !isClose) return;
                 }
 
-                // Project to screen
-                proj.copy(tmpPos).project(camera);
+                // Screen coords (UNCHANGED)
                 const sx = (proj.x * 0.5 + 0.5) * canvas.width;
                 const sy = (-proj.y * 0.5 + 0.5) * canvas.height;
 
-                // Check for texture/sprite
-                const mapImage = obj.material?.map?.image;
-                
+                const mapImage = obj.material && obj.material.map && obj.material.map.image ? obj.material.map.image : null;
+
                 if (mapImage) {
-                    drawables.push({ 
-                        type: 'image', 
-                        obj, sx, sy, distance, 
-                        projZ: proj.z, 
-                        mapImage,
-                        lod: getLODLevel(distance)
-                    });
-                    drawableCount++;
+                    drawables.push({ type: 'image', obj, sx, sy, dist, projZ: proj.z, mapImage });
                 } else if (obj.isMesh && obj.geometry) {
-                    // Process mesh with proper face handling
-                    const meshData = processMeshGeometry(obj, camera);
-                    
-                    if (!meshData || meshData.worldPoints.length === 0) {
-                        if (obj.userData?.forceMarker) {
-                            drawables.push({ 
-                                type: 'rect', 
-                                obj, sx, sy, distance, 
-                                sizePx: obj.userData?.markerSizePx ?? 6 
-                            });
-                            drawableCount++;
+                    const worldPoints = [];
+                    const geom = obj.geometry;
+                    const posAttr = geom.attributes?.position;
+
+                    if (posAttr && posAttr.count > 0) {
+                        // OPTIMIZED: Adaptive sampling based on distance
+                        const maxSamples = dist < 20 ? 100 : dist < 50 ? 50 : 25;
+                        const stride = Math.max(1, Math.floor(posAttr.count / maxSamples));
+                        
+                        for (let i = 0; i < posAttr.count; i += stride) {
+                            tmpVec.set(
+                                posAttr.getX(i),
+                                posAttr.getY(i),
+                                posAttr.getZ(i)
+                            ).applyMatrix4(obj.matrixWorld);
+                            worldPoints.push(tmpVec.clone());
                         }
-                        return;
+                    } else {
+                        worldPoints.push(tmpPos.clone());
                     }
 
-                    // Project world points to screen space
+                    // FIXED: Better handling for objects with holes
                     const pts2d = [];
-                    const lodLevel = getLODLevel(distance);
-                    const pointStep = Math.max(1, Math.floor(1 / lodLevel));
-
-                    for (let i = 0; i < meshData.worldPoints.length; i += pointStep) {
-                        const wp = meshData.worldPoints[i];
+                    const isInside = isLikelyInsideObject(obj, camera, dist);
+                    
+                    for (let wp of worldPoints) {
                         proj.copy(wp).project(camera);
                         
-                        if (proj.z > 1 || proj.z < -1) continue;
+                        // FIXED: When inside object, include points behind camera
+                        if (!isInside && (proj.z > 1 || proj.z < -1)) continue;
                         
                         const px = (proj.x * 0.5 + 0.5) * canvas.width;
                         const py = (-proj.y * 0.5 + 0.5) * canvas.height;
                         pts2d.push({ x: px, y: py });
                     }
 
-                    if (pts2d.length >= 3) {
+                    if (pts2d.length === 0) {
+                        if (obj.userData?.forceMarker) {
+                            drawables.push({ type: 'rect', obj, sx, sy, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
+                        }
+                        return;
+                    } else {
                         const hull = convexHull(pts2d);
                         if (hull.length >= 3) {
                             drawables.push({ 
                                 type: 'poly', 
                                 obj, 
                                 pts: hull, 
-                                distance, 
+                                dist, 
                                 projZ: proj.z,
-                                cameraInside: meshData.cameraInsideObject,
-                                lod: lodLevel
+                                isInside // NEW: Pass inside state for rendering
                             });
-                            drawableCount++;
+                        } else if (hull.length === 2) {
+                            drawables.push({ type: 'line', obj, pts: hull, dist });
+                        } else {
+                            if (obj.userData?.forceMarker) {
+                                drawables.push({ type: 'rect', obj, sx: pts2d[0].x, sy: pts2d[0].y, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
+                            }
                         }
-                    } else if (pts2d.length === 2) {
-                        drawables.push({ 
-                            type: 'line', 
-                            obj, 
-                            pts: pts2d, 
-                            distance,
-                            lod: lodLevel
-                        });
-                        drawableCount++;
-                    } else if (obj.userData?.forceMarker) {
-                        drawables.push({ 
-                            type: 'rect', 
-                            obj, sx, sy, distance, 
-                            sizePx: obj.userData?.markerSizePx ?? 6 
-                        });
-                        drawableCount++;
+                        return;
                     }
-                } else if (obj.userData?.forceMarker) {
-                    drawables.push({ 
-                        type: 'rect', 
-                        obj, sx, sy, distance, 
-                        sizePx: obj.userData?.markerSizePx ?? 6 
-                    });
-                    drawableCount++;
+                } else {
+                    if (obj.userData?.forceMarker) {
+                        drawables.push({ type: 'rect', obj, sx, sy, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
+                    }
                 }
             });
 
-            // Sort by distance (painter's algorithm)
-            drawables.sort((a, b) => b.distance - a.distance);
+            // Painter's order (UNCHANGED)
+            drawables.sort((a, b) => b.dist - a.dist);
 
-            // Render drawables
-            for (const d of drawables) {
-                const { obj, distance } = d;
+            // ENHANCED: Rendering with distance-based effects
+            for (let i = 0; i < drawables.length; i++) {
+                const d = drawables[i];
+                const { obj, dist } = d;
 
-                // Get color
+                // Color selection (UNCHANGED)
                 let color = obj.userData?.color;
-                if (!color && obj.material?.color) {
+                if (!color && obj.material && obj.material.color) {
                     try {
-                        color = obj.material.color.getStyle?.() || `#${obj.material.color.getHexString()}`;
+                        color = obj.material.color.getStyle ? obj.material.color.getStyle() : (`#${obj.material.color.getHexString()}`);
                     } catch (e) {
-                        color = 'white';
+                        color = obj.userData?.color || 'white';
                     }
                 }
-                color = color || 'white';
+                color = color || obj.userData?.color || 'white';
 
-                // Calculate alpha based on distance and LOD
+                // NEW: Distance-based alpha for better render distance
                 const baseAlpha = obj.userData?.opacity ?? obj.material?.opacity ?? 1;
-                const distanceAlpha = Math.max(0.1, Math.min(1, 1 - (distance / PERF_SETTINGS.maxRenderDistance)));
-                const finalAlpha = baseAlpha * distanceAlpha * (d.lod || 1);
+                const distanceAlpha = Math.max(0.1, 1 - (dist / MAX_RENDER_DISTANCE));
+                const finalAlpha = baseAlpha * distanceAlpha;
 
-                ctx.save();
-                ctx.globalAlpha = finalAlpha;
-
-                switch (d.type) {
-                    case 'image':
-                        if (d.mapImage?.width) {
-                            const size = Math.max(8, (obj.userData?.sizePx ?? 32) * d.lod);
-                            ctx.translate(d.sx, d.sy);
-                            const rot = obj.userData?.rotation ?? obj.rotation?.z ?? 0;
-                            if (rot) ctx.rotate(rot);
-                            ctx.drawImage(d.mapImage, -size/2, -size/2, size, size);
+                if (d.type === 'image' && d.mapImage && d.mapImage.width) {
+                    // Image rendering (MOSTLY UNCHANGED)
+                    let size;
+                    if (obj.geometry && obj.geometry.boundingBox) {
+                        const bb = obj.geometry.boundingBox;
+                        const corners = [
+                            [bb.min.x, bb.min.y, bb.min.z],
+                            [bb.max.x, bb.max.y, bb.max.z]
+                        ];
+                        const screenPts = [];
+                        for (let c of corners) {
+                            tmpVec.set(c[0], c[1], c[2]).applyMatrix4(obj.matrixWorld);
+                            const p = tmpVec.project(camera);
+                            screenPts.push({ x: (p.x * 0.5 + 0.5) * canvas.width, y: (-p.y * 0.5 + 0.5) * canvas.height });
                         }
-                        break;
-
-                    case 'poly':
-                        if (d.pts?.length >= 3) {
-                            ctx.beginPath();
-                            ctx.moveTo(d.pts[0].x, d.pts[0].y);
-                            for (let j = 1; j < d.pts.length; j++) {
-                                ctx.lineTo(d.pts[j].x, d.pts[j].y);
-                            }
-                            ctx.closePath();
-                            
-                            // Adjust rendering for camera inside object
-                            if (d.cameraInside) {
-                                ctx.globalAlpha *= 0.3; // Make more transparent when inside
-                                ctx.strokeStyle = color;
-                                ctx.lineWidth = Math.max(1, 3 * d.lod);
-                                ctx.stroke();
-                            } else {
-                                ctx.fillStyle = color;
-                                ctx.fill();
-                                ctx.strokeStyle = 'rgba(0,0,0,0.3)';
-                                ctx.lineWidth = Math.max(1, 2 * d.lod);
-                                ctx.stroke();
-                            }
-                        }
-                        break;
-
-                    case 'line':
-                        if (d.pts?.length === 2) {
-                            ctx.beginPath();
-                            ctx.moveTo(d.pts[0].x, d.pts[0].y);
-                            ctx.lineTo(d.pts[1].x, d.pts[1].y);
-                            ctx.strokeStyle = color;
-                            ctx.lineWidth = Math.max(1, (obj.userData?.lineWidth ?? 3) * d.lod);
-                            ctx.stroke();
-                        }
-                        break;
-
-                    case 'rect':
-                        const size = Math.max(2, (d.sizePx ?? 6) * (d.lod || 1));
+                        const wPx = Math.abs(screenPts[0].x - screenPts[1].x);
+                        const hPx = Math.abs(screenPts[0].y - screenPts[1].y);
+                        size = Math.max(8, obj.userData?.sizePx ?? Math.max(wPx, hPx, 32));
+                    } else {
+                        const baseSize = obj.userData?.sizePx ?? 300;
+                        size = Math.max(8, baseSize * (1 / Math.max(0.1, dist * 0.05)));
+                    }
+                    ctx.save();
+                    ctx.translate(d.sx, d.sy);
+                    const rot = obj.userData?.rotation ?? (obj.rotation?.z ?? 0);
+                    if (rot) ctx.rotate(rot);
+                    ctx.globalAlpha = finalAlpha; // UPDATED: Use distance-based alpha
+                    ctx.drawImage(d.mapImage, -size / 2, -size / 2, size, size);
+                    ctx.restore();
+                    
+                } else if (d.type === 'poly' && d.pts) {
+                    ctx.save();
+                    ctx.beginPath();
+                    ctx.moveTo(d.pts[0].x, d.pts[0].y);
+                    for (let j = 1; j < d.pts.length; j++) ctx.lineTo(d.pts[j].x, d.pts[j].y);
+                    ctx.closePath();
+                    
+                    // FIXED: Special handling when inside object
+                    if (d.isInside) {
+                        // When inside, render as wireframe with reduced opacity
+                        ctx.globalAlpha = Math.min(finalAlpha * 0.4, 0.6);
+                        ctx.strokeStyle = color;
+                        ctx.lineWidth = Math.max(1, 3 - (dist * 0.01));
+                        ctx.stroke();
+                    } else {
+                        // Normal rendering when outside
+                        ctx.globalAlpha = finalAlpha;
                         ctx.fillStyle = color;
-                        ctx.fillRect(d.sx - size/2, d.sy - size/2, size, size);
-                        break;
+                        ctx.fill();
+                        ctx.globalAlpha = finalAlpha * 0.6;
+                        ctx.lineWidth = Math.max(1, 2 - (dist * 0.001));
+                        ctx.strokeStyle = 'rgba(0,0,0,0.6)';
+                        ctx.stroke();
+                    }
+                    ctx.restore();
+                    
+                } else if (d.type === 'line' && d.pts && d.pts.length === 2) {
+                    ctx.beginPath();
+                    ctx.moveTo(d.pts[0].x, d.pts[0].y);
+                    ctx.lineTo(d.pts[1].x, d.pts[1].y);
+                    ctx.strokeStyle = color;
+                    ctx.lineWidth = obj.userData?.lineWidth ?? 3;
+                    ctx.globalAlpha = finalAlpha; // UPDATED: Use distance-based alpha
+                    ctx.stroke();
+                    
+                } else if (d.type === 'rect') {
+                    const size = d.sizePx ?? Math.max(2, Math.round(12 * (1 / Math.max(0.1, dist * 0.05))));
+                    const x = (d.sx || d.sx === 0) ? d.sx : 0;
+                    const y = (d.sy || d.sy === 0) ? d.sy : 0;
+                    ctx.save();
+                    ctx.globalAlpha = finalAlpha; // UPDATED: Use distance-based alpha
+                    ctx.fillStyle = color;
+                    ctx.fillRect(x - size / 2, y - size / 2, size, size);
+                    ctx.restore();
                 }
-
-                ctx.restore();
             }
         }
     };
-
     return api;
 }
 /* ---------- Updated scene initializers (CPU renderer) ---------- */
