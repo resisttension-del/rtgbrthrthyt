@@ -811,7 +811,7 @@ function setupDetailToggle() {
 }
 
 
-function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
+function voidEngine({ width = 1280, height = 720 } = {}) {
   const canvas = document.createElement('canvas');
   canvas.style.position = 'relative';
   canvas.style.zIndex = '0';
@@ -1102,7 +1102,7 @@ export async function initSceneCrocodilosConstruction() {
   scene.add(window.camera);
 
   // 3. Renderer (CPU canvas)
-  const cpuRenderer = createCanvasRenderer({ width: FIXED_WIDTH, height: FIXED_HEIGHT });
+  const cpuRenderer = voidEngine({ width: FIXED_WIDTH, height: FIXED_HEIGHT });
   cpuRenderer.setClearColor(0x000000, 1);
   renderer = cpuRenderer;
   window.renderer = renderer;
@@ -3178,6 +3178,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
