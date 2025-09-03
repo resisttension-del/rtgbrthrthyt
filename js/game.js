@@ -811,7 +811,11 @@ function setupDetailToggle() {
 }
 
 
-function voidEngine({ width = 1280, height = 720 } = {}) {
+function voidEngine(options) {
+  options = options || {};
+  const width = options.width !== undefined ? options.width : 1280;
+  const height = options.height !== undefined ? options.height : 720;
+
   const canvas = document.createElement('canvas');
   canvas.style.position = 'relative';
   canvas.style.zIndex = '0';
@@ -834,19 +838,25 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
 
   // helper: build convex hull (Andrew monotone chain) of 2D points
   function convexHull(points) {
-    if (points.length <= 1) return points.slice();
-    const pts = points.slice().sort((a, b) => (a.x === b.x ? a.y - b.y : a.x - b.x));
-    const cross = (o, a, b) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
-    const lower = [];
-    for (let p of pts) {
+    if (!points || points.length <= 1) return points ? points.slice() : [];
+    const pts = points.slice().sort(function(a, b) {
+      if (a.x === b.x) return a.y - b.y;
+      return a.x - b.x;
+    });
+    var cross = function(o, a, b) {
+      return (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+    };
+    var lower = [];
+    for (var i = 0; i < pts.length; i++) {
+      var p = pts[i];
       while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop();
       lower.push(p);
     }
-    const upper = [];
-    for (let i = pts.length - 1; i >= 0; i--) {
-      const p = pts[i];
-      while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop();
-      upper.push(p);
+    var upper = [];
+    for (var j = pts.length - 1; j >= 0; j--) {
+      var q = pts[j];
+      while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], q) <= 0) upper.pop();
+      upper.push(q);
     }
     lower.pop();
     upper.pop();
@@ -854,7 +864,7 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
   }
 
   // edges of a cube indexed by 8 corner indices (for bbox)
-  const cubeEdges = [
+  var cubeEdges = [
     [0,1],[0,2],[0,4],
     [1,3],[1,5],
     [2,3],[2,6],
@@ -864,24 +874,26 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
     [6,7]
   ];
 
-  const api = {
+  var api = {
     domElement: canvas,
-    setSize(w, h, updateStyle = true) {
+    setSize: function(w, h, updateStyle) {
+      if (updateStyle === undefined) updateStyle = true;
       canvas.width = w;
       canvas.height = h;
       if (updateStyle) {
-        canvas.style.width = `${w}px`;
-        canvas.style.height = `${h}px`;
+        canvas.style.width = w + "px";
+        canvas.style.height = h + "px";
       }
     },
     // Minimal clear color support
-    setClearColor(hex, alpha = 1) {
-      api._clearColor = { hex, alpha };
+    setClearColor: function(hex, alpha) {
+      if (alpha === undefined) alpha = 1;
+      api._clearColor = { hex: hex, alpha: alpha };
     },
     _clearColor: { hex: 0x000000, alpha: 1 },
 
     // Basic render: draw sprites (material.map.image) and approximated shapes for meshes
-    render(scene, camera) {
+    render: function(scene, camera) {
       frameId++;
 
       // ensure camera matrices are up to date
@@ -898,29 +910,39 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
           }
         }
       } catch (e) {
-        // ignore if invert/getInverse isn't available; .project() still works
+        // ignore if invert/getInverse isn't available; .project() will still work
       }
 
       // Clear with the clear color (converted to CSS)
-      const c = api._clearColor;
-      const r = (c.hex >> 16) & 0xff;
-      const g = (c.hex >> 8) & 0xff;
-      const b = c.hex & 0xff;
+      var c = api._clearColor;
+      var r = (c.hex >> 16) & 0xff;
+      var g = (c.hex >> 8) & 0xff;
+      var b = c.hex & 0xff;
       ctx.save();
       ctx.setTransform(1, 0, 0, 1, 0, 0);
-      ctx.fillStyle = `rgba(${r},${g},${b},${c.alpha})`;
+      ctx.fillStyle = 'rgba(' + r + ',' + g + ',' + b + ',' + c.alpha + ')';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
       ctx.restore();
 
       // collect drawables (so we can sort by depth)
-      const drawables = [];
+      var drawables = [];
 
       // precompute some camera values
-      const camPos = camera.position.clone();
-      const camFar = camera.far || 1000;
-      const nearZ = -Math.max(0.0001, (camera.near || 0.1));
+      var camPos = camera.position.clone();
+      var camFar = (camera.far !== undefined) ? camera.far : 1000;
+      var nearZ = -Math.max(0.0001, (camera.near !== undefined ? camera.near : 0.1));
 
-      scene.traverse((obj) => {
+      // helper: store last-good state info in canonical format
+      function saveLastState(objKey, entry, centerWorld) {
+        entry.frame = frameId;
+        if (!entry.lastWorldCenter) {
+          entry.lastWorldCenter = centerWorld ? centerWorld.clone() : tmpPos.clone();
+        }
+        entry.lastDist = camPos.distanceTo(entry.lastWorldCenter);
+        lastScreenState.set(objKey, entry);
+      }
+
+      scene.traverse(function(obj) {
         if (!obj.visible) return;
         if (obj.isCamera || obj.isLight) return;
 
@@ -931,66 +953,57 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
         // quick NDC cull (if center far off-screen, skip). We allow some slack for large objects.
         if (proj.z > 1 || proj.z < -1 || proj.x < -2 || proj.x > 2 || proj.y < -2 || proj.y > 2) {
           // still allow meshes that have explicit userData.alwaysRender = true
-          if (!obj.userData?.alwaysRender) return;
+          if (!(obj.userData && obj.userData.alwaysRender)) return;
         }
 
         // screen coords (center)
-        const centerSx = (proj.x * 0.5 + 0.5) * canvas.width;
-        const centerSy = (-proj.y * 0.5 + 0.5) * canvas.height;
+        var centerSx = (proj.x * 0.5 + 0.5) * canvas.width;
+        var centerSy = (-proj.y * 0.5 + 0.5) * canvas.height;
 
         // distance for depth sorting (use center world position)
-        const dist = camPos.distanceTo(tmpPos);
+        var dist = camPos.distanceTo(tmpPos);
 
         // check for texture
-        const mapImage = obj.material && obj.material.map && obj.material.map.image ? obj.material.map.image : null;
+        var mapImage = (obj.material && obj.material.map && obj.material.map.image) ? obj.material.map.image : null;
 
-        // HELPER: store last-good state info in canonical format
-        function saveLastState(objKey, entry) {
-          entry.frame = frameId;
-          // keep lastWorldCenter for depth updates (prefer provided, else tmpPos)
-          if (!entry.lastWorldCenter) entry.lastWorldCenter = tmpPos.clone();
-          entry.lastDist = camPos.distanceTo(entry.lastWorldCenter);
-          lastScreenState.set(objKey, entry);
-        }
-
-        // categorize drawable
         if (mapImage) {
           // image sprites: compute size using projected bbox corners when possible
-          let sizePx = null;
+          var sizePx = null;
           if (obj.geometry && obj.geometry.boundingBox) {
-            const bb = obj.geometry.boundingBox;
-            const corners = [
+            var bb = obj.geometry.boundingBox;
+            var corners = [
               [bb.min.x, bb.min.y, bb.min.z],
               [bb.max.x, bb.max.y, bb.max.z]
             ];
-            const screenPts = [];
-            let validScreenPts = 0;
-            for (let c of corners) {
+            var screenPts = [];
+            var validScreenPts = 0;
+            for (var ci = 0; ci < corners.length; ci++) {
+              var c = corners[ci];
               tmpVec.set(c[0], c[1], c[2]).applyMatrix4(obj.matrixWorld);
-              const pView = tmpVec.clone().applyMatrix4(camera.matrixWorldInverse);
+              var pView = tmpVec.clone().applyMatrix4(camera.matrixWorldInverse);
               if (pView.z < 0) {
-                const pp = tmpVec.clone().project(camera);
+                var pp = tmpVec.clone().project(camera);
                 screenPts.push({ x: (pp.x * 0.5 + 0.5) * canvas.width, y: (-pp.y * 0.5 + 0.5) * canvas.height });
                 validScreenPts++;
               }
             }
             if (validScreenPts === 2) {
-              const wPx = Math.abs(screenPts[0].x - screenPts[1].x);
-              const hPx = Math.abs(screenPts[0].y - screenPts[1].y);
-              sizePx = Math.max(8, obj.userData?.sizePx ?? Math.max(wPx, hPx, 32));
+              var wPx = Math.abs(screenPts[0].x - screenPts[1].x);
+              var hPx = Math.abs(screenPts[0].y - screenPts[1].y);
+              sizePx = Math.max(8, (obj.userData && obj.userData.sizePx) ? obj.userData.sizePx : Math.max(wPx, hPx, 32));
             }
           }
 
           // if no fresh size, try using cached size and scale it by distance ratio so sprite still shows
-          let last = lastScreenState.get(obj);
+          var last = lastScreenState.get(obj);
           if (sizePx == null) {
             if (last && last.type === 'image') {
-              // compute ratio = lastDist / dist (if lastDist exists)
-              const lastDist = last.lastDist || Math.max(0.0001, dist);
-              const ratio = Math.max(0.1, lastDist / Math.max(0.0001, dist));
-              sizePx = (last.size || (obj.userData?.sizePx ?? 300)) * ratio;
+              var lastDist = last.lastDist || Math.max(0.0001, dist);
+              var ratio = Math.max(0.1, lastDist / Math.max(0.0001, dist));
+              var lastSizeVal = last.size || ((obj.userData && obj.userData.sizePx) ? obj.userData.sizePx : 300);
+              sizePx = lastSizeVal * ratio;
             } else {
-              const baseSize = obj.userData?.sizePx ?? 300;
+              var baseSize = (obj.userData && obj.userData.sizePx) ? obj.userData.sizePx : 300;
               sizePx = Math.max(8, baseSize * (1 / Math.max(0.1, dist * 0.05)));
             }
           }
@@ -1001,25 +1014,24 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
             sx: centerSx,
             sy: centerSy,
             size: sizePx,
-            mapImage,
-            rot: obj.userData?.rotation ?? (obj.rotation?.z ?? 0),
-            alpha: obj.userData?.opacity ?? (obj.material?.opacity ?? 1),
-            colorHint: obj.userData?.color,
-            lastWorldCenter: tmpPos.clone()
-          });
+            mapImage: mapImage,
+            rot: (obj.userData && obj.userData.rotation) ? obj.userData.rotation : (obj.rotation ? obj.rotation.z : 0),
+            alpha: (obj.userData && obj.userData.opacity !== undefined) ? obj.userData.opacity : ((obj.material && obj.material.opacity !== undefined) ? obj.material.opacity : 1),
+            colorHint: (obj.userData && obj.userData.color) ? obj.userData.color : null
+          }, tmpPos);
 
-          drawables.push({ type: 'image', obj, sx: centerSx, sy: centerSy, dist, projZ: proj.z, mapImage, size: sizePx });
+          drawables.push({ type: 'image', obj: obj, sx: centerSx, sy: centerSy, dist: dist, projZ: proj.z, mapImage: mapImage, size: sizePx });
         } else if (obj.isMesh && obj.geometry) {
-          const geom = obj.geometry;
+          var geom = obj.geometry;
           if (!geom.boundingBox && geom.computeBoundingBox) geom.computeBoundingBox();
           if (!geom.boundingSphere && geom.computeBoundingSphere) geom.computeBoundingSphere();
 
-          const worldPoints = [];
+          var worldPoints = [];
           if (geom.boundingBox) {
-            const bb = geom.boundingBox;
-            const min = bb.min;
-            const max = bb.max;
-            const corners = [
+            var bb2 = geom.boundingBox;
+            var min = bb2.min;
+            var max = bb2.max;
+            var corners2 = [
               [min.x, min.y, min.z],
               [min.x, min.y, max.z],
               [min.x, max.y, min.z],
@@ -1027,18 +1039,19 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
               [max.x, min.y, min.z],
               [max.x, min.y, max.z],
               [max.x, max.y, min.z],
-              [max.x, max.y, max.z],
+              [max.x, max.y, max.z]
             ];
-            for (let c of corners) {
-              tmpVec.set(c[0], c[1], c[2]).applyMatrix4(obj.matrixWorld);
+            for (var k = 0; k < corners2.length; k++) {
+              var cc = corners2[k];
+              tmpVec.set(cc[0], cc[1], cc[2]).applyMatrix4(obj.matrixWorld);
               worldPoints.push(tmpVec.clone());
             }
           } else if (geom.boundingSphere) {
-            const bs = geom.boundingSphere;
-            const center = bs.center.clone().applyMatrix4(obj.matrixWorld);
+            var bs = geom.boundingSphere;
+            var center = bs.center.clone().applyMatrix4(obj.matrixWorld);
             obj.getWorldScale(tmpScale);
-            const worldScale = Math.max(tmpScale.x, tmpScale.y, tmpScale.z, 1);
-            const r = bs.radius * worldScale;
+            var worldScale = Math.max(tmpScale.x, tmpScale.y, tmpScale.z, 1);
+            var r = bs.radius * worldScale;
             worldPoints.push(center.clone());
             worldPoints.push(center.clone().add(new THREE.Vector3(r, 0, 0)));
             worldPoints.push(center.clone().add(new THREE.Vector3(-r, 0, 0)));
@@ -1047,14 +1060,12 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
             worldPoints.push(center.clone().add(new THREE.Vector3(0, 0, r)));
             worldPoints.push(center.clone().add(new THREE.Vector3(0, 0, -r)));
           } else {
-            const posAttr = geom.attributes && geom.attributes.position;
+            var posAttr = geom.attributes && geom.attributes.position;
             if (posAttr && posAttr.count > 0) {
-              for (let i = 0; i < Math.min(12, posAttr.count); i += Math.max(1, Math.floor(posAttr.count / 12))) {
-                tmpVec.set(
-                  posAttr.getX(i),
-                  posAttr.getY(i),
-                  posAttr.getZ(i)
-                ).applyMatrix4(obj.matrixWorld);
+              var step = Math.max(1, Math.floor(posAttr.count / 12));
+              var limit = Math.min(12, posAttr.count);
+              for (var ii = 0; ii < limit; ii += step) {
+                tmpVec.set(posAttr.getX(ii), posAttr.getY(ii), posAttr.getZ(ii)).applyMatrix4(obj.matrixWorld);
                 worldPoints.push(tmpVec.clone());
               }
             } else {
@@ -1063,65 +1074,67 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
           }
 
           // Robust projection + near-plane clipping
-          const cornerViews = worldPoints.map(wp => {
-            const v = wp.clone().applyMatrix4(camera.matrixWorldInverse || new THREE.Matrix4().copy(camera.matrixWorld).invert());
+          var cornerViews = worldPoints.map(function(wp) {
+            var v = wp.clone().applyMatrix4(camera.matrixWorldInverse || new THREE.Matrix4().copy(camera.matrixWorld).invert());
             return { world: wp.clone(), viewZ: v.z };
           });
 
-          const pts2d = [];
+          var pts2d = [];
           // include corners that are in front of camera (viewZ < 0)
-          for (let cv of cornerViews) {
+          for (var ci2 = 0; ci2 < cornerViews.length; ci2++) {
+            var cv = cornerViews[ci2];
             if (cv.viewZ < 0) {
               proj.copy(cv.world).project(camera);
-              const px = (proj.x * 0.5 + 0.5) * canvas.width;
-              const py = (-proj.y * 0.5 + 0.5) * canvas.height;
+              var px = (proj.x * 0.5 + 0.5) * canvas.width;
+              var py = (-proj.y * 0.5 + 0.5) * canvas.height;
               pts2d.push({ x: px, y: py, world: cv.world.clone(), viewZ: cv.viewZ });
             }
           }
 
           // near plane intersections
-          for (let e of cubeEdges) {
-            const a = cornerViews[e[0]];
-            const b = cornerViews[e[1]];
+          for (var ei = 0; ei < cubeEdges.length; ei++) {
+            var e = cubeEdges[ei];
+            var a = cornerViews[e[0]];
+            var b = cornerViews[e[1]];
             if (!a || !b) continue;
-            const za = a.viewZ;
-            const zb = b.viewZ;
+            var za = a.viewZ;
+            var zb = b.viewZ;
 
-            const aInFront = za < nearZ;
-            const bInFront = zb < nearZ;
+            var aInFront = za < nearZ;
+            var bInFront = zb < nearZ;
 
             if (aInFront !== bInFront) {
-              const Av = a.world.clone().applyMatrix4(camera.matrixWorldInverse);
-              const Bv = b.world.clone().applyMatrix4(camera.matrixWorldInverse);
-              const za_v = Av.z;
-              const zb_v = Bv.z;
-              const denom = (zb_v - za_v);
+              var Av = a.world.clone().applyMatrix4(camera.matrixWorldInverse);
+              var Bv = b.world.clone().applyMatrix4(camera.matrixWorldInverse);
+              var za_v = Av.z;
+              var zb_v = Bv.z;
+              var denom = (zb_v - za_v);
               if (Math.abs(denom) < 1e-9) continue;
-              const t = (nearZ - za_v) / denom;
+              var t = (nearZ - za_v) / denom;
               if (t >= 0 && t <= 1) {
-                const interWorld = new THREE.Vector3().lerpVectors(a.world, b.world, t);
+                var interWorld = new THREE.Vector3().lerpVectors(a.world, b.world, t);
                 proj.copy(interWorld).project(camera);
-                const px = (proj.x * 0.5 + 0.5) * canvas.width;
-                const py = (-proj.y * 0.5 + 0.5) * canvas.height;
-                pts2d.push({ x: px, y: py, world: interWorld.clone(), viewZ: nearZ });
+                var px2 = (proj.x * 0.5 + 0.5) * canvas.width;
+                var py2 = (-proj.y * 0.5 + 0.5) * canvas.height;
+                pts2d.push({ x: px2, y: py2, world: interWorld.clone(), viewZ: nearZ });
               }
             } else {
-              const aBehind = za >= 0;
-              const bBehind = zb >= 0;
+              var aBehind = za >= 0;
+              var bBehind = zb >= 0;
               if (aBehind !== bBehind) {
-                const Av = a.world.clone().applyMatrix4(camera.matrixWorldInverse);
-                const Bv = b.world.clone().applyMatrix4(camera.matrixWorldInverse);
-                const za_v = Av.z;
-                const zb_v = Bv.z;
-                const denom = (zb_v - za_v);
-                if (Math.abs(denom) < 1e-9) continue;
-                const t = (nearZ - za_v) / denom;
-                if (t >= 0 && t <= 1) {
-                  const interWorld = new THREE.Vector3().lerpVectors(a.world, b.world, t);
-                  proj.copy(interWorld).project(camera);
-                  const px = (proj.x * 0.5 + 0.5) * canvas.width;
-                  const py = (-proj.y * 0.5 + 0.5) * canvas.height;
-                  pts2d.push({ x: px, y: py, world: interWorld.clone(), viewZ: nearZ });
+                var Av2 = a.world.clone().applyMatrix4(camera.matrixWorldInverse);
+                var Bv2 = b.world.clone().applyMatrix4(camera.matrixWorldInverse);
+                var za_v2 = Av2.z;
+                var zb_v2 = Bv2.z;
+                var denom2 = (zb_v2 - za_v2);
+                if (Math.abs(denom2) < 1e-9) continue;
+                var t2 = (nearZ - za_v2) / denom2;
+                if (t2 >= 0 && t2 <= 1) {
+                  var interWorld2 = new THREE.Vector3().lerpVectors(a.world, b.world, t2);
+                  proj.copy(interWorld2).project(camera);
+                  var px3 = (proj.x * 0.5 + 0.5) * canvas.width;
+                  var py3 = (-proj.y * 0.5 + 0.5) * canvas.height;
+                  pts2d.push({ x: px3, y: py3, world: interWorld2.clone(), viewZ: nearZ });
                 }
               }
             }
@@ -1129,128 +1142,150 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
 
           if (pts2d.length === 0) {
             // No good current projection points: reuse last known state if available (and draw it)
-            const last = lastScreenState.get(obj);
-            if (last) {
-              // update dist using stored world center for proper painter-order
-              const lastWorldCenter = last.lastWorldCenter || tmpPos.clone();
-              const updatedDist = camPos.distanceTo(lastWorldCenter);
+            var lastState = lastScreenState.get(obj);
+            if (lastState) {
+              var lastWorldCenter = lastState.lastWorldCenter || tmpPos.clone();
+              var updatedDist = camPos.distanceTo(lastWorldCenter);
               // reconstruct drawable based on stored type
-              if (last.type === 'poly' && last.pts) {
-                drawables.push({ type: 'poly', obj, pts: last.pts.slice(), dist: updatedDist, reused: true });
-                // refresh last's lastDist/frame
-                saveLastState(obj, Object.assign({}, last, { lastWorldCenter, lastDist: updatedDist }));
+              if (lastState.type === 'poly' && lastState.pts) {
+                drawables.push({ type: 'poly', obj: obj, pts: lastState.pts.slice(), dist: updatedDist, reused: true });
+                saveLastState(obj, merge({}, lastState), lastWorldCenter);
                 return;
-              } else if (last.type === 'line' && last.pts) {
-                drawables.push({ type: 'line', obj, pts: last.pts.slice(), dist: updatedDist, reused: true });
-                saveLastState(obj, Object.assign({}, last, { lastWorldCenter, lastDist: updatedDist }));
+              } else if (lastState.type === 'line' && lastState.pts) {
+                drawables.push({ type: 'line', obj: obj, pts: lastState.pts.slice(), dist: updatedDist, reused: true });
+                saveLastState(obj, merge({}, lastState), lastWorldCenter);
                 return;
-              } else if (last.type === 'rect') {
-                drawables.push({ type: 'rect', obj, sx: last.sx, sy: last.sy, sizePx: last.sizePx || 6, dist: updatedDist, reused: true });
-                saveLastState(obj, Object.assign({}, last, { lastWorldCenter, lastDist: updatedDist }));
+              } else if (lastState.type === 'rect') {
+                drawables.push({ type: 'rect', obj: obj, sx: lastState.sx, sy: lastState.sy, sizePx: lastState.sizePx || 6, dist: updatedDist, reused: true });
+                saveLastState(obj, merge({}, lastState), lastWorldCenter);
                 return;
-              } else if (last.type === 'image') {
-                // image: scale cached size by lastDist/currentDist ratio for basic perspective
-                const lastDist = last.lastDist || Math.max(0.0001, updatedDist);
-                const ratio = Math.max(0.1, (lastDist / Math.max(0.0001, updatedDist)));
-                const sizeUsingCache = (last.size || obj.userData?.sizePx ?? 300) * ratio;
+              } else if (lastState.type === 'image') {
+                var lastDist2 = lastState.lastDist || Math.max(0.0001, updatedDist);
+                var ratio2 = Math.max(0.1, (lastDist2 / Math.max(0.0001, updatedDist)));
+                var lastSizeVal2 = lastState.size || ((obj.userData && obj.userData.sizePx) ? obj.userData.sizePx : 300);
+                var sizeUsingCache = lastSizeVal2 * ratio2;
                 drawables.push({
                   type: 'image',
-                  obj,
-                  sx: last.sx,
-                  sy: last.sy,
+                  obj: obj,
+                  sx: lastState.sx,
+                  sy: lastState.sy,
                   size: sizeUsingCache,
-                  mapImage: last.mapImage,
+                  mapImage: lastState.mapImage,
                   dist: updatedDist,
                   reused: true,
-                  rot: last.rot,
-                  alpha: last.alpha
+                  rot: lastState.rot,
+                  alpha: lastState.alpha
                 });
-                saveLastState(obj, Object.assign({}, last, { lastWorldCenter, lastDist: updatedDist }));
+                saveLastState(obj, merge({}, lastState), lastWorldCenter);
                 return;
               }
             }
 
             // no last-state, fallback to marker if requested
-            if (obj.userData?.forceMarker) {
+            if (obj.userData && obj.userData.forceMarker) {
               saveLastState(obj, {
                 type: 'rect',
                 sx: centerSx,
                 sy: centerSy,
-                sizePx: obj.userData?.markerSizePx ?? 6,
-                lastWorldCenter: tmpPos.clone()
-              });
-              drawables.push({ type: 'rect', obj, sx: centerSx, sy: centerSy, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
+                sizePx: (obj.userData && obj.userData.markerSizePx) ? obj.userData.markerSizePx : 6
+              }, tmpPos);
+              drawables.push({ type: 'rect', obj: obj, sx: centerSx, sy: centerSy, dist: dist, sizePx: (obj.userData && obj.userData.markerSizePx) ? obj.userData.markerSizePx : 6 });
             }
             return;
           } else {
             // compute hull and save as last-good
-            const hullPoints = pts2d.map(p => ({ x: p.x, y: p.y }));
-            const hull = convexHull(hullPoints);
+            var hullPoints = pts2d.map(function(p) { return { x: p.x, y: p.y }; });
+            var hull = convexHull(hullPoints);
             if (hull.length >= 3) {
-              saveLastState(obj, { type: 'poly', pts: hull.map(p => ({ x: p.x, y: p.y })), lastWorldCenter: tmpPos.clone() });
-              drawables.push({ type: 'poly', obj, pts: hull, dist, projZ: proj.z });
+              saveLastState(obj, { type: 'poly', pts: hull.map(function(p) { return { x: p.x, y: p.y }; }) }, tmpPos);
+              drawables.push({ type: 'poly', obj: obj, pts: hull, dist: dist, projZ: proj.z });
             } else if (hull.length === 2) {
-              saveLastState(obj, { type: 'line', pts: hull.map(p => ({ x: p.x, y: p.y })), lastWorldCenter: tmpPos.clone() });
-              drawables.push({ type: 'line', obj, pts: hull, dist });
+              saveLastState(obj, { type: 'line', pts: hull.map(function(p) { return { x: p.x, y: p.y }; }) }, tmpPos);
+              drawables.push({ type: 'line', obj: obj, pts: hull, dist: dist });
             } else {
               // single-point fallback
-              saveLastState(obj, { type: 'rect', sx: pts2d[0].x, sy: pts2d[0].y, sizePx: obj.userData?.markerSizePx ?? 6, lastWorldCenter: tmpPos.clone() });
-              if (obj.userData?.forceMarker) {
-                drawables.push({ type: 'rect', obj, sx: pts2d[0].x, sy: pts2d[0].y, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
+              saveLastState(obj, { type: 'rect', sx: pts2d[0].x, sy: pts2d[0].y, sizePx: (obj.userData && obj.userData.markerSizePx) ? obj.userData.markerSizePx : 6 }, tmpPos);
+              if (obj.userData && obj.userData.forceMarker) {
+                drawables.push({ type: 'rect', obj: obj, sx: pts2d[0].x, sy: pts2d[0].y, dist: dist, sizePx: (obj.userData && obj.userData.markerSizePx) ? obj.userData.markerSizePx : 6 });
               }
             }
             return;
           }
         } else {
           // unknown / fallback: only draw marker if explicitly requested
-          if (obj.userData?.forceMarker) {
+          if (obj.userData && obj.userData.forceMarker) {
             saveLastState(obj, {
               type: 'rect',
               sx: centerSx,
               sy: centerSy,
-              sizePx: obj.userData?.markerSizePx ?? 6,
-              lastWorldCenter: tmpPos.clone()
-            });
-            drawables.push({ type: 'rect', obj, sx: centerSx, sy: centerSy, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
+              sizePx: (obj.userData && obj.userData.markerSizePx) ? obj.userData.markerSizePx : 6
+            }, tmpPos);
+            drawables.push({ type: 'rect', obj: obj, sx: centerSx, sy: centerSy, dist: dist, sizePx: (obj.userData && obj.userData.markerSizePx) ? obj.userData.markerSizePx : 6 });
           }
         }
       });
 
       // Painter's order: furthest first (larger distance)
-      drawables.sort((a, b) => (b.dist || 0) - (a.dist || 0));
+      drawables.sort(function(a, b) {
+        return (b.dist || 0) - (a.dist || 0);
+      });
+
+      // simple object merge helper (shallow) used above
+      function merge(target, src) {
+        target = target || {};
+        if (src) {
+          for (var key in src) {
+            if (src.hasOwnProperty(key)) target[key] = src[key];
+          }
+        }
+        return target;
+      }
 
       // draw with depth-based appearance tweaks
-      for (let i = 0; i < drawables.length; i++) {
-        const d = drawables[i];
-        const { obj } = d;
-        const dist = d.dist || 0;
+      for (var di = 0; di < drawables.length; di++) {
+        var d = drawables[di];
+        var objRef = d.obj;
+        var distVal = d.dist || 0;
 
         // depth-based alpha (mapped into [0.15, 1]) -- more contrast than before
-        const alpha = Math.max(0.15, Math.min(1, 1 - ((dist / Math.max(1, (camera.far || 1000))) * 0.7)));
+        var alpha = Math.max(0.15, Math.min(1, 1 - ((distVal / Math.max(1, camFar)) * 0.7)));
 
         // depth-based stroke width
-        const lineWidth = Math.max(1, Math.round(Math.max(1, 6 * (1 - Math.min(0.95, dist / Math.max(1, camera.far || 1000))))));
+        var lineWidth = Math.max(1, Math.round(Math.max(1, 6 * (1 - Math.min(0.95, distVal / Math.max(1, camFar))))));
 
         // color resolution: obj material -> userData -> fallback
-        let color = (obj && obj.userData && obj.userData.color) || (obj && obj.material && obj.material.color ? (obj.material.color.getStyle ? obj.material.color.getStyle() : (`#${obj.material.color.getHexString()}`)) : null);
-        color = color || d.colorHint || 'white';
+        var color = null;
+        if (objRef && objRef.userData && objRef.userData.color) color = objRef.userData.color;
+        if (!color && objRef && objRef.material && objRef.material.color) {
+          try {
+            if (typeof objRef.material.color.getStyle === 'function') {
+              color = objRef.material.color.getStyle();
+            } else if (typeof objRef.material.color.getHexString === 'function') {
+              color = '#' + objRef.material.color.getHexString();
+            }
+          } catch (e) {
+            color = null;
+          }
+        }
+        if (!color) color = d.colorHint || 'white';
 
         if (d.type === 'image' && d.mapImage && d.mapImage.width) {
-          const size = d.size ?? d.sizePx ?? Math.max(8, (obj && obj.userData?.sizePx) || 32);
-          const drawSx = (d.sx ?? d.sx === 0) ? d.sx : centerSx;
-          const drawSy = (d.sy ?? d.sy === 0) ? d.sy : centerSy;
+          var sizeUse = d.size || d.sizePx || Math.max(8, (objRef && objRef.userData && objRef.userData.sizePx) ? objRef.userData.sizePx : 32);
+          var drawSx = (d.sx !== undefined) ? d.sx : (centerSx !== undefined ? centerSx : 0);
+          var drawSy = (d.sy !== undefined) ? d.sy : (centerSy !== undefined ? centerSy : 0);
           ctx.save();
           ctx.translate(drawSx, drawSy);
-          const rot = d.rot ?? (obj && (obj.userData?.rotation ?? (obj.rotation?.z ?? 0)));
+          var rot = d.rot !== undefined ? d.rot : (objRef && (objRef.userData && objRef.userData.rotation !== undefined ? objRef.userData.rotation : (objRef.rotation ? objRef.rotation.z : 0)));
           if (rot) ctx.rotate(rot);
-          ctx.globalAlpha = (d.alpha ?? (obj && (obj.userData?.opacity ?? (obj.material?.opacity ?? 1)))) * alpha;
-          ctx.drawImage(d.mapImage, -size / 2, -size / 2, size, size);
+          var gAlpha = (d.alpha !== undefined ? d.alpha : (objRef && (objRef.userData && objRef.userData.opacity !== undefined ? objRef.userData.opacity : (objRef.material && objRef.material.opacity !== undefined ? objRef.material.opacity : 1))));
+          ctx.globalAlpha = gAlpha * alpha;
+          ctx.drawImage(d.mapImage, -sizeUse / 2, -sizeUse / 2, sizeUse, sizeUse);
           ctx.restore();
         } else if (d.type === 'poly' && d.pts) {
           ctx.save();
           ctx.beginPath();
           ctx.moveTo(d.pts[0].x, d.pts[0].y);
-          for (let j = 1; j < d.pts.length; j++) ctx.lineTo(d.pts[j].x, d.pts[j].y);
+          for (var j = 1; j < d.pts.length; j++) ctx.lineTo(d.pts[j].x, d.pts[j].y);
           ctx.closePath();
           ctx.globalAlpha = Math.max(0.2, Math.min(1, 0.85 * alpha));
           ctx.fillStyle = color;
@@ -1269,13 +1304,13 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
           ctx.globalAlpha = Math.min(1, alpha);
           ctx.stroke();
         } else if (d.type === 'rect') {
-          const size = d.sizePx ?? d.size ?? Math.max(2, Math.round(12 * (1 / Math.max(0.1, (d.dist || 1) * 0.05))));
-          const x = (d.sx || d.sx === 0) ? d.sx : (d.centerX ?? 0);
-          const y = (d.sy || d.sy === 0) ? d.sy : (d.centerY ?? 0);
+          var sizeRect = d.sizePx || d.size || Math.max(2, Math.round(12 * (1 / Math.max(0.1, (d.dist || 1) * 0.05))));
+          var x = (d.sx !== undefined) ? d.sx : (d.centerX !== undefined ? d.centerX : 0);
+          var y = (d.sy !== undefined) ? d.sy : (d.centerY !== undefined ? d.centerY : 0);
           ctx.save();
           ctx.globalAlpha = Math.max(0.4, alpha);
           ctx.fillStyle = color;
-          ctx.fillRect(x - size / 2, y - size / 2, size, size);
+          ctx.fillRect(x - sizeRect / 2, y - sizeRect / 2, sizeRect, sizeRect);
           ctx.restore();
         }
       }
@@ -1284,6 +1319,7 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
 
   return api;
 }
+
 
 /* ---------- Updated scene initializers (CPU renderer) ---------- */
 
