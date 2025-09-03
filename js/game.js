@@ -1640,7 +1640,15 @@ headMesh.position.set(0, 1.1 - 1.1, 0); // same relative offset as before
 headMesh.userData.isPlayerBodyPart = true;
 headMesh.userData.playerId = data.id;
 headMesh.userData.isPlayerHead = true;
-group.add(headMesh);
+
+      if (!headMesh.geometry.index) {
+    headMesh.geometry.setIndex(
+      generateSequentialIndices(headMesh.geometry.attributes.position.count)
+    );
+  }
+  headMesh.geometry.computeBoundsTree();
+
+  group.add(headMesh);
 
 // ─── Health Bar ───────────────────────────────────────────────────────────────
 // Ensure createHealthBar exists and returns expected object structure
