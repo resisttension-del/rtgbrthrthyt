@@ -810,418 +810,453 @@ function setupDetailToggle() {
 }
 
 
-// createCanvasRendererCustomV2.js
-export function createCanvasRendererCustom({
-  width = 1280,
-  height = 720,
-  downscale = 0.5,
-  maxTrisPerFrame = 120000, // high default, will throttle if scene too heavy
-  targetMs = 30 // aim for ~30ms/frame (33ms = 30 FPS). If frame > targetMs, increase downscale.
-} = {}) {
+// createTileRasterRenderer.js
+// Fresh, independent CPU renderer using tile binner rasterization.
+// Usage:
+//   const renderer = createTileRasterRenderer({ width:1280, height:720, downscale:0.5 });
+//   await renderer.scanAndUploadScene(scene); // or call uploadMesh manually
+//   renderer.render(scene, camera);
 
-  downscale = Math.max(0.2, Math.min(1.0, downscale));
+export function createCanvasRendererCustom({ width = 1280, height = 720, downscale = 0.5, tileSize = 64, maxTrisPerFrame = 100000, targetMs = 30 } = {}) {
+  // clamp downscale
+  downscale = Math.max(0.25, Math.min(1.0, downscale));
+  tileSize = Math.max(16, Math.min(256, tileSize));
+
+  // DOM wrapper & visible canvas (we will scale an internal buffer to the visible size)
   const wrapper = document.createElement('div');
   wrapper.id = 'gameCanvas';
-  Object.assign(wrapper.style, {
-    position: 'absolute', top: '0px', left: '0px',
-    width: `${width}px`, height: `${height}px`,
-    zIndex: '999', overflow: 'hidden', pointerEvents: 'auto'
-  });
+  Object.assign(wrapper.style, { position: 'absolute', top: '0px', left: '0px', width: `${width}px`, height: `${height}px`, zIndex: '999', overflow: 'hidden' });
 
-  const canvas = document.createElement('canvas');
-  canvas.setAttribute('aria-hidden', 'true');
-  canvas.style.position = 'absolute';
-  canvas.style.top = '0px';
-  canvas.style.left = '0px';
-  canvas.style.display = 'block';
-  canvas.style.width = `${width}px`;
-  canvas.style.height = `${height}px`;
-  canvas.style.backgroundColor = 'black';
-  canvas.style.border = '1px solid rgba(255,255,255,0.04)';
+  const visibleCanvas = document.createElement('canvas');
+  visibleCanvas.setAttribute('aria-hidden','true');
+  visibleCanvas.style.width = `${width}px`;
+  visibleCanvas.style.height = `${height}px`;
+  visibleCanvas.style.position = 'absolute';
+  visibleCanvas.style.left = '0px';
+  visibleCanvas.style.top = '0px';
+  visibleCanvas.style.background = 'black';
+  visibleCanvas.style.border = '1px solid rgba(255,255,255,0.04)';
+  wrapper.appendChild(visibleCanvas);
 
-  // internal pixel buffer dims
+  // internal buffer canvas (offscreen HTML canvas, safer than workers for your prior issues)
   let intW = Math.max(1, Math.floor(width * downscale));
   let intH = Math.max(1, Math.floor(height * downscale));
-  canvas.width = intW; canvas.height = intH;
-  wrapper.appendChild(canvas);
+  const bufferCanvas = document.createElement('canvas');
+  bufferCanvas.width = intW;
+  bufferCanvas.height = intH;
+  // don't attach bufferCanvas to DOM
+  const bufCtx = bufferCanvas.getContext('2d', { alpha: false });
 
-  // buffers
-  let imageData = null, pixelBuf = null, zBuffer = null;
-  function initBuffers(w,h) {
+  // single ImageData reused each frame
+  let imageData = bufCtx.createImageData(intW, intH);
+  let pixelBuf = imageData.data; // Uint8ClampedArray
+  let zBuffer = new Float32Array(intW * intH);
+
+  function initBuffers(w, h) {
     intW = Math.max(1, Math.floor(w));
     intH = Math.max(1, Math.floor(h));
-    try { canvas.width = intW; canvas.height = intH; } catch(e){}
-    const ctx = canvas.getContext('2d');
-    try {
-      imageData = ctx.createImageData(intW, intH);
-      pixelBuf = imageData.data;
-    } catch (err) {
-      // fallback to new ImageData
-      imageData = new ImageData(intW, intH);
-      pixelBuf = imageData.data;
-    }
+    bufferCanvas.width = intW;
+    bufferCanvas.height = intH;
+    imageData = bufCtx.createImageData(intW, intH);
+    pixelBuf = imageData.data;
     zBuffer = new Float32Array(intW * intH);
-    for (let i=0,p=0;i<intW*intH;++i,p+=4){ pixelBuf[p]=0; pixelBuf[p+1]=0; pixelBuf[p+2]=0; pixelBuf[p+3]=255; zBuffer[i]=Infinity; }
+    // clear once
+    for (let i = 0, p = 0; i < intW * intH; ++i, p += 4) {
+      pixelBuf[p] = 0; pixelBuf[p+1] = 0; pixelBuf[p+2] = 0; pixelBuf[p+3] = 255;
+      zBuffer[i] = Infinity;
+    }
+    // set visible canvas backing store to same pixel ratio
+    try {
+      // keep DOM displayed size separate (visibleCanvas.width/height control backing store)
+      visibleCanvas.width = width;
+      visibleCanvas.height = height;
+    } catch (e) {}
   }
   initBuffers(intW, intH);
 
-  // store meshes + bounding spheres for fast frustum culling
-  // map id -> { id, positions, indices, color, cpuStatic, twoSided, bs: {cx,cy,cz,r} }
-  const sceneMeshes = new Map();
+  // Scene mesh store: id -> { positions(Float32Array), indices(Uint32Array), color[3], cpuStatic, twoSided, bs }
+  const meshes = new Map();
 
+  // small helper: compute simple bounding sphere for frustum culling
   function computeBoundingSphere(positions) {
-    // quick approximate center = average, radius = max distance to center
-    let cx=0, cy=0, cz=0;
-    const n = positions.length/3;
+    const n = Math.floor(positions.length / 3);
+    if (n === 0) return { cx:0, cy:0, cz:0, r:0 };
+    let cx = 0, cy = 0, cz = 0;
     for (let i=0;i<n;i++){ cx += positions[i*3]; cy += positions[i*3+1]; cz += positions[i*3+2]; }
     cx /= n; cy /= n; cz /= n;
-    let r = 0;
+    let r2 = 0;
     for (let i=0;i<n;i++){
       const dx = positions[i*3] - cx, dy = positions[i*3+1] - cy, dz = positions[i*3+2] - cz;
       const d2 = dx*dx + dy*dy + dz*dz;
-      if (d2 > r) r = d2;
+      if (d2 > r2) r2 = d2;
     }
-    return { cx, cy, cz, r: Math.sqrt(r) };
+    return { cx, cy, cz, r: Math.sqrt(r2) };
   }
 
-  // config toggles
   let disableCulling = false;
 
-  // simple mat helpers (col-major Float32Array)
-  function multiplyMat4(a,b,out) {
+  // small math helpers (column-major like three.js)
+  function mulMat4(a,b,out) {
     for (let i=0;i<4;++i){
       const ai0=a[i], ai1=a[i+4], ai2=a[i+8], ai3=a[i+12];
-      out[i]=ai0*b[0]+ai1*b[1]+ai2*b[2]+ai3*b[3];
-      out[i+4]=ai0*b[4]+ai1*b[5]+ai2*b[6]+ai3*b[7];
-      out[i+8]=ai0*b[8]+ai1*b[9]+ai2*b[10]+ai3*b[11];
-      out[i+12]=ai0*b[12]+ai1*b[13]+ai2*b[14]+ai3*b[15];
+      out[i]      = ai0*b[0]  + ai1*b[1]  + ai2*b[2]  + ai3*b[3];
+      out[i+4]    = ai0*b[4]  + ai1*b[5]  + ai2*b[6]  + ai3*b[7];
+      out[i+8]    = ai0*b[8]  + ai1*b[9]  + ai2*b[10] + ai3*b[11];
+      out[i+12]   = ai0*b[12] + ai1*b[13] + ai2*b[14] + ai3*b[15];
     }
     return out;
   }
+
   function transformVec3(mat, vx, vy, vz, out4) {
     const x = mat[0]*vx + mat[4]*vy + mat[8]*vz + mat[12];
     const y = mat[1]*vx + mat[5]*vy + mat[9]*vz + mat[13];
     const z = mat[2]*vx + mat[6]*vy + mat[10]*vz + mat[14];
     const w = mat[3]*vx + mat[7]*vy + mat[11]*vz + mat[15];
     if (!w || !isFinite(w)) { out4[0]=2; out4[1]=2; out4[2]=1; out4[3]=w; return; }
-    out4[0]=x/w; out4[1]=y/w; out4[2]=z/w; out4[3]=w;
+    out4[0] = x/w; out4[1] = y/w; out4[2] = z/w; out4[3] = w;
   }
 
-  function ndcToScreenX(x) { return (x*0.5 + 0.5) * intW; }
-  function ndcToScreenY(y) { return (-y*0.5 + 0.5) * intH; }
+  function ndcToScreenX(x) { return (x * 0.5 + 0.5) * intW; }
+  function ndcToScreenY(y) { return (-y * 0.5 + 0.5) * intH; }
 
-  function edgeCoeffs(x0,y0,x1,y1) { const A=y0-y1, B=x1-x0, C=x0*y1-x1*y0; return [A,B,C]; }
-  function identityMat4(){ const I=new Float32Array(16); I[0]=1;I[5]=1;I[10]=1;I[15]=1;return I; }
+  // Edge coefficients
+  function edgeCoeffs(x0,y0,x1,y1){ const A = y0 - y1, B = x1 - x0, C = x0*y1 - x1*y0; return [A,B,C]; }
 
-  // frustum test using clip-space: transform sphere center by viewProj and test against clip w
+  function identityMat4() { const I = new Float32Array(16); I[0]=1;I[5]=1;I[10]=1;I[15]=1; return I; }
+
+  // frustum sphere test (approx). conservative: if uncertain, returns true (in view)
   function sphereInFrustum(bs, modelMat, viewProj) {
-    // transform center by model -> clip: center' = viewProj * model * [cx,cy,cz,1]
-    // we can multiply model * [cx,cy,cz,1] then viewProj * that.
-    const tmp = new Float32Array(4);
-    // model multiplication (col-major)
-    const m = modelMat;
+    if (!bs) return true;
+    // model * center
     const cx = bs.cx, cy = bs.cy, cz = bs.cz;
-    tmp[0] = m[0]*cx + m[4]*cy + m[8]*cz + m[12];
-    tmp[1] = m[1]*cx + m[5]*cy + m[9]*cz + m[13];
-    tmp[2] = m[2]*cx + m[6]*cy + m[10]*cz + m[14];
-    tmp[3] = m[3]*cx + m[7]*cy + m[11]*cz + m[15];
-    // now viewProj * tmp
+    const m = modelMat;
+    const tx = m[0]*cx + m[4]*cy + m[8]*cz + m[12];
+    const ty = m[1]*cx + m[5]*cy + m[9]*cz + m[13];
+    const tz = m[2]*cx + m[6]*cy + m[10]*cz + m[14];
+    const tw = m[3]*cx + m[7]*cy + m[11]*cz + m[15];
+
     const vp = viewProj;
-    const x = vp[0]*tmp[0] + vp[4]*tmp[1] + vp[8]*tmp[2] + vp[12]*tmp[3];
-    const y = vp[1]*tmp[0] + vp[5]*tmp[1] + vp[9]*tmp[2] + vp[13]*tmp[3];
-    const z = vp[2]*tmp[0] + vp[6]*tmp[1] + vp[10]*tmp[2] + vp[14]*tmp[3];
-    const w = vp[3]*tmp[0] + vp[7]*tmp[1] + vp[11]*tmp[2] + vp[15]*tmp[3];
-    if (!isFinite(w) || w === 0) return true; // conservatively in view
-    // convert to NDC
+    const x = vp[0]*tx + vp[4]*ty + vp[8]*tz + vp[12]*tw;
+    const y = vp[1]*tx + vp[5]*ty + vp[9]*tz + vp[13]*tw;
+    const z = vp[2]*tx + vp[6]*ty + vp[10]*tz + vp[14]*tw;
+    const w = vp[3]*tx + vp[7]*ty + vp[11]*tz + vp[15]*tw;
+    if (!isFinite(w) || Math.abs(w) < 1e-8) return true;
     const ndcX = x / w, ndcY = y / w, ndcZ = z / w;
-    // sphere radius in clip space approximately: r_clip = r * scale / w
-    // approximate by projecting one axis: transform center + radius along x
-    // To be conservative, we check NDC range expanded by r/w (approx)
-    const rClip = (bs.r * Math.abs( vp[0] + vp[4] + vp[8] )) / Math.abs(w) || (bs.r/Math.abs(w) );
-    // test against [-1 - rClip, 1 + rClip] in x,y,z
-    if (ndcX < -1 - rClip || ndcX > 1 + rClip) return false;
-    if (ndcY < -1 - rClip || ndcY > 1 + rClip) return false;
-    if (ndcZ < -1 - rClip || ndcZ > 1 + rClip) return false;
+    // conservative radius in NDC (approx)
+    const rNdc = bs.r / Math.abs(w || 1);
+    if (ndcX < -1 - rNdc || ndcX > 1 + rNdc) return false;
+    if (ndcY < -1 - rNdc || ndcY > 1 + rNdc) return false;
+    if (ndcZ < -1 - rNdc || ndcZ > 1 + rNdc) return false;
     return true;
   }
 
-  // raster function (edge-stepping). returns stats
-  function rasterize(proj, view, transforms, clearColor) {
-    const t0 = performance.now();
-    // clear
-    const clearR = clearColor ? clearColor[0] : 0;
-    const clearG = clearColor ? clearColor[1] : 0;
-    const clearB = clearColor ? clearColor[2] : 0;
-    for (let i=0,p=0;i<intW*intH;++i,p+=4){ pixelBuf[p]=clearR; pixelBuf[p+1]=clearG; pixelBuf[p+2]=clearB; pixelBuf[p+3]=255; zBuffer[i]=Infinity; }
-
-    const viewProj = new Float32Array(16);
-    multiplyMat4(proj, view, viewProj);
-
-    // transform map
-    const tmap = new Map();
-    for (let i=0;i<transforms.length;i++) tmap.set(transforms[i].id, transforms[i].model);
-
-    // quick per-mesh decision: build visible mesh list using frustum culling
-    const visibleMeshes = [];
-    let totalTrisInView = 0;
-    for (const [id, mesh] of sceneMeshes) {
-      if (!mesh.indices || !mesh.positions) continue;
-      const model = tmap.has(id) ? tmap.get(id) : identityMat4();
-      if (!disableCulling && mesh.bs) {
-        if (!sphereInFrustum(mesh.bs, model, viewProj)) continue;
-      }
-      // count triangles that are potentially in view (coarse)
-      const triCount = Math.floor(mesh.indices.length / 3);
-      totalTrisInView += triCount;
-      visibleMeshes.push({ mesh, model, triCount });
-    }
-
-    // triangle budget - if too heavy, downsample workload (simple strategy: skip some meshes 
-    // or render only first N meshes). We will render until triBudget used.
-    const triBudget = maxTrisPerFrame;
-    let triUsed = 0;
-
-    let stats = { trisTotal:0, trisRaster:0, pixels:0, timeMs:0, meshesRendered:0 };
-
-    // Temporary arrays reused for interpolation
-    const vClip = new Float32Array(4);
-
-    for (let vm of visibleMeshes) {
-      if (triUsed >= triBudget) break;
-      const mesh = vm.mesh;
-      const idx = mesh.indices;
-      const pos = mesh.positions;
-      const color = mesh.color || [180,180,180];
-      const twoSided = !!mesh.twoSided;
-      const model = vm.model;
-      // compute mvp
-      const mvp = new Float32Array(16);
-      multiplyMat4(viewProj, model, mvp);
-
-      const vcount = Math.floor(pos.length / 3);
-      // project vertices to screen
-      const sx = new Float32Array(vcount);
-      const sy = new Float32Array(vcount);
-      const sz = new Float32Array(vcount);
-      for (let vi=0; vi<vcount; ++vi) {
-        transformVec3(mvp, pos[vi*3], pos[vi*3+1], pos[vi*3+2], vClip);
-        sx[vi] = ndcToScreenX(vClip[0]);
-        sy[vi] = ndcToScreenY(vClip[1]);
-        sz[vi] = vClip[2];
-      }
-
-      // triangles
-      for (let t=0; t<idx.length; t+=3) {
-        if (triUsed >= triBudget) break;
-        stats.trisTotal++;
-        const i0 = idx[t], i1 = idx[t+1], i2 = idx[t+2];
-        if (i0<0||i1<0||i2<0||i0>=sx.length||i1>=sx.length||i2>=sx.length) continue;
-        const x0=sx[i0], y0=sy[i0], z0=sz[i0];
-        const x1=sx[i1], y1=sy[i1], z1=sz[i1];
-        const x2=sx[i2], y2=sy[i2], z2=sz[i2];
-        // bbox clamp
-        const minX = Math.max(0, Math.floor(Math.min(x0,x1,x2)));
-        const maxX = Math.min(intW-1, Math.ceil(Math.max(x0,x1,x2)));
-        const minY = Math.max(0, Math.floor(Math.min(y0,y1,y2)));
-        const maxY = Math.min(intH-1, Math.ceil(Math.max(y0,y1,y2)));
-        if (maxX < 0 || maxY < 0 || minX > intW-1 || minY > intH-1) continue;
-        // cull backfaces
-        const ux = x1-x0, uy = y1-y0, vx = x2-x0, vy = y2-y0;
-        const cross = ux*vy - uy*vx;
-        if (!disableCulling && !twoSided && cross >= 0) continue;
-        // edge coeffs
-        const e0 = edgeCoeffs(x1,y1,x2,y2);
-        const e1 = edgeCoeffs(x2,y2,x0,y0);
-        const e2 = edgeCoeffs(x0,y0,x1,y1);
-        const area = e2[0]*x2 + e2[1]*y2 + e2[2];
-        if (!isFinite(area) || Math.abs(area) < 1e-8) continue;
-        stats.trisRaster++;
-        triUsed++;
-
-        const invArea = 1.0/area;
-        const z0v = z0, z1v = z1, z2v = z2;
-        const startX = minX, startY = minY;
-        const px0 = startX + 0.5, py0 = startY + 0.5;
-        let e0row = e0[0]*px0 + e0[1]*py0 + e0[2];
-        let e1row = e1[0]*px0 + e1[1]*py0 + e1[2];
-        let e2row = e2[0]*px0 + e2[1]*py0 + e2[2];
-        const e0sx = e0[0], e0sy = e0[1];
-        const e1sx = e1[0], e1sy = e1[1];
-        const e2sx = e2[0], e2sy = e2[1];
-
-        for (let y = startY; y <= maxY; ++y) {
-          let e0v = e0row, e1v = e1row, e2v = e2row;
-          const rowBase = y * intW;
-          for (let x = startX; x <= maxX; ++x) {
-            if ((e0v >= 0 && e1v >= 0 && e2v >= 0) || (e0v <= 0 && e1v <= 0 && e2v <= 0)) {
-              const zInterp = (e0v*z0v + e1v*z1v + e2v*z2v) * invArea;
-              if (isFinite(zInterp)) {
-                const depth = (zInterp + 1) * 0.5;
-                const idxBuf = rowBase + x;
-                if (depth < zBuffer[idxBuf]) {
-                  const p = idxBuf*4;
-                  pixelBuf[p] = color[0]; pixelBuf[p+1] = color[1]; pixelBuf[p+2] = color[2]; pixelBuf[p+3] = 255;
-                  zBuffer[idxBuf] = depth;
-                  stats.pixels++;
-                }
-              }
-            }
-            e0v += e0sx; e1v += e1sx; e2v += e2sx;
-          }
-          e0row += e0sy; e1row += e1sy; e2row += e2sy;
+  // Triangle binning into tiles: returns array of lists per tile index
+  function binTrianglesToTiles(sx, sy, idx) {
+    // compute per-triangle bounding box in integer tile coords
+    const tilesAcross = Math.ceil(intW / tileSize);
+    const tilesDown = Math.ceil(intH / tileSize);
+    // allocate tile lists lazily to avoid huge allocations
+    const tileLists = new Map(); // key -> Array of triIndex (start index in idx)
+    for (let t = 0; t < idx.length; t += 3) {
+      const i0 = idx[t], i1 = idx[t+1], i2 = idx[t+2];
+      if (i0 < 0 || i1 < 0 || i2 < 0) continue;
+      const minX = Math.max(0, Math.floor(Math.min(sx[i0], sx[i1], sx[i2])));
+      const maxX = Math.min(intW - 1, Math.ceil(Math.max(sx[i0], sx[i1], sx[i2])));
+      const minY = Math.max(0, Math.floor(Math.min(sy[i0], sy[i1], sy[i2])));
+      const maxY = Math.min(intH - 1, Math.ceil(Math.max(sy[i0], sy[i1], sy[i2])));
+      if (maxX < 0 || maxY < 0 || minX > intW-1 || minY > intH-1) continue;
+      const tminX = Math.floor(minX / tileSize);
+      const tmaxX = Math.floor(maxX / tileSize);
+      const tminY = Math.floor(minY / tileSize);
+      const tmaxY = Math.floor(maxY / tileSize);
+      for (let ty = tminY; ty <= tmaxY; ++ty) {
+        for (let tx = tminX; tx <= tmaxX; ++tx) {
+          const key = (ty << 16) | tx;
+          let arr = tileLists.get(key);
+          if (!arr) { arr = []; tileLists.set(key, arr); }
+          arr.push(t); // store triangle start index
         }
       }
-      stats.meshesRendered++;
-    } // visible meshes loop
+    }
+    return tileLists;
+  }
 
-    // put to canvas, safe fallback
-    const ctx = canvas.getContext('2d');
-    try {
-      ctx.putImageData(imageData, 0, 0);
-    } catch (err) {
+  // The core tile raster function: rasterizes only triangles assigned to a tile
+  function rasterTile(tileX, tileY, tileTrisList, meshData, sx, sy, sz, color, zBufView, triIdxArray) {
+    const tileX0 = tileX * tileSize;
+    const tileY0 = tileY * tileSize;
+    const tileX1 = Math.min(tileX0 + tileSize - 1, intW - 1);
+    const tileY1 = Math.min(tileY0 + tileSize - 1, intH - 1);
+    const tileW = tileX1 - tileX0 + 1;
+    // local loop over all triangles in tile
+    for (let tt = 0; tt < tileTrisList.length; ++tt) {
+      const triStart = tileTrisList[tt];
+      const i0 = triIdxArray[triStart], i1 = triIdxArray[triStart+1], i2 = triIdxArray[triStart+2];
+      const x0 = sx[i0], y0 = sy[i0], z0 = sz[i0];
+      const x1 = sx[i1], y1 = sy[i1], z1 = sz[i1];
+      const x2 = sx[i2], y2 = sy[i2], z2 = sz[i2];
+
+      // triangle bbox clamped to tile
+      const minX = Math.max(tileX0, Math.floor(Math.min(x0,x1,x2)));
+      const maxX = Math.min(tileX1, Math.ceil(Math.max(x0,x1,x2)));
+      const minY = Math.max(tileY0, Math.floor(Math.min(y0,y1,y2)));
+      const maxY = Math.min(tileY1, Math.ceil(Math.max(y0,y1,y2)));
+      if (maxX < minX || maxY < minY) continue;
+
+      // backface culling
+      const ux = x1 - x0, uy = y1 - y0;
+      const vx = x2 - x0, vy = y2 - y0;
+      const cross = ux*vy - uy*vx;
+      if (!disableCulling && !meshData.twoSided && cross >= 0) continue;
+
+      // edge coefficients & area
+      const e0 = edgeCoeffs(x1,y1,x2,y2);
+      const e1 = edgeCoeffs(x2,y2,x0,y0);
+      const e2 = edgeCoeffs(x0,y0,x1,y1);
+      const area = e2[0]*x2 + e2[1]*y2 + e2[2];
+      if (!isFinite(area) || Math.abs(area) < 1e-8) continue;
+      const invArea = 1.0 / area;
+      const z0v = z0, z1v = z1, z2v = z2;
+
+      // initial edge values at (minX+0.5,minY+0.5)
+      const px0 = minX + 0.5, py0 = minY + 0.5;
+      let e0row = e0[0]*px0 + e0[1]*py0 + e0[2];
+      let e1row = e1[0]*px0 + e1[1]*py0 + e1[2];
+      let e2row = e2[0]*px0 + e2[1]*py0 + e2[2];
+      const e0sx = e0[0], e0sy = e0[1];
+      const e1sx = e1[0], e1sy = e1[1];
+      const e2sx = e2[0], e2sy = e2[1];
+
+      // per-scanline
+      for (let y = minY; y <= maxY; ++y) {
+        let e0v = e0row, e1v = e1row, e2v = e2row;
+        const rowBase = y * intW;
+        for (let x = minX; x <= maxX; ++x) {
+          if ((e0v >= 0 && e1v >= 0 && e2v >= 0) || (e0v <= 0 && e1v <= 0 && e2v <= 0)) {
+            const zInterp = (e0v*z0v + e1v*z1v + e2v*z2v) * invArea;
+            if (isFinite(zInterp)) {
+              const depth = (zInterp + 1) * 0.5;
+              const idxBuf = rowBase + x;
+              if (depth < zBufView[idxBuf]) {
+                const p = idxBuf * 4;
+                pixelBuf[p] = color[0]; pixelBuf[p+1] = color[1]; pixelBuf[p+2] = color[2]; pixelBuf[p+3] = 255;
+                zBufView[idxBuf] = depth;
+              }
+            }
+          }
+          e0v += e0sx; e1v += e1sx; e2v += e2sx;
+        }
+        e0row += e0sy; e1row += e1sy; e2row += e2sy;
+      }
+    } // triangle list
+  }
+
+  // public API methods
+  function uploadMesh({ id, positions, indices, color = [180,180,180], cpuStatic = false, twoSided = false }) {
+    if (!id || !positions || !indices) throw new Error('uploadMesh requires id, positions, indices');
+    const posArr = positions instanceof Float32Array ? positions : new Float32Array(positions);
+    const idxArr = indices instanceof Uint32Array ? indices : new Uint32Array(indices);
+    const bs = computeBoundingSphere(posArr);
+    meshes.set(id, { id, positions: posArr, indices: idxArr, color, cpuStatic, twoSided, bs });
+  }
+
+  async function scanAndUploadScene(scene) {
+    meshes.clear();
+    scene.traverse((obj) => {
+      if (!obj.isMesh || obj.userData?.cpuRenderable === false) return;
+      const geom = obj.geometry;
+      if (!geom || !geom.attributes || !geom.attributes.position) return;
+      if (meshes.has(obj.uuid)) return;
+      const posAttr = geom.attributes.position;
+      const positionsCopy = new Float32Array(posAttr.array);
+      let indicesCopy;
+      if (geom.index) indicesCopy = new Uint32Array(geom.index.array);
+      else {
+        const triCount = Math.floor(positionsCopy.length/3) * 3;
+        indicesCopy = new Uint32Array(triCount);
+        for (let i=0;i<triCount;i++) indicesCopy[i] = i;
+      }
+      let col = [180,180,180];
       try {
-        ctx.fillStyle = `rgb(${clearR},${clearG},${clearB})`;
-        ctx.fillRect(0,0,intW,intH);
+        if (obj.material && obj.material.color) {
+          col = [ Math.min(255, Math.round((obj.material.color.r || 1) * 255)),
+                  Math.min(255, Math.round((obj.material.color.g || 1) * 255)),
+                  Math.min(255, Math.round((obj.material.color.b || 1) * 255)) ];
+        } else if (obj.userData?.cpuColor) col = obj.userData.cpuColor;
+      } catch (e) {}
+      const cpuStatic = !!obj.userData?.cpuStatic;
+      const twoSided = !!obj.userData?.twoSided;
+      const bs = computeBoundingSphere(positionsCopy);
+      meshes.set(obj.uuid, { id: obj.uuid, positions: positionsCopy, indices: indicesCopy, color: col, cpuStatic, twoSided, bs });
+    });
+  }
+
+  function removeMesh(meshOrId) {
+    const id = typeof meshOrId === 'string' ? meshOrId : (meshOrId && meshOrId.uuid);
+    if (!id) return;
+    meshes.delete(id);
+  }
+
+  function clearScene() {
+    meshes.clear();
+  }
+
+  function setCulling(flag) { disableCulling = !!flag; }
+  function setTwoSided(meshOrId, two) {
+    const id = typeof meshOrId === 'string' ? meshOrId : (meshOrId && meshOrId.uuid);
+    if (!id) return;
+    const m = meshes.get(id); if (m) m.twoSided = !!two;
+  }
+
+  function debugDrawTestTriangle() {
+    const pos = new Float32Array([-0.5,-0.5,0, 0.5,-0.5,0, 0,0.5,0]);
+    const idx = new Uint32Array([0,1,2]);
+    uploadMesh({ id: 'debug-tri', positions: pos, indices: idx, color: [255,0,0], cpuStatic:false });
+  }
+
+  // The main render entry (called each frame)
+  function render(scene, camera) {
+    const tStart = performance.now();
+
+    // Build transforms only for non-static meshes
+    const transforms = new Map();
+    scene.traverse((obj) => {
+      if (!obj.isMesh) return;
+      const info = meshes.get(obj.uuid);
+      if (!info) return;
+      if (info.cpuStatic) return;
+      transforms.set(obj.uuid, new Float32Array(obj.matrixWorld.elements));
+    });
+
+    // Build viewProj
+    const proj = new Float32Array(camera.projectionMatrix.elements);
+    const view = new Float32Array(camera.matrixWorldInverse.elements);
+    const viewProj = new Float32Array(16);
+    mulMat4(proj, view, viewProj);
+
+    // compute clear color
+    const clearColor = (typeof api._clearColor === 'object') ? api._clearColor : { hex: 0x000000, alpha:1 };
+    const r = (clearColor.hex >> 16) & 0xff, g = (clearColor.hex >> 8) & 0xff, b = clearColor.hex & 0xff;
+
+    // clear imageData and zBuffer
+    for (let i=0,p=0;i<intW*intH;++i,p+=4){ pixelBuf[p]=r; pixelBuf[p+1]=g; pixelBuf[p+2]=b; pixelBuf[p+3]=255; zBuffer[i] = Infinity; }
+
+    // visible mesh list via frustum culling & triangle counting
+    const visible = [];
+    let trisCount = 0;
+    for (const [id, mesh] of meshes) {
+      const model = transforms.has(id) ? transforms.get(id) : identityMat4();
+      if (!disableCulling && mesh.bs && !sphereInFrustum(mesh.bs, model, viewProj)) continue;
+      const triCount = Math.floor(mesh.indices.length / 3);
+      trisCount += triCount;
+      visible.push({ id, mesh, model });
+    }
+
+    // triangle budget check
+    let triBudget = maxTrisPerFrame;
+    if (trisCount > triBudget) {
+      // aggressive fallback: increase downscale immediately
+      downscale = Math.max(0.25, downscale * 0.7);
+      initBuffers(Math.max(1, Math.floor(width * downscale)), Math.max(1, Math.floor(height * downscale)));
+      // brief log
+      // console.log('[renderer] tri overload, increased downscale to', downscale);
+      // Recompute visible list currency (we can continue, but it's okay)
+    }
+
+    // For each visible mesh: project vertices once, bin triangles into tiles, then raster per tile
+    for (let vi = 0; vi < visible.length; ++vi) {
+      const entry = visible[vi];
+      const mesh = entry.mesh;
+      const pos = mesh.positions;
+      const idx = mesh.indices;
+      const model = entry.model;
+      // compute mvp = viewProj * model
+      const mvp = new Float32Array(16);
+      mulMat4(viewProj, model, mvp);
+      const vCount = Math.floor(pos.length / 3);
+      const sx = new Float32Array(vCount);
+      const sy = new Float32Array(vCount);
+      const sz = new Float32Array(vCount);
+      const tmp = new Float32Array(4);
+      for (let vi2=0; vi2<vCount; ++vi2) {
+        transformVec3(mvp, pos[vi2*3], pos[vi2*3+1], pos[vi2*3+2], tmp);
+        sx[vi2] = ndcToScreenX(tmp[0]);
+        sy[vi2] = ndcToScreenY(tmp[1]);
+        sz[vi2] = tmp[2];
+      }
+      // bin triangles into tiles
+      const tileMap = binTrianglesToTiles(sx, sy, idx);
+      // iterate tiles & raster triangles assigned
+      for (const [key, triList] of tileMap) {
+        // decode key
+        const tx = key & 0xffff;
+        const ty = key >>> 16;
+        rasterTile(tx, ty, triList, mesh, sx, sy, sz, mesh.color || [180,180,180], zBuffer, idx);
+      }
+    }
+
+    // flush buffer to visible canvas
+    // option A: use putImageData (single call)
+    try {
+      bufCtx.putImageData(imageData, 0, 0);
+      // scale bufferCanvas to visible using drawImage (this uses GPU to stretch)
+      const vCtx = visibleCanvas.getContext('2d');
+      vCtx.clearRect(0,0,width,height);
+      vCtx.imageSmoothingEnabled = false;
+      vCtx.drawImage(bufferCanvas, 0, 0, width, height);
+    } catch (err) {
+      // safe fallback: fill visible canvas with magenta to show failure
+      try {
+        const vCtx = visibleCanvas.getContext('2d');
+        vCtx.fillStyle = 'magenta';
+        vCtx.fillRect(0,0,visibleCanvas.width, visibleCanvas.height);
       } catch (e) {}
     }
 
-    const t1 = performance.now();
-    stats.timeMs = Math.round(t1 - t0);
+    const tEnd = performance.now();
+    const stats = { timeMs: Math.round(tEnd - tStart), triBudget, trisCount };
     return stats;
   }
 
-  // API
-  const uploaded = new Map();
+  function setSize(w, h, updateStyle = true) {
+    width = w; height = h;
+    if (updateStyle) {
+      wrapper.style.width = `${w}px`;
+      wrapper.style.height = `${h}px`;
+      visibleCanvas.style.width = `${w}px`;
+      visibleCanvas.style.height = `${h}px`;
+    }
+    initBuffers(Math.max(1, Math.floor(width * downscale)), Math.max(1, Math.floor(height * downscale)));
+  }
 
+  function dispose() {
+    meshes.clear();
+    try { if (wrapper.parentElement) wrapper.parentElement.removeChild(wrapper); } catch (e) {}
+  }
+
+  // Public API
   const api = {
-    domElement: canvas,
+    domElement: visibleCanvas,
     domWrapper: wrapper,
-    _internal: { sceneMeshes, imageData: null, zBuffer },
-
-    setSize(w,h, updateStyle = true) {
-      if (updateStyle) { wrapper.style.width = `${w}px`; wrapper.style.height = `${h}px`; canvas.style.width = `${w}px`; canvas.style.height = `${h}px`; }
-      intW = Math.max(1, Math.floor(w * downscale));
-      intH = Math.max(1, Math.floor(h * downscale));
-      initBuffers(intW, intH);
-    },
-
+    uploadMesh,
+    scanAndUploadScene,
+    removeMesh,
+    clearScene,
+    setCulling,
+    setTwoSided,
+    setSize,
     setClearColor(hex, alpha = 1) { api._clearColor = { hex, alpha }; },
     _clearColor: { hex: 0x000000, alpha: 1 },
-
-    setCulling(disable) { disableCulling = !!disable; },
-    setTwoSided(meshOrId, twoSided) {
-      const id = typeof meshOrId === 'string' ? meshOrId : (meshOrId && meshOrId.uuid);
-      if (!id) return;
-      const m = sceneMeshes.get(id); if (m) m.twoSided = !!twoSided;
-      const info = uploaded.get(id); if (info) info.twoSided = !!twoSided;
-    },
-
-    uploadMesh({ id, positions, indices, color = [180,180,180], cpuStatic = false, twoSided = false }) {
-      if (!id) throw new Error('id required');
-      const posArr = positions instanceof Float32Array ? positions : new Float32Array(positions);
-      const idxArr = indices instanceof Uint32Array ? indices : new Uint32Array(indices);
-      const bs = computeBoundingSphere(posArr);
-      sceneMeshes.set(id, { id, positions: posArr, indices: idxArr, color, cpuStatic, twoSided, bs });
-      uploaded.set(id, { cpuStatic, twoSided });
-    },
-
-    async scanAndUploadScene(scene) {
-      sceneMeshes.clear(); uploaded.clear();
-      scene.traverse((obj) => {
-        if (!obj.isMesh || obj.userData?.cpuRenderable === false) return;
-        const geom = obj.geometry;
-        if (!geom || !geom.attributes || !geom.attributes.position) return;
-        if (uploaded.has(obj.uuid)) return;
-        const posAttr = geom.attributes.position;
-        const positionsCopy = new Float32Array(posAttr.array);
-        let indicesCopy;
-        if (geom.index) indicesCopy = new Uint32Array(geom.index.array);
-        else {
-          const triCount = Math.floor(positionsCopy.length/3)*3;
-          indicesCopy = new Uint32Array(triCount);
-          for (let i=0;i<triCount;i++) indicesCopy[i]=i;
-        }
-        let col = [180,180,180];
-        try {
-          if (obj.material && obj.material.color) col = [
-            Math.min(255,Math.round((obj.material.color.r||1)*255)),
-            Math.min(255,Math.round((obj.material.color.g||1)*255)),
-            Math.min(255,Math.round((obj.material.color.b||1)*255))
-          ];
-          else if (obj.userData?.cpuColor) col = obj.userData.cpuColor;
-        } catch(e){}
-        const cpuStatic = !!obj.userData?.cpuStatic;
-        const twoSided = !!obj.userData?.twoSided;
-        const bs = computeBoundingSphere(positionsCopy);
-        sceneMeshes.set(obj.uuid, { id: obj.uuid, positions: positionsCopy, indices: indicesCopy, color: col, cpuStatic, twoSided, bs });
-        uploaded.set(obj.uuid, { cpuStatic, twoSided });
-      });
-    },
-
-    removeMesh(meshOrId) {
-      const id = typeof meshOrId === 'string' ? meshOrId : (meshOrId && meshOrId.uuid);
-      if (!id) return;
-      sceneMeshes.delete(id); uploaded.delete(id);
-    },
-
-    clearScene() { sceneMeshes.clear(); uploaded.clear(); },
-
-    // render entry: adaptive downscale logic applied here
-    render(scene, camera) {
-      // build transforms for non-static items
-      const transforms = [];
-      scene.traverse((obj) => {
-        if (!obj.isMesh) return;
-        const info = uploaded.get(obj.uuid);
-        if (!info) return;
-        if (info.cpuStatic) return;
-        transforms.push({ id: obj.uuid, model: new Float32Array(obj.matrixWorld.elements) });
-      });
-
-      const proj = new Float32Array(camera.projectionMatrix.elements);
-      const view = new Float32Array(camera.matrixWorldInverse.elements);
-      const c = api._clearColor;
-      const r = (c.hex >> 16) & 0xff, g = (c.hex >> 8) & 0xff, b = c.hex & 0xff;
-
-      const stats = rasterize(proj, view, transforms, [r,g,b]);
-
-      // adaptive downscale adjustment: if frame too slow increase downscale (lower res), if very fast and downscale < 1, slowly reduce downscale
-      if (stats.timeMs > targetMs && downscale > 0.25) {
-        downscale = Math.max(0.25, downscale * 0.8); // reduce resolution
-        const newW = Math.max(1, Math.floor(width * downscale));
-        const newH = Math.max(1, Math.floor(height * downscale));
-        initBuffers(newW, newH);
-        console.log('[renderer] Adaptive downscale →', downscale, 'new internal', newW, 'x', newH);
-      } else if (stats.timeMs < targetMs*0.5 && downscale < 1.0) {
-        // slowly increase quality
-        downscale = Math.min(1.0, downscale * 1.02);
-        const newW = Math.max(1, Math.floor(width * downscale));
-        const newH = Math.max(1, Math.floor(height * downscale));
-        initBuffers(newW, newH);
-      }
-
-      // export internals for debugging
-      api._internal.imageData = imageData;
-      api._internal.zBuffer = zBuffer;
-      api._internal.sceneMeshes = sceneMeshes;
-      return stats;
-    },
-
-    setMaxTris(n) { maxTrisPerFrame = Math.max(1000, n|0); },
-
-    debugDrawTestTriangle() {
-      api.uploadMesh({ id:'test-tri', positions: new Float32Array([-0.5,-0.5,0, 0.5,-0.5,0, 0,0.5,0]), indices: new Uint32Array([0,1,2]), color:[255,0,0], cpuStatic:false });
-    },
-
-    dispose() {
-      sceneMeshes.clear(); uploaded.clear();
-      try { if (wrapper && wrapper.parentElement) wrapper.parentElement.removeChild(wrapper); } catch(e){}
-    }
+    render,
+    dispose,
+    debugDrawTestTriangle
   };
 
-  api.setClearColor(0x000000,1);
+  // initial clear color
+  api.setClearColor(0x000000, 1);
   return api;
 }
+
 
 
 
@@ -3301,6 +3336,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
