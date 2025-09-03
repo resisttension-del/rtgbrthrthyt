@@ -1607,7 +1607,7 @@ addDebugMuzzleDot(muzzleObject3D, dotSize = 0.5) {
   
     buildDeagle(onProgressRegistrar) {
         const loader = new GLTFLoader();
-        const url = 'https://raw.githubusercontent.com/thearthd/3d-models/main/desert-eagle_gun.glb';
+        const url = 'https://raw.githubusercontent.com/thearthd/3d-models/main/Weapon/voidffa_deagle.glb';
         let prog = () => {};
         const promise = new Promise((res, rej) => {
             loader.load(
