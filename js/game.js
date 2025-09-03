@@ -812,157 +812,623 @@ function setupDetailToggle() {
 
 
 function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
-            const canvas = document.createElement('canvas');
-            canvas.style.position = 'relative';
-            canvas.style.zIndex = '0';
-            canvas.width = width;
-            canvas.height = height;
-            const ctx = canvas.getContext('2d');
+  const canvas = document.createElement('canvas');
+  canvas.style.position = 'relative';
+  canvas.style.zIndex = '0';
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d');
 
-            const proj = new THREE.Vector3();
-            const tmpPos = new THREE.Vector3();
-            const tmpVec = new THREE.Vector3();
+  // scratch vars
+  const proj = new THREE.Vector3();
+  const tmpPos = new THREE.Vector3();
+  const tmpVec = new THREE.Vector3();
+  const tmpMat = new THREE.Matrix4();
+  const tmpMat2 = new THREE.Matrix4();
 
-            // Function to draw a 2D bounding box wireframe
-            function drawBoundingBoxWireframe(points2d, color, dist) {
-                // If the object's center is behind the camera, skip drawing it entirely.
-                // This is a simple, effective way to prevent the "shoving" effect without
-                // culling internal lines.
-                const centerZ = points2d.reduce((sum, p) => sum + p.z, 0) / points2d.length;
-                if (centerZ > 1) {
-                    return;
-                }
+  // API + options
+  const api = {
+    domElement: canvas,
+    setSize(w, h, updateStyle = true) {
+      canvas.width = w;
+      canvas.height = h;
+      if (updateStyle) {
+        canvas.style.width = `${w}px`;
+        canvas.style.height = `${h}px`;
+      }
+    },
 
-                if (points2d.length === 0) return;
-                
-                ctx.save();
-                ctx.globalAlpha = Math.max(0.2, Math.min(1, 1 - (dist * 0.002)));
-                ctx.strokeStyle = color;
-                ctx.lineWidth = Math.max(1, 2 - (dist * 0.001));
+    setClearColor(hex, alpha = 1) { api._clearColor = { hex, alpha }; },
+    _clearColor: { hex: 0x000000, alpha: 1 },
 
-                // Define the wireframe edges (pairs of indices)
-                const edges = [
-                    [0, 1], [1, 3], [3, 2], [2, 0], // Front face
-                    [4, 5], [5, 7], [7, 6], [6, 4], // Back face
-                    [0, 4], [1, 5], [2, 6], [3, 7]  // Connecting edges
-                ];
+    // quad detection / perf options
+    options: {
+      detectQuads: true,           // enable quad detection
+      maxQuadsPerObject: 5000,    // cap quads processed per object (tweak for perf)
+      projectSkipBehind: true,    // skip quads fully behind near/far clip
+      fillQuads: true,            // fill quads (set false to only stroke)
 
-                for (const [startIdx, endIdx] of edges) {
-                    const p1 = points2d[startIdx];
-                    const p2 = points2d[endIdx];
-                    
-                    // Only draw the line if both points are in front of the camera's near plane (z < 1).
-                    // This handles cases where the user is inside an object, but only shows
-                    // the parts that are not behind the camera, solving the "shoving" issue.
-                    if (p1.z < 1 && p2.z < 1) {
-                        ctx.beginPath();
-                        ctx.moveTo(p1.x, p1.y);
-                        ctx.lineTo(p2.x, p2.y);
-                        ctx.stroke();
-                    }
-                }
-                
-                ctx.restore();
+      // new options:
+      maxVerticesPerGeometry: 10000,        // extra safety cap when scanning vertex lists
+      isolatedConnect: true,                // enable connecting isolated vertices to nearest neighbor
+      isolatedConnectMaxPerGeom: 200,       // maximum isolated connections to create per geometry
+      isolatedConnectMaxDistance: Infinity, // maximum distance (in local space) to connect an isolated vertex
+      minProjectionDistance: 0.1            // minimum distance from camera for safe projection (meters)
+    },
+    setOptions(o = {}) { Object.assign(api.options, o); },
+
+    // distance culling
+    setMaxRenderDistance(d) { api._maxRenderDistance = Number.isFinite(d) ? d : Infinity; },
+    _maxRenderDistance: Infinity,
+
+    // SAFE project helper:
+    // Projects a world Vector3 onto screen but avoids NaN/inf results by clamping points
+    // that are behind the camera or too close to a minimum distance in front of the camera.
+    // Returns {x,y,z} or null if projection cannot be produced.
+    _safeProjectToScreen(worldVec, camera) {
+      // quick project
+      const p = worldVec.clone().project(camera);
+
+      // if projection is within clip region and finite, convert to screen and return
+      if (Number.isFinite(p.x) && Number.isFinite(p.y) && Number.isFinite(p.z) && p.z >= -1 && p.z <= 1) {
+        const sx = (p.x * 0.5 + 0.5) * canvas.width;
+        const sy = (-p.y * 0.5 + 0.5) * canvas.height;
+        return { x: sx, y: sy, z: p.z };
+      }
+
+      // otherwise compute a safe fallback point in front of the camera
+      // get direction from camera to point
+      const dirToPoint = worldVec.clone().sub(camera.position);
+      const dist = dirToPoint.length();
+
+      // camera forward direction (where camera is looking)
+      const camForward = new THREE.Vector3();
+      camera.getWorldDirection(camForward);
+
+      const minD = api.options.minProjectionDistance || 0.1;
+
+      // If point is behind camera (dot < 0) or too close, move it to a safe location in front of camera:
+      const dot = dirToPoint.dot(camForward);
+      let safeWorld;
+      if (dot <= 0 || dist < minD) {
+        // place safe point at camera.position + camForward * minD (slightly in front of camera)
+        safeWorld = camera.position.clone().add(camForward.clone().multiplyScalar(minD));
+      } else {
+        // point is in front but projection clipped - nudge it slightly away along line-of-sight
+        safeWorld = camera.position.clone().add(dirToPoint.clone().normalize().multiplyScalar(Math.max(minD, Math.min(dist, minD))));
+      }
+
+      // project the safe point
+      const sp = safeWorld.clone().project(camera);
+      if (!Number.isFinite(sp.x) || !Number.isFinite(sp.y) || !Number.isFinite(sp.z)) return null;
+
+      let sx = (sp.x * 0.5 + 0.5) * canvas.width;
+      let sy = (-sp.y * 0.5 + 0.5) * canvas.height;
+
+      // clamp to a padded screen rect to avoid extreme offscreen coordinates
+      const pad = 200; // px
+      sx = Math.max(-pad, Math.min(canvas.width + pad, sx));
+      sy = Math.max(-pad, Math.min(canvas.height + pad, sy));
+
+      return { x: sx, y: sy, z: sp.z };
+    },
+
+    // internal helper: project 3D world pos to screen (returns {x,y,z} or null if clipping)
+    _projectToScreen(worldVec, camera) {
+      proj.copy(worldVec).project(camera);
+      // z outside clip range -> consider clipped
+      if (proj.z > 1 || proj.z < -1) return null;
+      return { x: (proj.x * 0.5 + 0.5) * canvas.width, y: (-proj.y * 0.5 + 0.5) * canvas.height, z: proj.z };
+    },
+
+    render(scene, camera) {
+      camera.updateMatrixWorld && camera.updateMatrixWorld();
+
+      // prepare frustum for quick culling
+      const projScreenMatrix = new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+      const frustum = new THREE.Frustum();
+      frustum.setFromProjectionMatrix(projScreenMatrix);
+
+      // clear
+      const c = api._clearColor;
+      const r = (c.hex >> 16) & 0xff, g = (c.hex >> 8) & 0xff, b = c.hex & 0xff;
+      ctx.save();
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.fillStyle = `rgba(${r},${g},${b},${c.alpha})`;
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.restore();
+
+      const drawables = [];
+
+      // Build triangle / edge adjacency for geometry once per geometry and cache it.
+      function buildQuadCacheForGeometry(geom) {
+        if (!geom || !geom.attributes || !geom.attributes.position) return null;
+        if (geom._quadCache) return geom._quadCache; // reuse if present
+
+        const posAttr = geom.attributes.position;
+        const idxAttr = geom.index;
+        const triIndices = []; // array of triangles [a,b,c]
+
+        const maxVerts = api.options.maxVerticesPerGeometry;
+        if (posAttr.count > maxVerts && maxVerts > 0) {
+          // If geometry ridiculously large, bail out (or handle in chunks)
+          // store empty cache so we don't retry constantly
+          const cacheEmpty = { quads: [], triCount: 0, isolatedPairs: [] };
+          geom._quadCache = cacheEmpty;
+          return cacheEmpty;
+        }
+
+        if (idxAttr && idxAttr.count >= 3) {
+          const ia = idxAttr.array;
+          for (let i = 0; i < ia.length; i += 3) {
+            triIndices.push([ia[i], ia[i + 1], ia[i + 2]]);
+          }
+        } else {
+          // non-indexed: sequential triangles
+          for (let i = 0; i + 2 < posAttr.count; i += 3) {
+            triIndices.push([i, i + 1, i + 2]);
+          }
+        }
+
+        // edge -> triangles map
+        const edgeMap = Object.create(null);
+        function edgeKey(a, b) { return a < b ? `${a}_${b}` : `${b}_${a}`; }
+
+        for (let t = 0; t < triIndices.length; t++) {
+          const tri = triIndices[t];
+          const [a, b, c] = tri;
+          const edges = [[a, b], [b, c], [c, a]];
+          for (let e of edges) {
+            const k = edgeKey(e[0], e[1]);
+            if (!edgeMap[k]) edgeMap[k] = [];
+            edgeMap[k].push(t);
+          }
+        }
+
+        // find quads: an edge with exactly two adjacent triangles -> union vertices of those two triangles may form a quad
+        const quadSet = new Set(); // unique by sorted vertex indices
+        const quads = []; // store as [i0,i1,i2,i3] (indices into position attribute)
+        for (const k in edgeMap) {
+          const tris = edgeMap[k];
+          if (tris.length !== 2) continue; // only shared-edge triangles
+          const tA = triIndices[tris[0]];
+          const tB = triIndices[tris[1]];
+          // union vertices
+          const s = new Set([...tA, ...tB]);
+          if (s.size !== 4) continue; // not a quad (could be bowtie or shared vertex)
+          const arr = Array.from(s).sort((x, y) => x - y);
+          const key = arr.join(',');
+          if (quadSet.has(key)) continue;
+          quadSet.add(key);
+          quads.push(arr); // store the 4 vertex indices
+        }
+
+        // new: find isolated vertices (those not in any quad) and pair them to nearest neighbor
+        const usedVerts = new Set();
+        for (const q of quads) for (const vi of q) usedVerts.add(vi);
+
+        const isolatedPairs = []; // [[a,b], ...] pairs of indices
+        if (api.options.isolatedConnect && posAttr.count > 0) {
+          // build list of unused vertex indices
+          const unused = [];
+          for (let vi = 0; vi < posAttr.count; vi++) if (!usedVerts.has(vi)) unused.push(vi);
+
+          // brute-force nearest neighbor (OK for moderate numbers); cap number of pairs
+          const cap = Math.max(0, Math.min(api.options.isolatedConnectMaxPerGeom || 200, unused.length));
+          let pairsCreated = 0;
+          for (let i = 0; i < unused.length && pairsCreated < cap; i++) {
+            const a = unused[i];
+            // compute position of a
+            const ax = posAttr.getX(a), ay = posAttr.getY(a), az = posAttr.getZ(a);
+            let best = -1, bestDist = Infinity;
+            for (let j = 0; j < posAttr.count; j++) {
+              if (j === a) continue;
+              const bx = posAttr.getX(j), by = posAttr.getY(j), bz = posAttr.getZ(j);
+              const dx = ax - bx, dy = ay - by, dz = az - bz;
+              const d2 = dx * dx + dy * dy + dz * dz;
+              if (d2 < bestDist) { bestDist = d2; best = j; }
+            }
+            if (best !== -1) {
+              const dist = Math.sqrt(bestDist);
+              if (dist <= (api.options.isolatedConnectMaxDistance || Infinity)) {
+                isolatedPairs.push([a, best]);
+                pairsCreated++;
+              }
+            }
+          }
+        }
+
+        const cache = { quads, triCount: triIndices.length, isolatedPairs };
+        geom._quadCache = cache;
+        return cache;
+      }
+
+      // For each object, collect quads (or fallback behavior) into drawables
+      scene.traverse((obj) => {
+        if (!obj.visible) return;
+        if (obj.isCamera || obj.isLight) return;
+
+        // quick world center cull
+        obj.getWorldPosition(tmpPos);
+        const center = tmpPos.clone();
+        const distCenter = camera.position.distanceTo(center);
+        if (distCenter > (obj.userData?.maxRenderDistance ?? api._maxRenderDistance) && !obj.userData?.alwaysRender) return;
+
+        const color = obj.userData?.color || (obj.material && obj.material.color ? (obj.material.color.getStyle ? obj.material.color.getStyle() : `#${obj.material.color.getHexString()}`) : 'white');
+        const alpha = obj.userData?.opacity ?? (obj.material && typeof obj.material.opacity === 'number' ? obj.material.opacity : 1);
+
+        // InstancedMesh handling: process per-instance quad projection
+        if (obj.isInstancedMesh && obj.geometry && api.options.detectQuads) {
+          const geom = obj.geometry;
+          const cache = buildQuadCacheForGeometry(geom);
+          if (!cache) return;
+          const instLimit = Math.min(obj.count, obj.userData?.instanceLimit || obj.count);
+          const quadCapGlobal = obj.userData?.quadMax ?? api.options.maxQuadsPerObject;
+          // per-instance cap (distribute)
+          const perInstanceCap = Math.max(1, Math.floor(Math.min(quadCapGlobal, cache.quads.length) / Math.max(1, instLimit)));
+
+          const mat = new THREE.Matrix4();
+          for (let i = 0; i < instLimit; i++) {
+            obj.getMatrixAt(i, mat);
+            // instance world matrix = obj.matrixWorld * instanceMatrix
+            tmpMat.copy(obj.matrixWorld).multiply(mat);
+
+            // quickly cull instance by bounding sphere if available
+            if (geom.boundingSphere) {
+              const bs = geom.boundingSphere;
+              const worldCenter = bs.center.clone().applyMatrix4(tmpMat);
+              const scale = tmpMat.getMaxScaleOnAxis ? tmpMat.getMaxScaleOnAxis() : 1;
+              const r = bs.radius * scale;
+              if (!frustum.intersectsSphere(new THREE.Sphere(worldCenter, r)) && !obj.userData?.alwaysRender) continue;
             }
 
-            const api = {
-                domElement: canvas,
-                setSize(w, h, updateStyle = true) {
-                    canvas.width = w;
-                    canvas.height = h;
-                    if (updateStyle) {
-                        canvas.style.width = `${w}px`;
-                        canvas.style.height = `${h}px`;
-                    }
-                },
-                setClearColor(hex, alpha = 1) {
-                    api._clearColor = { hex, alpha };
-                },
-                _clearColor: { hex: 0x000000, alpha: 1 },
+            const quadsToProcess = cache.quads.slice(0, perInstanceCap);
+            for (let qi = 0; qi < quadsToProcess.length; qi++) {
+              const quad = quadsToProcess[qi]; // [i0,i1,i2,i3]
+              // world positions for quad vertices
+              const wp0 = new THREE.Vector3(
+                geom.attributes.position.getX(quad[0]),
+                geom.attributes.position.getY(quad[0]),
+                geom.attributes.position.getZ(quad[0])
+              ).applyMatrix4(tmpMat);
+              const wp1 = new THREE.Vector3(
+                geom.attributes.position.getX(quad[1]),
+                geom.attributes.position.getY(quad[1]),
+                geom.attributes.position.getZ(quad[1])
+              ).applyMatrix4(tmpMat);
+              const wp2 = new THREE.Vector3(
+                geom.attributes.position.getX(quad[2]),
+                geom.attributes.position.getY(quad[2]),
+                geom.attributes.position.getZ(quad[2])
+              ).applyMatrix4(tmpMat);
+              const wp3 = new THREE.Vector3(
+                geom.attributes.position.getX(quad[3]),
+                geom.attributes.position.getY(quad[3]),
+                geom.attributes.position.getZ(quad[3])
+              ).applyMatrix4(tmpMat);
 
-                render(scene, camera) {
-                    const c = api._clearColor;
-                    const r = (c.hex >> 16) & 0xff;
-                    const g = (c.hex >> 8) & 0xff;
-                    const b = c.hex & 0xff;
-                    ctx.save();
-                    ctx.setTransform(1, 0, 0, 1, 0, 0);
-                    ctx.fillStyle = `rgba(${r},${g},${b},${c.alpha})`;
-                    ctx.fillRect(0, 0, canvas.width, canvas.height);
-                    ctx.restore();
+              const worldArr = [wp0, wp1, wp2, wp3];
 
-                    const drawables = [];
-                    scene.traverse((obj) => {
-                        if (!obj.visible) return;
-                        if (obj.isCamera || obj.isLight) return;
-                        
-                        obj.getWorldPosition(tmpPos);
-                        const dist = camera.position.distanceTo(tmpPos);
-                        
-                        let color = obj.userData?.color;
-                        if (!color && obj.material && obj.material.color) {
-                            try {
-                                color = obj.material.color.getStyle ? obj.material.color.getStyle() : (`#${obj.material.color.getHexString()}`);
-                            } catch (e) {
-                                color = obj.userData?.color || 'white';
-                            }
-                        }
-                        color = color || obj.userData?.color || 'white';
+              // frustum / clip test: skip if all outside
+              let anyInside = false;
+              for (let wpt of worldArr) if (frustum.containsPoint(wpt)) { anyInside = true; break; }
+              if (!anyInside && !obj.userData?.alwaysRender) continue;
 
-                        // Always render with a bounding box for performance and simplicity
-                        if (obj.isMesh && obj.geometry) {
-                            const geom = obj.geometry;
-                            if (!geom.boundingBox) geom.computeBoundingBox && geom.computeBoundingBox();
-                            
-                            const worldPoints = [];
-                            if (geom.boundingBox) {
-                                const bb = geom.boundingBox;
-                                const min = bb.min;
-                                const max = bb.max;
-                                const corners = [
-                                    new THREE.Vector3(min.x, min.y, min.z),
-                                    new THREE.Vector3(min.x, min.y, max.z),
-                                    new THREE.Vector3(min.x, max.y, min.z),
-                                    new THREE.Vector3(min.x, max.y, max.z),
-                                    new THREE.Vector3(max.x, min.y, min.z),
-                                    new THREE.Vector3(max.x, min.y, max.z),
-                                    new THREE.Vector3(max.x, max.y, min.z),
-                                    new THREE.Vector3(max.x, max.y, max.z),
-                                ];
-                                for (let c of corners) {
-                                    tmpVec.copy(c).applyMatrix4(obj.matrixWorld);
-                                    worldPoints.push(tmpVec.clone());
-                                }
-                            } else {
-                                worldPoints.push(tmpPos.clone());
-                            }
-
-                            const pts2d = [];
-                            for (let wp of worldPoints) {
-                                proj.copy(wp).project(camera);
-                                const px = (proj.x * 0.5 + 0.5) * canvas.width;
-                                const py = (-proj.y * 0.5 + 0.5) * canvas.height;
-                                pts2d.push({ x: px, y: py, z: proj.z }); // Include Z for culling
-                            }
-                            
-                            drawables.push({ type: 'bbox_wireframe', obj, pts: pts2d, dist, color });
-                        }
-                    });
-
-                    drawables.sort((a, b) => b.dist - a.dist);
-
-                    for (let i = 0; i < drawables.length; i++) {
-                        const d = drawables[i];
-                        const { obj, dist, color } = d;
-
-                        if (d.type === 'bbox_wireframe' && d.pts) {
-                            drawBoundingBoxWireframe(d.pts, color, dist);
-                        }
-                    }
+              // project to screen (use safeProject fallback for bad cases)
+              const projPts = [];
+              let allClipped = true, avgZ = 0;
+              for (let wpt of worldArr) {
+                const ps = api._projectToScreen(wpt, camera);
+                if (ps) { projPts.push(ps); avgZ += ps.z; allClipped = false; } else {
+                  // use safe fallback that avoids NaN collapsing
+                  const safe = api._safeProjectToScreen(wpt, camera);
+                  if (safe) { projPts.push(safe); avgZ += safe.z; } else {
+                    projPts.push(null);
+                  }
                 }
-            };
-            return api;
+              }
+              if (api.options.projectSkipBehind && allClipped) continue;
+
+              // second pass: for any remaining null projecteds, replace using safeProject
+              for (let idx = 0; idx < projPts.length; idx++) {
+                if (!projPts[idx]) {
+                  const safe = api._safeProjectToScreen(worldArr[idx], camera);
+                  if (safe) projPts[idx] = safe;
+                }
+              }
+
+              // if still any null, skip this quad
+              if (projPts.some(p => !p)) continue;
+
+              avgZ = projPts.reduce((s, p) => s + (p.z || 0), 0) / projPts.length;
+
+              // order vertices into a correct loop: compute centroid in screen-space and sort by angle
+              const cx = projPts.reduce((s, p) => s + p.x, 0) / projPts.length;
+              const cy = projPts.reduce((s, p) => s + p.y, 0) / projPts.length;
+              projPts.sort((a, b) => Math.atan2(a.y - cy, a.x - cx) - Math.atan2(b.y - cy, b.x - cx));
+
+              drawables.push({
+                type: 'quad',
+                pts: projPts.map(p => ({ x: p.x, y: p.y })),
+                avgZ,
+                obj,
+                color,
+                alpha,
+                fill: (obj.userData?.quadFill !== undefined) ? obj.userData.quadFill : api.options.fillQuads,
+                strokeWidth: obj.userData?.quadStrokeWidth ?? 1
+              });
+            } // quad loop
+
+            // process isolated pairs (lines) for this instance
+            if (cache.isolatedPairs && cache.isolatedPairs.length > 0) {
+              for (const pair of cache.isolatedPairs) {
+                const aIdx = pair[0], bIdx = pair[1];
+                const wa = new THREE.Vector3(
+                  geom.attributes.position.getX(aIdx),
+                  geom.attributes.position.getY(aIdx),
+                  geom.attributes.position.getZ(aIdx)
+                ).applyMatrix4(tmpMat);
+                const wb = new THREE.Vector3(
+                  geom.attributes.position.getX(bIdx),
+                  geom.attributes.position.getY(bIdx),
+                  geom.attributes.position.getZ(bIdx)
+                ).applyMatrix4(tmpMat);
+
+                // frustum quick test
+                if (!frustum.containsPoint(wa) && !frustum.containsPoint(wb) && !obj.userData?.alwaysRender) continue;
+
+                const pa = api._safeProjectToScreen(wa, camera);
+                const pb = api._safeProjectToScreen(wb, camera);
+                if (!pa || !pb) continue;
+                const avgZ = (pa.z + pb.z) / 2;
+
+                drawables.push({
+                  type: 'line',
+                  pts: [{ x: pa.x, y: pa.y }, { x: pb.x, y: pb.y }],
+                  avgZ,
+                  obj,
+                  color,
+                  alpha,
+                  strokeWidth: obj.userData?.quadStrokeWidth ?? 1
+                });
+              }
+            }
+
+          } // instance loop
+          return;
+        } // end instanced path
+
+        // Non-instanced: per-mesh quad extraction
+        if (obj.isMesh && obj.geometry && api.options.detectQuads) {
+          const geom = obj.geometry;
+          const cache = buildQuadCacheForGeometry(geom);
+          if (cache && cache.quads && cache.quads.length > 0) {
+            const quadCap = obj.userData?.quadMax ?? api.options.maxQuadsPerObject;
+            const quads = cache.quads.slice(0, quadCap);
+            for (let quad of quads) {
+              // world positions
+              const wp0 = new THREE.Vector3(geom.attributes.position.getX(quad[0]), geom.attributes.position.getY(quad[0]), geom.attributes.position.getZ(quad[0])).applyMatrix4(obj.matrixWorld);
+              const wp1 = new THREE.Vector3(geom.attributes.position.getX(quad[1]), geom.attributes.position.getY(quad[1]), geom.attributes.position.getZ(quad[1])).applyMatrix4(obj.matrixWorld);
+              const wp2 = new THREE.Vector3(geom.attributes.position.getX(quad[2]), geom.attributes.position.getY(quad[2]), geom.attributes.position.getZ(quad[2])).applyMatrix4(obj.matrixWorld);
+              const wp3 = new THREE.Vector3(geom.attributes.position.getX(quad[3]), geom.attributes.position.getY(quad[3]), geom.attributes.position.getZ(quad[3])).applyMatrix4(obj.matrixWorld);
+              const worldArr = [wp0, wp1, wp2, wp3];
+
+              // frustum test: require at least one vertex in frustum unless alwaysRender
+              let anyIn = false;
+              for (let wpt of worldArr) if (frustum.containsPoint(wpt)) { anyIn = true; break; }
+              if (!anyIn && !obj.userData?.alwaysRender) continue;
+
+              // project
+              const projPts = [];
+              let allClipped = true, avgZ = 0;
+              for (let wpt of worldArr) {
+                const ps = api._projectToScreen(wpt, camera);
+                if (ps) { projPts.push(ps); avgZ += ps.z; allClipped = false; } else {
+                  projPts.push(null);
+                }
+              }
+              if (api.options.projectSkipBehind && allClipped) continue;
+              for (let idx = 0; idx < projPts.length; idx++) {
+                if (!projPts[idx]) {
+                  const safe = api._safeProjectToScreen(worldArr[idx], camera);
+                  if (safe) projPts[idx] = safe;
+                }
+              }
+
+              // if still any null, skip this quad
+              if (projPts.some(p => !p)) continue;
+
+              avgZ = projPts.reduce((s, p) => s + (p.z || 0), 0) / projPts.length;
+
+              // order vertices by center angle (screen-space)
+              const cx = projPts.reduce((s, p) => s + p.x, 0) / projPts.length;
+              const cy = projPts.reduce((s, p) => s + p.y, 0) / projPts.length;
+              projPts.sort((a, b) => Math.atan2(a.y - cy, a.x - cx) - Math.atan2(b.y - cy, b.x - cx));
+
+              drawables.push({
+                type: 'quad',
+                pts: projPts.map(p => ({ x: p.x, y: p.y })),
+                avgZ,
+                obj,
+                color,
+                alpha,
+                fill: (obj.userData?.quadFill !== undefined) ? obj.userData.quadFill : api.options.fillQuads,
+                strokeWidth: obj.userData?.quadStrokeWidth ?? 1
+              });
+            } // quads loop
+
+            // isolated pairs -> draw as lines
+            if (cache.isolatedPairs && cache.isolatedPairs.length > 0) {
+              for (const pair of cache.isolatedPairs) {
+                const aIdx = pair[0], bIdx = pair[1];
+                const wa = new THREE.Vector3(
+                  geom.attributes.position.getX(aIdx),
+                  geom.attributes.position.getY(aIdx),
+                  geom.attributes.position.getZ(aIdx)
+                ).applyMatrix4(obj.matrixWorld);
+                const wb = new THREE.Vector3(
+                  geom.attributes.position.getX(bIdx),
+                  geom.attributes.position.getY(bIdx),
+                  geom.attributes.position.getZ(bIdx)
+                ).applyMatrix4(obj.matrixWorld);
+
+                if (!frustum.containsPoint(wa) && !frustum.containsPoint(wb) && !obj.userData?.alwaysRender) continue;
+
+                const pa = api._safeProjectToScreen(wa, camera);
+                const pb = api._safeProjectToScreen(wb, camera);
+                if (!pa || !pb) continue;
+                const avgZ = (pa.z + pb.z) / 2;
+
+                drawables.push({
+                  type: 'line',
+                  pts: [{ x: pa.x, y: pa.y }, { x: pb.x, y: pb.y }],
+                  avgZ,
+                  obj,
+                  color,
+                  alpha,
+                  strokeWidth: obj.userData?.quadStrokeWidth ?? 1
+                });
+              }
+            }
+
+            return;
+          } // end if cache.quads
+        } // end mesh quad detection
+
+        // Fallback: texture / rect / marker if no quads detected or detection disabled
+        // TEXTURED SPRITES / MESHES: draw projected image rect if texture present and user didn't request quads
+        const mapImage = obj.material && obj.material.map && obj.material.map.image ? obj.material.map.image : null;
+        if (mapImage) {
+          // approximate using bounding box corners
+          let sampleWorldPts = [];
+          if (obj.geometry && obj.geometry.boundingBox) {
+            const bb = obj.geometry.boundingBox;
+            const min = bb.min, max = bb.max;
+            const corners = [
+              [min.x, min.y, min.z],
+              [min.x, min.y, max.z],
+              [min.x, max.y, min.z],
+              [min.x, max.y, max.z],
+              [max.x, min.y, min.z],
+              [max.x, min.y, max.z],
+              [max.x, max.y, min.z],
+              [max.x, max.y, max.z],
+            ];
+            for (let c of corners) sampleWorldPts.push(tmpVec.set(c[0], c[1], c[2]).applyMatrix4(obj.matrixWorld).clone());
+          } else {
+            obj.getWorldPosition(tmpPos);
+            sampleWorldPts.push(tmpPos.clone());
+          }
+
+          const projPts = [];
+          for (let wp of sampleWorldPts) {
+            const p = api._projectToScreen(wp, camera);
+            if (p) projPts.push(p);
+          }
+          if (projPts.length === 0) return;
+          let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, avgZ = 0;
+          for (let p of projPts) { minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x); minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y); avgZ += p.z; }
+          avgZ /= projPts.length;
+          drawables.push({ type: 'imageRect', rect: { minX, minY, width: maxX - minX, height: maxY - minY, avgZ }, mapImage, obj, color, alpha });
+          return;
         }
+
+        // final fallback marker center
+        const pc = api._projectToScreen(center, camera);
+        if (!pc) return;
+        drawables.push({ type: 'rect', x: pc.x, y: pc.y, z: pc.z, size: obj.userData?.markerSizePx ?? 6, obj, color, alpha });
+      }); // scene traverse end
+
+      // depth sort back->front using avgZ
+      drawables.sort((a, b) => {
+        const za = (typeof a.avgZ === 'number') ? a.avgZ : (typeof a.z === 'number' ? a.z : 0);
+        const zb = (typeof b.avgZ === 'number') ? b.avgZ : (typeof b.z === 'number' ? b.z : 0);
+        return zb - za;
+      });
+
+      // draw quads/images/rects/lines
+      for (let d of drawables) {
+        if (d.type === 'quad') {
+          ctx.save();
+          if (d.fill) {
+            ctx.globalAlpha = Math.max(0.02, Math.min(1, d.alpha));
+            ctx.fillStyle = d.color;
+            ctx.beginPath();
+            ctx.moveTo(d.pts[0].x, d.pts[0].y);
+            for (let i = 1; i < d.pts.length; i++) ctx.lineTo(d.pts[i].x, d.pts[i].y);
+            ctx.closePath();
+            ctx.fill();
+          }
+          // stroke always (if strokeWidth > 0)
+          if (d.strokeWidth > 0) {
+            ctx.globalAlpha = Math.min(1, d.alpha);
+            ctx.lineWidth = d.strokeWidth;
+            ctx.strokeStyle = 'rgba(0,0,0,0.6)';
+            ctx.beginPath();
+            ctx.moveTo(d.pts[0].x, d.pts[0].y);
+            for (let i = 1; i < d.pts.length; i++) ctx.lineTo(d.pts[i].x, d.pts[i].y);
+            ctx.closePath();
+            ctx.stroke();
+          }
+          ctx.restore();
+          continue;
+        }
+
+        if (d.type === 'line') {
+          ctx.save();
+          ctx.globalAlpha = Math.min(1, d.alpha);
+          ctx.lineWidth = d.strokeWidth || 1;
+          ctx.strokeStyle = 'rgba(0,0,0,0.6)';
+          ctx.beginPath();
+          ctx.moveTo(d.pts[0].x, d.pts[0].y);
+          ctx.lineTo(d.pts[1].x, d.pts[1].y);
+          ctx.stroke();
+
+          // small endpoint dots for clarity
+          const dotSize = 2;
+          ctx.fillStyle = d.color;
+          ctx.beginPath();
+          ctx.arc(d.pts[0].x, d.pts[0].y, dotSize, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.beginPath();
+          ctx.arc(d.pts[1].x, d.pts[1].y, dotSize, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.restore();
+          continue;
+        }
+
+        if (d.type === 'imageRect' && d.mapImage) {
+          const r = d.rect;
+          ctx.save();
+          ctx.globalAlpha = d.alpha;
+          const maxScreen = Math.max(256, Math.min(8192, d.obj.userData?.maxScreenSizePx ?? 4096));
+          let w = Math.max(1, r.width), h = Math.max(1, r.height);
+          if (w > maxScreen || h > maxScreen) {
+            const sc = maxScreen / Math.max(w, h);
+            w *= sc; h *= sc;
+          }
+          ctx.drawImage(d.mapImage, r.minX, r.minY, w, h);
+          ctx.restore();
+          continue;
+        }
+
+        if (d.type === 'rect') {
+          ctx.save();
+          ctx.globalAlpha = Math.max(0.05, Math.min(1, d.alpha));
+          ctx.fillStyle = d.color;
+          const s = d.size;
+          ctx.fillRect(d.x - s / 2, d.y - s / 2, s, s);
+          ctx.restore();
+          continue;
+        }
+      } // draw loop end
+    } // render end
+  }; // api end
+
+  return api;
+}
+
+
 
 
 /* ---------- Updated scene initializers (CPU renderer) ---------- */
@@ -3065,6 +3531,8 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
+
 
 
 
