@@ -847,9 +847,6 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
     return lower.concat(upper);
   }
 
-  // small helper: clamp
-  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
-
   const api = {
     domElement: canvas,
     options: {
@@ -887,6 +884,9 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
       camera.updateMatrixWorld();
       if (camera.updateProjectionMatrix) camera.updateProjectionMatrix();
 
+      // Ensure scene matrices are up to date
+      scene.updateMatrixWorld(true);
+
       // camera world->camera matrix (inverse of matrixWorld)
       const camInv = tmpMat.copy(camera.matrixWorld).invert();
 
@@ -904,15 +904,18 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
         const sx = (proj.x * 0.5 + 0.5) * canvas.width;
         const sy = (-proj.y * 0.5 + 0.5) * canvas.height;
 
-        // camera-space center Z (used for correct painter's sorting & depth cues)
-        const camCenter = tmpPos.clone().applyMatrix4(camInv);
-        const camCenterZ = camCenter.z; // negative values are in front of camera for three.js
+        // keep Euclidean distance for size/alpha heuristics, but NOT for sorting
+        const dist = camera.position.distanceTo(tmpPos);
 
         // check for texture (sprites)
         const mapImage = obj.material && obj.material.map && obj.material.map.image ? obj.material.map.image : null;
 
         // If user explicitly wants to always render, skip strict culling checks later
         const alwaysRender = !!obj.userData?.alwaysRender;
+
+        // compute camera-space center z (z is negative in front for THREE)
+        const centerCam = tmpPos.clone().applyMatrix4(camInv);
+        const centerCamZ = centerCam.z;
 
         // categorize drawable
         if (mapImage) {
@@ -922,16 +925,16 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
             obj,
             sx,
             sy,
-            camZ: camCenterZ,
-            dist: camera.position.distanceTo(tmpPos),
+            dist,
             projZ: proj.z,
-            mapImage
+            mapImage,
+            camZ: centerCamZ
           });
           return;
         } else if (obj.isMesh && obj.geometry) {
           const geom = obj.geometry;
-          if (!geom.boundingBox) geom.computeBoundingBox && geom.computeBoundingBox();
-          if (!geom.boundingSphere) geom.computeBoundingSphere && geom.computeBoundingSphere();
+          if (!geom.boundingBox && geom.computeBoundingBox) geom.computeBoundingBox();
+          if (!geom.boundingSphere && geom.computeBoundingSphere) geom.computeBoundingSphere();
 
           // Build sample points in world space (bbox corners, sphere points, or subset of positions)
           const worldPoints = [];
@@ -983,7 +986,15 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
           // If no world points, fallback to center marker (rare)
           if (worldPoints.length === 0) {
             if (obj.userData?.forceMarker) {
-              drawables.push({ type: 'rect', obj, sx, sy, camZ: camCenterZ, dist: camera.position.distanceTo(tmpPos), sizePx: obj.userData?.markerSizePx ?? 6 });
+              drawables.push({
+                type: 'rect',
+                obj,
+                sx,
+                sy,
+                dist,
+                sizePx: obj.userData?.markerSizePx ?? 6,
+                camZ: centerCamZ
+              });
             }
             return;
           }
@@ -998,7 +1009,6 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
 
           // Collect projected screen points for those in front of near and within far
           const pts2d = [];
-          const ptsCamZ = [];
 
           for (let i = 0; i < worldPoints.length; i++) {
             const camPt = camSpacePts[i];
@@ -1010,7 +1020,6 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
               const px = (proj.x * 0.5 + 0.5) * canvas.width;
               const py = (-proj.y * 0.5 + 0.5) * canvas.height;
               pts2d.push({ x: px, y: py, ndcZ: proj.z });
-              ptsCamZ.push(camPt.z);
             }
           }
 
@@ -1033,9 +1042,6 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
                 const px = (proj.x * 0.5 + 0.5) * canvas.width;
                 const py = (-proj.y * 0.5 + 0.5) * canvas.height;
                 pts2d.push({ x: px, y: py, ndcZ: proj.z });
-                // approximate camZ for this intersection by interpolating camera-space zs
-                const interpCamZ = camSpacePts[i].z + t * (camSpacePts[j].z - camSpacePts[i].z);
-                ptsCamZ.push(interpCamZ);
               }
             }
           }
@@ -1046,7 +1052,6 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
             const px = (proj.x * 0.5 + 0.5) * canvas.width;
             const py = (-proj.y * 0.5 + 0.5) * canvas.height;
             pts2d.push({ x: px, y: py, ndcZ: proj.z });
-            ptsCamZ.push(camCenterZ);
           }
 
           // If after near-plane clipping we have zero pts, we may still want a fallback marker,
@@ -1056,7 +1061,15 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
               // clamp center to screen bounds so we get a marker on-screen
               const cx = Math.max(0, Math.min(canvas.width, sx));
               const cy = Math.max(0, Math.min(canvas.height, sy));
-              drawables.push({ type: 'rect', obj, sx: cx, sy: cy, camZ: camCenterZ, dist: camera.position.distanceTo(tmpPos), sizePx: obj.userData?.markerSizePx ?? 6 });
+              drawables.push({
+                type: 'rect',
+                obj,
+                sx: cx,
+                sy: cy,
+                dist,
+                sizePx: obj.userData?.markerSizePx ?? 6,
+                camZ: centerCamZ
+              });
             }
             return;
           }
@@ -1064,19 +1077,42 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
           // Build convex hull from the collected projected points
           const hull = convexHull(pts2d);
 
-          // compute average camZ for the captured pts (used for sorting + depth cues)
-          const avgCamZ = ptsCamZ.length ? ptsCamZ.reduce((s, v) => s + v, 0) / ptsCamZ.length : camCenterZ;
+          // Determine a representative camera-space Z for sorting.
+          // Use the nearest cam-space Z (largest z, since near is less negative) so objects that have any near part
+          // will be treated as near. You may change this to average or min depending on preference.
+          const repCamZ = Math.max(...camSpacePts.map(p => p.z));
 
           // If hull is trivial (1 or 2 points), but user forced rendering, make fallback shapes
           if (hull.length >= 3) {
-            drawables.push({ type: 'poly', obj, pts: hull, dist: camera.position.distanceTo(tmpPos), camZ: avgCamZ, projZ: proj.z });
+            drawables.push({
+              type: 'poly',
+              obj,
+              pts: hull,
+              dist,
+              projZ: proj.z,
+              camZ: repCamZ
+            });
           } else if (hull.length === 2) {
-            drawables.push({ type: 'line', obj, pts: hull, dist: camera.position.distanceTo(tmpPos), camZ: avgCamZ });
+            drawables.push({
+              type: 'line',
+              obj,
+              pts: hull,
+              dist,
+              camZ: repCamZ
+            });
           } else {
             // single point fallback
             const p = hull[0] || pts2d[0];
             if (alwaysRender || obj.userData?.forceMarker) {
-              drawables.push({ type: 'rect', obj, sx: p.x, sy: p.y, dist: camera.position.distanceTo(tmpPos), camZ: avgCamZ, sizePx: obj.userData?.markerSizePx ?? 6 });
+              drawables.push({
+                type: 'rect',
+                obj,
+                sx: p.x,
+                sy: p.y,
+                dist,
+                sizePx: obj.userData?.markerSizePx ?? 6,
+                camZ: repCamZ
+              });
             }
           }
 
@@ -1084,33 +1120,34 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
         } else {
           // unknown / fallback: only draw marker if explicitly requested
           if (obj.userData?.forceMarker) {
-            drawables.push({ type: 'rect', obj, sx, sy, camZ: camCenterZ, dist: camera.position.distanceTo(tmpPos), sizePx: obj.userData?.markerSizePx ?? 6 });
+            drawables.push({
+              type: 'rect',
+              obj,
+              sx,
+              sy,
+              dist,
+              sizePx: obj.userData?.markerSizePx ?? 6,
+              camZ: centerCamZ
+            });
           }
         }
       });
 
-      // Painter's order: furthest first (more negative camZ => farther). Sort by camZ ascending.
+      // Painter's order: furthest first (more negative camZ means further away)
+      // We sort by camZ ascending (more negative = far, less negative = near).
+      // If some entries lack camZ, fallback to -dist (so farther Euclidean distance sorts first).
       drawables.sort((a, b) => {
-        const az = (a.camZ === undefined ? -1e6 : a.camZ);
-        const bz = (b.camZ === undefined ? -1e6 : b.camZ);
-        return az - bz;
+        const za = (a.camZ !== undefined) ? a.camZ : (a.dist !== undefined ? -a.dist : 0);
+        const zb = (b.camZ !== undefined) ? b.camZ : (b.dist !== undefined ? -b.dist : 0);
+        return za - zb;
       });
 
       // draw
       for (let i = 0; i < drawables.length; i++) {
         const d = drawables[i];
-        const { obj } = d;
+        const { obj, dist } = d;
 
-        // compute depth-based factors (use absolute camZ because camZ is negative in front)
-        const camZ = (d.camZ !== undefined ? Math.abs(d.camZ) : 1000); // larger = farther
-        const near = camera.near || 0.1;
-        const far = camera.far || 10000;
-        // normalized depth where 0 => at near, 1 => at far (clamped)
-        const normDepth = clamp((camZ - near) / Math.max(1e-3, (far - near)), 0, 1);
-        // depth lighting / haze: nearer -> 1, farther -> 0.35
-        const depthLight = clamp(1 - normDepth * 0.65, 0.2, 1);
-
-        // common color selection (string style)
+        // common color selection
         let color = obj.userData?.color;
         if (!color && obj.material && obj.material.color) {
           try {
@@ -1121,13 +1158,7 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
         }
         color = color || obj.userData?.color || 'white';
 
-        // apply some depth-based shadow parameters
-        const shadowOffset = clamp((camZ - near) * 0.02, 0, 40); // px
-        const shadowBlur = clamp((camZ - near) * 0.02, 0, 30);
-        const baseAlpha = obj.userData?.opacity ?? (obj.material?.opacity ?? 1);
-
         if (d.type === 'image' && d.mapImage && d.mapImage.width) {
-          // Size determination using projected bbox if available, otherwise heuristic on camZ
           let size;
           if (obj.geometry && obj.geometry.boundingBox) {
             const bb = obj.geometry.boundingBox;
@@ -1145,99 +1176,47 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
             const hPx = Math.abs(screenPts[0].y - screenPts[1].y);
             size = Math.max(8, obj.userData?.sizePx ?? Math.max(wPx, hPx, 32));
           } else {
-            // fallback: scale with inverse camZ (closer = larger)
-            size = Math.max(8, obj.userData?.sizePx ?? 300 * (1 / Math.max(0.001, camZ * 0.05)));
-            // clamp to reasonable bounds
-            size = clamp(size, 8, Math.max(32, Math.min(canvas.width, canvas.height)));
+            const baseSize = obj.userData?.sizePx ?? 300;
+            size = Math.max(8, baseSize * (1 / Math.max(0.1, dist * 0.05)));
           }
-
           ctx.save();
-          // depth shadow & alpha
-          ctx.globalAlpha = clamp(baseAlpha * depthLight, 0.05, 1);
           ctx.translate(d.sx, d.sy);
-
-          // subtle rotation support
           const rot = obj.userData?.rotation ?? (obj.rotation?.z ?? 0);
           if (rot) ctx.rotate(rot);
-
-          // drop shadow to give depth / height illusion
-          ctx.shadowColor = 'rgba(0,0,0,0.45)';
-          ctx.shadowBlur = shadowBlur;
-          // offset shadow downward/right by small amount proportional to "height" (camZ)
-          ctx.shadowOffsetX = shadowOffset * 0.3;
-          ctx.shadowOffsetY = shadowOffset * 0.6;
-
+          ctx.globalAlpha = obj.userData?.opacity ?? (obj.material?.opacity ?? 1);
           ctx.drawImage(d.mapImage, -size / 2, -size / 2, size, size);
-
-          // reset shadow for subsequent draws
-          ctx.shadowBlur = 0;
-          ctx.shadowOffsetX = 0;
-          ctx.shadowOffsetY = 0;
           ctx.restore();
-
         } else if (d.type === 'poly' && d.pts) {
           ctx.save();
-
-          // fill with depth-chosen alpha (gives atmospheric fade)
           ctx.beginPath();
           ctx.moveTo(d.pts[0].x, d.pts[0].y);
           for (let j = 1; j < d.pts.length; j++) ctx.lineTo(d.pts[j].x, d.pts[j].y);
           ctx.closePath();
-
-          // fill alpha combines baseAlpha and depthLight
-          ctx.globalAlpha = clamp(Math.max(0.08, baseAlpha * depthLight), 0.02, 1);
-
-          // soft shadow under shape to suggest separation from background
-          ctx.shadowColor = 'rgba(0,0,0,0.35)';
-          ctx.shadowBlur = shadowBlur * 0.6;
-          ctx.shadowOffsetX = shadowOffset * 0.2;
-          ctx.shadowOffsetY = shadowOffset * 0.5;
-
+          ctx.globalAlpha = Math.max(0.2, Math.min(1, 1 - (dist * 0.002)));
           ctx.fillStyle = color;
           ctx.fill();
-
-          // stroke with width scaled by depth so close edges read stronger
-          ctx.globalAlpha = clamp(0.6 * depthLight, 0.05, 1);
-          ctx.lineWidth = Math.max(1, clamp(2.5 * (1 - normDepth), 0.5, 3.5));
+          ctx.globalAlpha = 0.6;
+          ctx.lineWidth = Math.max(1, 2 - (dist * 0.001));
           ctx.strokeStyle = 'rgba(0,0,0,0.6)';
           ctx.stroke();
-
-          // reset shadow
-          ctx.shadowBlur = 0;
-          ctx.shadowOffsetX = 0;
-          ctx.shadowOffsetY = 0;
           ctx.restore();
         } else if (d.type === 'line' && d.pts && d.pts.length === 2) {
-          ctx.save();
           ctx.beginPath();
           ctx.moveTo(d.pts[0].x, d.pts[0].y);
           ctx.lineTo(d.pts[1].x, d.pts[1].y);
-
-          ctx.globalAlpha = clamp(baseAlpha * depthLight, 0.05, 1);
-          ctx.lineWidth = obj.userData?.lineWidth ?? clamp(3 * (1 - normDepth) + 1, 1, 6);
           ctx.strokeStyle = color;
+          ctx.lineWidth = obj.userData?.lineWidth ?? 3;
+          ctx.globalAlpha = 1 - Math.min(0.9, dist * 0.002);
           ctx.stroke();
-          ctx.restore();
         } else if (d.type === 'rect') {
           // small centered rectangle marker (replaces prior circle/sphere)
-          const size = d.sizePx ?? Math.max(2, Math.round(12 * (1 / Math.max(0.1, camZ * 0.05))));
+          const size = d.sizePx ?? Math.max(2, Math.round(12 * (1 / Math.max(0.1, dist * 0.05))));
           const x = (d.sx || d.sx === 0) ? d.sx : 0;
           const y = (d.sy || d.sy === 0) ? d.sy : 0;
           ctx.save();
-          ctx.globalAlpha = clamp(Math.max(0.35, baseAlpha * depthLight), 0.15, 1);
-
-          // small soft shadow
-          ctx.shadowColor = 'rgba(0,0,0,0.4)';
-          ctx.shadowBlur = shadowBlur * 0.7;
-          ctx.shadowOffsetX = shadowOffset * 0.2;
-          ctx.shadowOffsetY = shadowOffset * 0.5;
-
+          ctx.globalAlpha = Math.max(0.5, Math.min(1, 1 - (dist * 0.002)));
           ctx.fillStyle = color;
           ctx.fillRect(x - size / 2, y - size / 2, size, size);
-
-          ctx.shadowBlur = 0;
-          ctx.shadowOffsetX = 0;
-          ctx.shadowOffsetY = 0;
           ctx.restore();
         } else {
           // nothing
@@ -1248,6 +1227,7 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
 
   return api;
 }
+
 
 
 /* ---------- Updated scene initializers (CPU renderer) ---------- */
@@ -3346,6 +3326,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
