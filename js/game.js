@@ -825,7 +825,6 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
   const tmpVec = new THREE.Vector3();
   const tmpVec2 = new THREE.Vector3();
   const tmpVec3 = new THREE.Vector3();
-  const tmpView = new THREE.Vector3();
   const tmpScale = new THREE.Vector3();
 
   // Remember the last good screen representation for objects
@@ -899,7 +898,7 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
           }
         }
       } catch (e) {
-        // ignore if invert/getInverse isn't available; .project() will still work
+        // ignore if invert/getInverse isn't available; .project() still works
       }
 
       // Clear with the clear color (converted to CSS)
@@ -916,8 +915,10 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
       // collect drawables (so we can sort by depth)
       const drawables = [];
 
-      // precompute camera forward direction (normalized)
-      camera.getWorldDirection(tmpVec2);
+      // precompute some camera values
+      const camPos = camera.position.clone();
+      const camFar = camera.far || 1000;
+      const nearZ = -Math.max(0.0001, (camera.near || 0.1));
 
       scene.traverse((obj) => {
         if (!obj.visible) return;
@@ -933,20 +934,29 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
           if (!obj.userData?.alwaysRender) return;
         }
 
-        // screen coords
-        const sx = (proj.x * 0.5 + 0.5) * canvas.width;
-        const sy = (-proj.y * 0.5 + 0.5) * canvas.height;
+        // screen coords (center)
+        const centerSx = (proj.x * 0.5 + 0.5) * canvas.width;
+        const centerSy = (-proj.y * 0.5 + 0.5) * canvas.height;
 
-        // distance for depth sorting
-        const dist = camera.position.distanceTo(tmpPos);
+        // distance for depth sorting (use center world position)
+        const dist = camPos.distanceTo(tmpPos);
 
         // check for texture
         const mapImage = obj.material && obj.material.map && obj.material.map.image ? obj.material.map.image : null;
 
+        // HELPER: store last-good state info in canonical format
+        function saveLastState(objKey, entry) {
+          entry.frame = frameId;
+          // keep lastWorldCenter for depth updates (prefer provided, else tmpPos)
+          if (!entry.lastWorldCenter) entry.lastWorldCenter = tmpPos.clone();
+          entry.lastDist = camPos.distanceTo(entry.lastWorldCenter);
+          lastScreenState.set(objKey, entry);
+        }
+
         // categorize drawable
         if (mapImage) {
           // image sprites: compute size using projected bbox corners when possible
-          let size;
+          let sizePx = null;
           if (obj.geometry && obj.geometry.boundingBox) {
             const bb = obj.geometry.boundingBox;
             const corners = [
@@ -967,28 +977,38 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
             if (validScreenPts === 2) {
               const wPx = Math.abs(screenPts[0].x - screenPts[1].x);
               const hPx = Math.abs(screenPts[0].y - screenPts[1].y);
-              size = Math.max(8, obj.userData?.sizePx ?? Math.max(wPx, hPx, 32));
+              sizePx = Math.max(8, obj.userData?.sizePx ?? Math.max(wPx, hPx, 32));
+            }
+          }
+
+          // if no fresh size, try using cached size and scale it by distance ratio so sprite still shows
+          let last = lastScreenState.get(obj);
+          if (sizePx == null) {
+            if (last && last.type === 'image') {
+              // compute ratio = lastDist / dist (if lastDist exists)
+              const lastDist = last.lastDist || Math.max(0.0001, dist);
+              const ratio = Math.max(0.1, lastDist / Math.max(0.0001, dist));
+              sizePx = (last.size || (obj.userData?.sizePx ?? 300)) * ratio;
             } else {
               const baseSize = obj.userData?.sizePx ?? 300;
-              size = Math.max(8, baseSize * (1 / Math.max(0.1, dist * 0.05)));
+              sizePx = Math.max(8, baseSize * (1 / Math.max(0.1, dist * 0.05)));
             }
-          } else {
-            const baseSize = obj.userData?.sizePx ?? 300;
-            size = Math.max(8, baseSize * (1 / Math.max(0.1, dist * 0.05)));
           }
 
           // Save last good state for this image object
-          lastScreenState.set(obj, {
-            frame: frameId,
+          saveLastState(obj, {
             type: 'image',
-            sx, sy, size,
+            sx: centerSx,
+            sy: centerSy,
+            size: sizePx,
             mapImage,
             rot: obj.userData?.rotation ?? (obj.rotation?.z ?? 0),
             alpha: obj.userData?.opacity ?? (obj.material?.opacity ?? 1),
-            colorHint: obj.userData?.color
+            colorHint: obj.userData?.color,
+            lastWorldCenter: tmpPos.clone()
           });
 
-          drawables.push({ type: 'image', obj, sx, sy, dist, projZ: proj.z, mapImage, size });
+          drawables.push({ type: 'image', obj, sx: centerSx, sy: centerSy, dist, projZ: proj.z, mapImage, size: sizePx });
         } else if (obj.isMesh && obj.geometry) {
           const geom = obj.geometry;
           if (!geom.boundingBox && geom.computeBoundingBox) geom.computeBoundingBox();
@@ -1016,7 +1036,6 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
           } else if (geom.boundingSphere) {
             const bs = geom.boundingSphere;
             const center = bs.center.clone().applyMatrix4(obj.matrixWorld);
-            // compute world scale properly
             obj.getWorldScale(tmpScale);
             const worldScale = Math.max(tmpScale.x, tmpScale.y, tmpScale.z, 1);
             const r = bs.radius * worldScale;
@@ -1043,7 +1062,7 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
             }
           }
 
-          // --- robust projection + near-plane clipping ---
+          // Robust projection + near-plane clipping
           const cornerViews = worldPoints.map(wp => {
             const v = wp.clone().applyMatrix4(camera.matrixWorldInverse || new THREE.Matrix4().copy(camera.matrixWorld).invert());
             return { world: wp.clone(), viewZ: v.z };
@@ -1061,7 +1080,6 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
           }
 
           // near plane intersections
-          const nearZ = -Math.max(0.0001, (camera.near || 0.1));
           for (let e of cubeEdges) {
             const a = cornerViews[e[0]];
             const b = cornerViews[e[1]];
@@ -1110,52 +1128,73 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
           }
 
           if (pts2d.length === 0) {
-            // No good current projection points: reuse last known state if available
+            // No good current projection points: reuse last known state if available (and draw it)
             const last = lastScreenState.get(obj);
             if (last) {
-              // create a drawable from last known state, but update distance
-              const copied = Object.assign({}, last);
-              copied.obj = obj;
-              copied.dist = dist;
-              copied.fromLast = true;
-              drawables.push(copied);
-              return;
+              // update dist using stored world center for proper painter-order
+              const lastWorldCenter = last.lastWorldCenter || tmpPos.clone();
+              const updatedDist = camPos.distanceTo(lastWorldCenter);
+              // reconstruct drawable based on stored type
+              if (last.type === 'poly' && last.pts) {
+                drawables.push({ type: 'poly', obj, pts: last.pts.slice(), dist: updatedDist, reused: true });
+                // refresh last's lastDist/frame
+                saveLastState(obj, Object.assign({}, last, { lastWorldCenter, lastDist: updatedDist }));
+                return;
+              } else if (last.type === 'line' && last.pts) {
+                drawables.push({ type: 'line', obj, pts: last.pts.slice(), dist: updatedDist, reused: true });
+                saveLastState(obj, Object.assign({}, last, { lastWorldCenter, lastDist: updatedDist }));
+                return;
+              } else if (last.type === 'rect') {
+                drawables.push({ type: 'rect', obj, sx: last.sx, sy: last.sy, sizePx: last.sizePx || 6, dist: updatedDist, reused: true });
+                saveLastState(obj, Object.assign({}, last, { lastWorldCenter, lastDist: updatedDist }));
+                return;
+              } else if (last.type === 'image') {
+                // image: scale cached size by lastDist/currentDist ratio for basic perspective
+                const lastDist = last.lastDist || Math.max(0.0001, updatedDist);
+                const ratio = Math.max(0.1, (lastDist / Math.max(0.0001, updatedDist)));
+                const sizeUsingCache = (last.size || obj.userData?.sizePx ?? 300) * ratio;
+                drawables.push({
+                  type: 'image',
+                  obj,
+                  sx: last.sx,
+                  sy: last.sy,
+                  size: sizeUsingCache,
+                  mapImage: last.mapImage,
+                  dist: updatedDist,
+                  reused: true,
+                  rot: last.rot,
+                  alpha: last.alpha
+                });
+                saveLastState(obj, Object.assign({}, last, { lastWorldCenter, lastDist: updatedDist }));
+                return;
+              }
             }
 
+            // no last-state, fallback to marker if requested
             if (obj.userData?.forceMarker) {
-              drawables.push({ type: 'rect', obj, sx, sy, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
+              saveLastState(obj, {
+                type: 'rect',
+                sx: centerSx,
+                sy: centerSy,
+                sizePx: obj.userData?.markerSizePx ?? 6,
+                lastWorldCenter: tmpPos.clone()
+              });
+              drawables.push({ type: 'rect', obj, sx: centerSx, sy: centerSy, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
             }
             return;
           } else {
+            // compute hull and save as last-good
             const hullPoints = pts2d.map(p => ({ x: p.x, y: p.y }));
             const hull = convexHull(hullPoints);
             if (hull.length >= 3) {
-              // save last good poly
-              lastScreenState.set(obj, {
-                frame: frameId,
-                type: 'poly',
-                pts: hull.map(p => ({ x: p.x, y: p.y })),
-                colorHint: obj.userData?.color
-              });
+              saveLastState(obj, { type: 'poly', pts: hull.map(p => ({ x: p.x, y: p.y })), lastWorldCenter: tmpPos.clone() });
               drawables.push({ type: 'poly', obj, pts: hull, dist, projZ: proj.z });
             } else if (hull.length === 2) {
-              lastScreenState.set(obj, {
-                frame: frameId,
-                type: 'line',
-                pts: hull.map(p => ({ x: p.x, y: p.y })),
-                colorHint: obj.userData?.color
-              });
+              saveLastState(obj, { type: 'line', pts: hull.map(p => ({ x: p.x, y: p.y })), lastWorldCenter: tmpPos.clone() });
               drawables.push({ type: 'line', obj, pts: hull, dist });
             } else {
               // single-point fallback
-              lastScreenState.set(obj, {
-                frame: frameId,
-                type: 'rect',
-                sx: pts2d[0].x,
-                sy: pts2d[0].y,
-                sizePx: obj.userData?.markerSizePx ?? 6,
-                colorHint: obj.userData?.color
-              });
+              saveLastState(obj, { type: 'rect', sx: pts2d[0].x, sy: pts2d[0].y, sizePx: obj.userData?.markerSizePx ?? 6, lastWorldCenter: tmpPos.clone() });
               if (obj.userData?.forceMarker) {
                 drawables.push({ type: 'rect', obj, sx: pts2d[0].x, sy: pts2d[0].y, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
               }
@@ -1165,46 +1204,46 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
         } else {
           // unknown / fallback: only draw marker if explicitly requested
           if (obj.userData?.forceMarker) {
-            lastScreenState.set(obj, {
-              frame: frameId,
+            saveLastState(obj, {
               type: 'rect',
-              sx, sy, sizePx: obj.userData?.markerSizePx ?? 6,
-              colorHint: obj.userData?.color
+              sx: centerSx,
+              sy: centerSy,
+              sizePx: obj.userData?.markerSizePx ?? 6,
+              lastWorldCenter: tmpPos.clone()
             });
-            drawables.push({ type: 'rect', obj, sx, sy, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
+            drawables.push({ type: 'rect', obj, sx: centerSx, sy: centerSy, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
           }
         }
       });
 
       // Painter's order: furthest first (larger distance)
-      drawables.sort((a, b) => b.dist - a.dist);
+      drawables.sort((a, b) => (b.dist || 0) - (a.dist || 0));
 
-      // draw
+      // draw with depth-based appearance tweaks
       for (let i = 0; i < drawables.length; i++) {
         const d = drawables[i];
-        const { obj, dist } = d;
+        const { obj } = d;
+        const dist = d.dist || 0;
 
-        // If this drawable was reconstructed from lastScreenState, it may not include material/color info.
-        let color = obj?.userData?.color;
-        if (!color && obj && obj.material && obj.material.color) {
-          try {
-            color = obj.material.color.getStyle ? obj.material.color.getStyle() : (`#${obj.material.color.getHexString()}`);
-          } catch (e) {
-            color = obj?.userData?.color || 'white';
-          }
-        }
-        color = color || obj?.userData?.color || (d.colorHint ?? 'white');
+        // depth-based alpha (mapped into [0.15, 1]) -- more contrast than before
+        const alpha = Math.max(0.15, Math.min(1, 1 - ((dist / Math.max(1, (camera.far || 1000))) * 0.7)));
+
+        // depth-based stroke width
+        const lineWidth = Math.max(1, Math.round(Math.max(1, 6 * (1 - Math.min(0.95, dist / Math.max(1, camera.far || 1000))))));
+
+        // color resolution: obj material -> userData -> fallback
+        let color = (obj && obj.userData && obj.userData.color) || (obj && obj.material && obj.material.color ? (obj.material.color.getStyle ? obj.material.color.getStyle() : (`#${obj.material.color.getHexString()}`)) : null);
+        color = color || d.colorHint || 'white';
 
         if (d.type === 'image' && d.mapImage && d.mapImage.width) {
-          // use provided size (either fresh or from last)
           const size = d.size ?? d.sizePx ?? Math.max(8, (obj && obj.userData?.sizePx) || 32);
-          const drawSx = d.sx ?? sx; // if last-state had sx stored, use it; otherwise use most recent center
-          const drawSy = d.sy ?? sy;
+          const drawSx = (d.sx ?? d.sx === 0) ? d.sx : centerSx;
+          const drawSy = (d.sy ?? d.sy === 0) ? d.sy : centerSy;
           ctx.save();
           ctx.translate(drawSx, drawSy);
-          const rot = d.rot ?? (obj?.userData?.rotation ?? (obj?.rotation?.z ?? 0));
+          const rot = d.rot ?? (obj && (obj.userData?.rotation ?? (obj.rotation?.z ?? 0)));
           if (rot) ctx.rotate(rot);
-          ctx.globalAlpha = d.alpha ?? (obj?.userData?.opacity ?? (obj?.material?.opacity ?? 1));
+          ctx.globalAlpha = (d.alpha ?? (obj && (obj.userData?.opacity ?? (obj.material?.opacity ?? 1)))) * alpha;
           ctx.drawImage(d.mapImage, -size / 2, -size / 2, size, size);
           ctx.restore();
         } else if (d.type === 'poly' && d.pts) {
@@ -1213,11 +1252,11 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
           ctx.moveTo(d.pts[0].x, d.pts[0].y);
           for (let j = 1; j < d.pts.length; j++) ctx.lineTo(d.pts[j].x, d.pts[j].y);
           ctx.closePath();
-          ctx.globalAlpha = Math.max(0.2, Math.min(1, 1 - (dist * 0.002)));
+          ctx.globalAlpha = Math.max(0.2, Math.min(1, 0.85 * alpha));
           ctx.fillStyle = color;
           ctx.fill();
-          ctx.globalAlpha = 0.6;
-          ctx.lineWidth = Math.max(1, 2 - (dist * 0.001));
+          ctx.globalAlpha = Math.min(1, 0.9 * alpha);
+          ctx.lineWidth = lineWidth;
           ctx.strokeStyle = 'rgba(0,0,0,0.6)';
           ctx.stroke();
           ctx.restore();
@@ -1226,21 +1265,18 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
           ctx.moveTo(d.pts[0].x, d.pts[0].y);
           ctx.lineTo(d.pts[1].x, d.pts[1].y);
           ctx.strokeStyle = color;
-          ctx.lineWidth = obj?.userData?.lineWidth ?? d.lineWidth ?? 3;
-          ctx.globalAlpha = 1 - Math.min(0.9, dist * 0.002);
+          ctx.lineWidth = lineWidth;
+          ctx.globalAlpha = Math.min(1, alpha);
           ctx.stroke();
         } else if (d.type === 'rect') {
-          // small centered rectangle marker (replaces prior circle/sphere)
-          const size = d.sizePx ?? d.size ?? Math.max(2, Math.round(12 * (1 / Math.max(0.1, dist * 0.05))));
+          const size = d.sizePx ?? d.size ?? Math.max(2, Math.round(12 * (1 / Math.max(0.1, (d.dist || 1) * 0.05))));
           const x = (d.sx || d.sx === 0) ? d.sx : (d.centerX ?? 0);
           const y = (d.sy || d.sy === 0) ? d.sy : (d.centerY ?? 0);
           ctx.save();
-          ctx.globalAlpha = Math.max(0.5, Math.min(1, 1 - (dist * 0.002)));
+          ctx.globalAlpha = Math.max(0.4, alpha);
           ctx.fillStyle = color;
           ctx.fillRect(x - size / 2, y - size / 2, size, size);
           ctx.restore();
-        } else {
-          // nothing - we've removed automatic sphere/arc drawing
         }
       }
     }
@@ -3345,6 +3381,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
