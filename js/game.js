@@ -950,11 +950,49 @@ function voidEngine(options) {
         obj.getWorldPosition(tmpPos);
         proj.copy(tmpPos).project(camera); // NDC -1..1
 
-        // quick NDC cull (if center far off-screen, skip). We allow some slack for large objects.
-        if (proj.z > 1 || proj.z < -1 || proj.x < -2 || proj.x > 2 || proj.y < -2 || proj.y > 2) {
-          // still allow meshes that have explicit userData.alwaysRender = true
-          if (!(obj.userData && obj.userData.alwaysRender)) return;
-        }
+// quick NDC cull (if center far off-screen, usually skip).
+// BUT if we have a lastScreenState for this object, reuse it instead of vanishing.
+var isCenterFarOff = (proj.z > 1 || proj.z < -1 || proj.x < -2 || proj.x > 2 || proj.y < -2 || proj.y > 2);
+if (isCenterFarOff && !(obj.userData && obj.userData.alwaysRender)) {
+  var cached = lastScreenState.get(obj);
+  if (cached) {
+    // compute updated distance from cached world center so painter-order and scaling remain correct
+    var lastWorldCenter = cached.lastWorldCenter || tmpPos.clone();
+    var updatedDist = camPos.distanceTo(lastWorldCenter);
+
+    // Reconstruct a drawable from the cached state (handle types we store: image, poly, line, rect)
+    if (cached.type === 'image') {
+      drawables.push({
+        type: 'image',
+        obj: obj,
+        sx: (cached.sx !== undefined ? cached.sx : centerSx),
+        sy: (cached.sy !== undefined ? cached.sy : centerSy),
+        size: cached.size || cached.sizePx || (obj.userData && obj.userData.sizePx) || 32,
+        mapImage: cached.mapImage,
+        dist: updatedDist,
+        reused: true,
+        rot: cached.rot,
+        alpha: cached.alpha,
+        colorHint: cached.colorHint
+      });
+    } else if (cached.type === 'poly' && cached.pts) {
+      drawables.push({ type: 'poly', obj: obj, pts: cached.pts.slice(), dist: updatedDist, reused: true, colorHint: cached.colorHint });
+    } else if (cached.type === 'line' && cached.pts) {
+      drawables.push({ type: 'line', obj: obj, pts: cached.pts.slice(), dist: updatedDist, reused: true, colorHint: cached.colorHint });
+    } else if (cached.type === 'rect') {
+      drawables.push({ type: 'rect', obj: obj, sx: cached.sx, sy: cached.sy, sizePx: cached.sizePx || 6, dist: updatedDist, reused: true, colorHint: cached.colorHint });
+    } else {
+      // unknown cached format — skip
+    }
+
+    // skip expensive per-vertex processing for this object this frame
+    return;
+  } else {
+    // no cached data: we must skip
+    return;
+  }
+}
+
 
         // screen coords (center)
         var centerSx = (proj.x * 0.5 + 0.5) * canvas.width;
@@ -3417,6 +3455,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
