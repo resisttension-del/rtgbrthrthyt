@@ -1071,6 +1071,10 @@ this._prevWishAim = wishAim;
             }
           }
 
+          if (this._aiming) {
+            appliedRecoilAngle = appliedRecoilAngle/2;
+          }
+
           // Store the recoil properties for the animation
           this._recoil.peakOffset         = appliedRecoilAngle;
           this._recoil.recoilStartTime   = now;
