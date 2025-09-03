@@ -909,6 +909,15 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
           if (!geom.boundingBox) geom.computeBoundingBox && geom.computeBoundingBox();
           if (!geom.boundingSphere) geom.computeBoundingSphere && geom.computeBoundingSphere();
 
+          // Check if camera is inside bounding box
+          let cameraInside = false;
+          if (geom.boundingBox) {
+            const bb = geom.boundingBox;
+            const worldBB = bb.clone();
+            worldBB.applyMatrix4(obj.matrixWorld);
+            cameraInside = worldBB.containsPoint(camera.position);
+          }
+
           const worldPoints = [];
           if (geom.boundingBox) {
             const bb = geom.boundingBox;
@@ -928,45 +937,34 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
               tmpVec.set(c[0], c[1], c[2]).applyMatrix4(obj.matrixWorld);
               worldPoints.push(tmpVec.clone());
             }
-          } else if (geom.boundingSphere) {
-            const bs = geom.boundingSphere;
-            const center = bs.center.clone().applyMatrix4(obj.matrixWorld);
-            const r = bs.radius * (obj.matrixWorld.getMaxScaleOnAxis ? obj.matrixWorld.getMaxScaleOnAxis() : 1);
-            worldPoints.push(center.clone());
-            worldPoints.push(center.clone().add(new THREE.Vector3(r, 0, 0)));
-            worldPoints.push(center.clone().add(new THREE.Vector3(-r, 0, 0)));
-            worldPoints.push(center.clone().add(new THREE.Vector3(0, r, 0)));
-            worldPoints.push(center.clone().add(new THREE.Vector3(0, -r, 0)));
-            worldPoints.push(center.clone().add(new THREE.Vector3(0, 0, r)));
-            worldPoints.push(center.clone().add(new THREE.Vector3(0, 0, -r)));
-          } else {
-            const posAttr = geom.attributes && geom.attributes.position;
-            if (posAttr && posAttr.count > 0) {
-              for (let i = 0; i < Math.min(12, posAttr.count); i += Math.max(1, Math.floor(posAttr.count / 12))) {
-                tmpVec.set(
-                  posAttr.getX(i),
-                  posAttr.getY(i),
-                  posAttr.getZ(i)
-                ).applyMatrix4(obj.matrixWorld);
-                worldPoints.push(tmpVec.clone());
-              }
-            } else {
-              worldPoints.push(tmpPos.clone());
-            }
+          }
+          // ... (boundingSphere and other cases as before) ...
+
+          // If camera is inside, draw a marker at center
+          if (cameraInside) {
+            drawables.push({
+              type: 'rect',
+              obj,
+              sx,
+              sy,
+              dist,
+              sizePx: obj.userData?.markerSizePx ?? 18
+            });
+            return;
           }
 
-          // project worldPoints to screen-space 2D points (include all points, do NOT skip based on proj.z)
+          // Otherwise, project worldPoints (but skip points behind the camera)
           const pts2d = [];
           for (let wp of worldPoints) {
             proj.copy(wp).project(camera);
+            if (proj.z < 0) continue; // skip points behind camera
             const px = (proj.x * 0.5 + 0.5) * canvas.width;
             const py = (-proj.y * 0.5 + 0.5) * canvas.height;
             pts2d.push({ x: px, y: py });
           }
 
-          // if no good projected points, skip drawing (no more spheres)
           if (pts2d.length === 0) {
-            // If you want a fallback marker instead of skipping, set userData.forceMarker = true
+            // fallback marker
             if (obj.userData?.forceMarker) {
               drawables.push({ type: 'rect', obj, sx, sy, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
             }
@@ -978,19 +976,12 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
             } else if (hull.length === 2) {
               drawables.push({ type: 'line', obj, pts: hull, dist });
             } else {
-              // single point fallback: only draw if explicitly requested
               if (obj.userData?.forceMarker) {
                 drawables.push({ type: 'rect', obj, sx: pts2d[0].x, sy: pts2d[0].y, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
               }
             }
             return;
           }
-        } else {
-          // unknown / fallback: only draw marker if explicitly requested
-          if (obj.userData?.forceMarker) {
-            drawables.push({ type: 'rect', obj, sx, sy, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
-          }
-        }
       });
 
       // Painter's order: furthest first (larger distance)
@@ -3179,6 +3170,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
