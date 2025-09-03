@@ -976,14 +976,12 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
           drawables.push({ type: 'image', obj, sx, sy, distNear, distFar, projZ: proj.z, mapImage });
           return;
         } else if (obj.isMesh && obj.geometry) {
+          // --- begin replacement: improved visible-depth handling for meshes ---
           const geom = obj.geometry;
           if (!geom.boundingBox) geom.computeBoundingBox && geom.computeBoundingBox();
           if (!geom.boundingSphere) geom.computeBoundingSphere && geom.computeBoundingSphere();
 
-          // Build sample points in world space (bbox corners, sphere points, or subset of positions)
           const worldPoints = sampleWorldPointsFor(obj, geom);
-
-          // If no world points, fallback to center marker (rare)
           if (worldPoints.length === 0) {
             if (obj.userData?.forceMarker) {
               drawables.push({ type: 'rect', obj, sx, sy, distNear: centerDist, distFar: centerDist, sizePx: obj.userData?.markerSizePx ?? 6 });
@@ -991,54 +989,61 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
             return;
           }
 
-          // compute distances to camera for the sample points (this is the key change)
+          // compute distances for samples (used only as ultimate fallback)
           const dists = worldPoints.map(wp => camera.position.distanceTo(wp));
           const distNear = Math.min(...dists);
           const distFar = Math.max(...dists);
 
-          // === CLIPPING AGAINST NEAR PLANE (camera space) ===
-          // Convert points to camera space (z is negative in front of camera for THREE cameras)
+          // convert to camera space
           const camSpacePts = worldPoints.map(wp => wp.clone().applyMatrix4(camInv));
 
-          // near plane in camera space (z <= -near is in front)
+          // near/far in camera-space (z is negative in front)
           const nearZ = - (camera.near !== undefined ? camera.near : 0.1);
           const farZ = - (camera.far !== undefined ? camera.far : 1e12);
 
-          // Collect projected screen points for those in front of near and within far
+          // Collections for the projected (visible) points and their depth metrics
           const pts2d = [];
+          const visibleWorldPoints = [];
+          const visibleWorldDists = [];
+          const visibleCamZs = [];
 
+          // add projected points for samples that are in front of near and within far
           for (let i = 0; i < worldPoints.length; i++) {
             const camPt = camSpacePts[i];
             const wp = worldPoints[i];
 
             if (camPt.z <= nearZ && camPt.z >= farZ) {
-              // point is in front of near and not beyond far -> project normally
               proj.copy(wp).project(camera);
               const px = (proj.x * 0.5 + 0.5) * canvas.width;
               const py = (-proj.y * 0.5 + 0.5) * canvas.height;
               pts2d.push({ x: px, y: py, ndcZ: proj.z });
+              visibleWorldPoints.push(wp.clone());
+              visibleWorldDists.push(camera.position.distanceTo(wp));
+              visibleCamZs.push(camPt.z);
             }
           }
 
-          // For edges that cross the near plane, compute intersection point and include it
+          // include intersection points for edges that cross the near plane
           for (let i = 0; i < worldPoints.length; i++) {
             for (let j = i + 1; j < worldPoints.length; j++) {
               const z1 = camSpacePts[i].z;
               const z2 = camSpacePts[j].z;
 
-              // If one side is in front (<= nearZ) and the other is behind (> nearZ), there's a crossing
               if ((z1 <= nearZ && z2 > nearZ) || (z2 <= nearZ && z1 > nearZ)) {
-                // Avoid numerical division by zero
                 const denom = (z2 - z1);
                 if (Math.abs(denom) < 1e-9) continue;
-                const t = (nearZ - z1) / denom; // 0..1 along segment i->j where z == nearZ
+                const t = (nearZ - z1) / denom;
                 if (t < 0 || t > 1) continue;
-                // Interpolate in world space to get accurate intersection position
                 const ip = worldPoints[i].clone().lerp(worldPoints[j], t);
                 proj.copy(ip).project(camera);
                 const px = (proj.x * 0.5 + 0.5) * canvas.width;
                 const py = (-proj.y * 0.5 + 0.5) * canvas.height;
                 pts2d.push({ x: px, y: py, ndcZ: proj.z });
+
+                // record depth info for this intersection point
+                visibleWorldPoints.push(ip.clone());
+                visibleWorldDists.push(camera.position.distanceTo(ip));
+                visibleCamZs.push(ip.clone().applyMatrix4(camInv).z);
               }
             }
           }
@@ -1049,37 +1054,83 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
             const px = (proj.x * 0.5 + 0.5) * canvas.width;
             const py = (-proj.y * 0.5 + 0.5) * canvas.height;
             pts2d.push({ x: px, y: py, ndcZ: proj.z });
+
+            visibleWorldPoints.push(tmpPos.clone());
+            visibleWorldDists.push(camera.position.distanceTo(tmpPos));
+            visibleCamZs.push(tmpPos.clone().applyMatrix4(camInv).z);
           }
 
-          // If after near-plane clipping we have zero pts, we may still want a fallback marker,
-          // but only if user asked or object is forced to render.
+          // If after near-plane clipping we have zero pts, fallback to marker only when forced
           if (pts2d.length === 0) {
             if (alwaysRender || obj.userData?.forceMarker) {
-              // clamp center to screen bounds so we get a marker on-screen
               const cx = Math.max(0, Math.min(canvas.width, sx));
               const cy = Math.max(0, Math.min(canvas.height, sy));
-              drawables.push({ type: 'rect', obj, sx: cx, sy: cy, distNear, distFar, sizePx: obj.userData?.markerSizePx ?? 6 });
+              drawables.push({
+                type: 'rect',
+                obj,
+                sx: cx,
+                sy: cy,
+                distNear,
+                distFar,
+                // no visible depths present
+                sizePx: obj.userData?.markerSizePx ?? 6
+              });
             }
             return;
           }
 
-          // Build convex hull from the collected projected points
+          // build hull from visible pts
           const hull = convexHull(pts2d);
 
-          // If hull is trivial (1 or 2 points), but user forced rendering, make fallback shapes
-          if (hull.length >= 3) {
-            drawables.push({ type: 'poly', obj, pts: hull, distNear, distFar, projZ: proj.z });
-          } else if (hull.length === 2) {
-            drawables.push({ type: 'line', obj, pts: hull, distNear, distFar });
-          } else {
-            // single point fallback
-            const p = hull[0] || pts2d[0];
-            if (alwaysRender || obj.userData?.forceMarker) {
-              drawables.push({ type: 'rect', obj, sx: p.x, sy: p.y, distNear, distFar, sizePx: obj.userData?.markerSizePx ?? 6 });
-            }
+          // compute visible-depth metrics (from *visible* points)
+          let visibleDistNear, visibleDistFar, visibleCamMinZ, visibleCamAvgZ;
+          if (visibleWorldDists.length > 0) {
+            visibleDistNear = Math.min(...visibleWorldDists);
+            visibleDistFar  = Math.max(...visibleWorldDists);
+            visibleCamMinZ  = Math.min(...visibleCamZs); // more negative -> farther
+            visibleCamAvgZ  = visibleCamZs.reduce((s, v) => s + v, 0) / visibleCamZs.length;
           }
 
+          // push drawables but include visible-depth fields so sorting can use them
+          if (hull.length >= 3) {
+            drawables.push({
+              type: 'poly',
+              obj,
+              pts: hull,
+              distNear, distFar,
+              visibleDistNear, visibleDistFar,
+              camMinZ: visibleCamMinZ,
+              camAvgZ: visibleCamAvgZ,
+              projZ: proj.z
+            });
+          } else if (hull.length === 2) {
+            drawables.push({
+              type: 'line',
+              obj,
+              pts: hull,
+              distNear, distFar,
+              visibleDistNear, visibleDistFar,
+              camMinZ: visibleCamMinZ,
+              camAvgZ: visibleCamAvgZ
+            });
+          } else {
+            const p = hull[0] || pts2d[0];
+            if (alwaysRender || obj.userData?.forceMarker) {
+              drawables.push({
+                type: 'rect',
+                obj,
+                sx: p.x,
+                sy: p.y,
+                distNear, distFar,
+                visibleDistNear, visibleDistFar,
+                camMinZ: visibleCamMinZ,
+                camAvgZ: visibleCamAvgZ,
+                sizePx: obj.userData?.markerSizePx ?? 6
+              });
+            }
+          }
           return;
+          // --- end replacement ---
         } else {
           // unknown / fallback: only draw marker if explicitly requested
           if (obj.userData?.forceMarker) {
@@ -1088,17 +1139,36 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
         }
       });
 
-      // Painter's order: sort by farthest sampled point first (so large objects that *span* far will be drawn behind)
-      // fallback to center-based dist if distFar is missing.
+      // Painter's order:
+      // Priority sort keys in order:
+      // 1) userData.alwaysOnTop -> always draw last
+      // 2) userData.renderPriority (higher should draw later)
+      // 3) visible camera-space min Z (camMinZ) if available (more negative means farther)
+      // 4) fallback to world-space distFar (negated so more distant sorts first)
       drawables.sort((a, b) => {
-        const aFar = (a.distFar !== undefined) ? a.distFar : (a.dist !== undefined ? a.dist : 0);
-        const bFar = (b.distFar !== undefined) ? b.distFar : (b.dist !== undefined ? b.dist : 0);
-        if (aFar === bFar) {
-          const aNear = (a.distNear !== undefined) ? a.distNear : (a.dist !== undefined ? a.dist : 0);
-          const bNear = (b.distNear !== undefined) ? b.distNear : (b.dist !== undefined ? b.dist : 0);
-          return bNear - aNear; // tie-breaker: draw object with larger near distance first
+        // handle alwaysOnTop quick path
+        const aAlways = !!a.obj?.userData?.alwaysOnTop;
+        const bAlways = !!b.obj?.userData?.alwaysOnTop;
+        if (aAlways !== bAlways) {
+          return aAlways ? 1 : -1; // non-always first, alwaysOnTop last
         }
-        return bFar - aFar; // farthest first
+
+        // renderPriority: higher should render later (so return negative if a has higher => a after b)
+        const aPri = (a.obj?.userData?.renderPriority ?? 0);
+        const bPri = (b.obj?.userData?.renderPriority ?? 0);
+        if (aPri !== bPri) return aPri - bPri;
+
+        // Use camera-space min-Z (visible) as primary geometric key. More negative = farther.
+        const aKey = (a.camMinZ !== undefined) ? a.camMinZ : - (a.distFar ?? 0);
+        const bKey = (b.camMinZ !== undefined) ? b.camMinZ : - (b.distFar ?? 0);
+
+        if (aKey === bKey) {
+          // tie-breaker: use visibleDistNear or distNear (smaller near -> farther)
+          const aNear = (a.visibleDistNear !== undefined) ? a.visibleDistNear : (a.distNear ?? 0);
+          const bNear = (b.visibleDistNear !== undefined) ? b.visibleDistNear : (b.distNear ?? 0);
+          return aNear - bNear;
+        }
+        return aKey - bKey; // ascending: farthest (more negative) comes first
       });
 
       // draw
@@ -1106,8 +1176,8 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
         const d = drawables[i];
         const { obj } = d;
 
-        // compute an average distance for alpha/linewidth falloffs (keeps visuals smooth)
-        const avgDist = ((d.distNear ?? d.dist ?? 0) + (d.distFar ?? d.dist ?? 0)) * 0.5;
+        // compute an average distance for alpha/linewidth falloffs (prefer visible metrics)
+        const avgDist = ((d.visibleDistNear ?? d.distNear ?? d.dist ?? 0) + (d.visibleDistFar ?? d.distFar ?? d.dist ?? 0)) * 0.5;
 
         // common color selection
         let color = obj.userData?.color;
@@ -3291,6 +3361,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
