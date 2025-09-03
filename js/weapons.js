@@ -1707,7 +1707,7 @@ addDebugMuzzleDot(muzzleObject3D, dotSize = 0.5) {
 
     buildAK47(onProgressRegistrar) {
         const loader = new GLTFLoader();
-        const url = 'https://raw.githubusercontent.com/thearthd/3d-models/main/leave_a_like__ak47_game_ready_free.glb';
+        const url = 'https://raw.githubusercontent.com/thearthd/3d-models/main/Weapon/voidffa_AK47.glb';
         let prog = () => {};
         const promise = new Promise((res, rej) => {
             loader.load(
@@ -1715,19 +1715,8 @@ addDebugMuzzleDot(muzzleObject3D, dotSize = 0.5) {
                 gltf => {
                     this.weaponModel = new THREE.Group();
                     this.parts = {};
-                    const metalM = createMetalMaterial(0x888888);
-                    const woodM = createWoodMaterial(0x8B4513);
-                    const plasticM = createPlasticMaterial(0x666666);
+                    // Original model materials will now be used.
                     const model = gltf.scene;
-                    model.traverse(child => {
-                        if (!child.isMesh) return;
-                        const nm = child.name.toLowerCase();
-                        child.material = (nm.includes('wood')||nm.includes('stock')||nm.includes('handguard'))
-                            ? woodM
-                            : (nm.includes('grip')||nm.includes('handle'))
-                                ? plasticM
-                                : metalM;
-                    });
                     const before = new THREE.Box3().setFromObject(model);
                     const center = before.getCenter(new THREE.Vector3());
                     model.position.sub(center);
