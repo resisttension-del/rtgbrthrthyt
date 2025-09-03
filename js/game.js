@@ -877,14 +877,6 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
 
       // collect drawables (so we can sort by depth)
       const drawables = [];
-
-      // Ensure camera matrices are up-to-date for camera-space operations
-      camera.updateMatrixWorld();
-      if (camera.updateMatrixWorldInverse) camera.updateMatrixWorldInverse();
-      // fallback invert if matrixWorldInverse not present
-      const camInv = camera.matrixWorldInverse || (new THREE.Matrix4().copy(camera.matrixWorld).invert());
-      const near = camera.near;
-
       scene.traverse((obj) => {
         if (!obj.visible) return;
         if (obj.isCamera || obj.isLight) return;
@@ -899,7 +891,7 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
           if (!obj.userData?.alwaysRender) return;
         }
 
-        // screen coords (center)
+        // screen coords
         const sx = (proj.x * 0.5 + 0.5) * canvas.width;
         const sy = (-proj.y * 0.5 + 0.5) * canvas.height;
 
@@ -963,107 +955,37 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
             }
           }
 
-          // --------- NEW: clip worldPoints against camera near plane in camera-space ----------
+          // project worldPoints to screen-space 2D points
           const pts2d = [];
-          const clippedWorldPts = [];
-
-          // helper: project a world-space Vector3 to screen coords (returns null on non-finite)
-          function projectWorldToScreen(wp) {
-            const p = wp.clone().project(camera);
-            if (!isFinite(p.x) || !isFinite(p.y)) return null;
-            return { x: (p.x * 0.5 + 0.5) * canvas.width, y: (-p.y * 0.5 + 0.5) * canvas.height, ndcZ: p.z };
+          for (let wp of worldPoints) {
+            proj.copy(wp).project(camera);
+            if (proj.z > 1 || proj.z < -1) continue;
+            const px = (proj.x * 0.5 + 0.5) * canvas.width;
+            const py = (-proj.y * 0.5 + 0.5) * canvas.height;
+            pts2d.push({ x: px, y: py });
           }
 
-          // If we have an 8-corner bbox, use its known edge list; otherwise do a generic pairwise clipping.
-          if (worldPoints.length === 8) {
-            const edges = [
-              [0,1],[0,2],[0,4],
-              [1,3],[1,5],
-              [2,3],[2,6],
-              [3,7],
-              [4,5],[4,6],
-              [5,7],
-              [6,7]
-            ];
-
-            // compute camera-space copies for tests
-            const camPts = worldPoints.map(wp => wp.clone().applyMatrix4(camInv));
-
-            // include points that are in front of near plane (camera-space z <= -near)
-            for (let i = 0; i < worldPoints.length; i++) {
-              if (camPts[i].z <= -near) clippedWorldPts.push(worldPoints[i].clone());
-            }
-
-            // for edges crossing near plane, compute intersection in world-space by lerp and include
-            for (let [a, b] of edges) {
-              const A = camPts[a], B = camPts[b];
-              const Afront = A.z <= -near;
-              const Bfront = B.z <= -near;
-              if (Afront !== Bfront) {
-                const denom = (B.z - A.z);
-                if (Math.abs(denom) > 1e-8) {
-                  const t = (-near - A.z) / denom;
-                  const tt = Math.max(0, Math.min(1, t));
-                  const inter = worldPoints[a].clone().lerp(worldPoints[b], tt);
-                  clippedWorldPts.push(inter);
-                }
-              }
-            }
-          } else if (worldPoints.length >= 2) {
-            // generic pairwise clipping (walk edges)
-            const camPts = worldPoints.map(wp => wp.clone().applyMatrix4(camInv));
-            const L = worldPoints.length;
-            for (let i = 0; i < L; i++) {
-              const j = (i + 1) % L;
-              const A = camPts[i], B = camPts[j];
-              const Aw = worldPoints[i], Bw = worldPoints[j];
-              const Afront = A.z <= -near;
-              const Bfront = B.z <= -near;
-              if (Afront) clippedWorldPts.push(Aw.clone());
-              if (Afront !== Bfront) {
-                const denom = (B.z - A.z);
-                if (Math.abs(denom) > 1e-8) {
-                  const t = (-near - A.z) / denom;
-                  const tt = Math.max(0, Math.min(1, t));
-                  clippedWorldPts.push(Aw.clone().lerp(Bw, tt));
-                }
-              }
-            }
-          } else {
-            // too few samples - leave clippedWorldPts empty to trigger fallback
-          }
-
-          // project clipped points to 2D
-          for (let wp of clippedWorldPts) {
-            const s = projectWorldToScreen(wp);
-            if (s) {
-              // clamp to a reasonable range to avoid enormous polygons
-              const clamp = (v, mn, mx) => Math.max(mn, Math.min(mx, v));
-              s.x = clamp(s.x, -canvas.width * 3, canvas.width * 4);
-              s.y = clamp(s.y, -canvas.height * 3, canvas.height * 4);
-              pts2d.push({ x: s.x, y: s.y });
-            }
-          }
-
-          // Fallback is no longer needed. If no clipped points exist, the object is not visible.
+          // if no good projected points, skip drawing (no more spheres)
           if (pts2d.length === 0) {
-            // Draw a simple marker if forced, otherwise just skip this object
+            // If you want a fallback marker instead of skipping, set userData.forceMarker = true
             if (obj.userData?.forceMarker) {
-              drawables.push({ type: 'rect', obj, sx, sy, dist, sizePx: obj.userData?.markerSizePx ?? 12 });
+              drawables.push({ type: 'rect', obj, sx, sy, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
+            }
+            return;
+          } else {
+            const hull = convexHull(pts2d);
+            if (hull.length >= 3) {
+              drawables.push({ type: 'poly', obj, pts: hull, dist, projZ: proj.z });
+            } else if (hull.length === 2) {
+              drawables.push({ type: 'line', obj, pts: hull, dist });
+            } else {
+              // single point fallback: only draw if explicitly requested
+              if (obj.userData?.forceMarker) {
+                drawables.push({ type: 'rect', obj, sx: pts2d[0].x, sy: pts2d[0].y, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
+              }
             }
             return;
           }
-
-          // build hull from pts2d and add appropriate drawable
-          const hull = convexHull(pts2d);
-          if (hull.length >= 3) {
-            drawables.push({ type: 'poly', obj, pts: hull, dist, projZ: proj.z });
-          } else if (hull.length === 2) {
-            drawables.push({ type: 'line', obj, pts: hull, dist });
-          } else {
-            drawables.push({ type: 'rect', obj, sx: pts2d[0].x, sy: pts2d[0].y, dist, sizePx: obj.userData?.markerSizePx ?? 6 });
-          }
-          return;
         } else {
           // unknown / fallback: only draw marker if explicitly requested
           if (obj.userData?.forceMarker) {
@@ -1160,7 +1082,6 @@ function createCanvasRenderer({ width = 1280, height = 720 } = {}) {
 
   return api;
 }
-
 /* ---------- Updated scene initializers (CPU renderer) ---------- */
 
 export async function initSceneCrocodilosConstruction() {
@@ -3257,6 +3178,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
