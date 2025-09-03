@@ -941,7 +941,8 @@ function setupDetailToggle() {
                                 return;
                             } else {
                                 // Direct drawing of the polygon to preserve holes
-                                drawables.push({ type: 'poly', obj, pts: pts2d, dist, projZ: proj.z });
+                                const hull = convexHull(pts2d);
+                                drawables.push({ type: 'poly', obj, pts: hull, dist, projZ: proj.z });
                                 return;
                             }
                         } else {
@@ -3140,6 +3141,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
