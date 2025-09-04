@@ -819,63 +819,18 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
   canvas.height = height;
   const ctx = canvas.getContext('2d');
 
-  // Scratch vars for projections & temp math
-  const proj = new THREE.Vector3();
-  const tmpPos = new THREE.Vector3();
-  const tmpVec = new THREE.Vector3();
-  const tmpVec2 = new THREE.Vector3();
-  const tmpMat = new THREE.Matrix4();
-
-  // Raycaster for occlusion checks
-  const raycaster = new THREE.Raycaster();
-
-  // helper: build convex hull (Andrew monotone chain) of 2D points
-  function convexHull(points) {
-    if (points.length <= 1) return points.slice();
-    const pts = points.slice().sort((a, b) => (a.x === b.x ? a.y - b.y : a.x - b.x));
-    const cross = (o, a, b) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
-    const lower = [];
-    for (let p of pts) {
-      while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop();
-      lower.push(p);
-    }
-    const upper = [];
-    for (let i = pts.length - 1; i >= 0; i--) {
-      const p = pts[i];
-      while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop();
-      upper.push(p);
-    }
-    lower.pop();
-    upper.pop();
-    return lower.concat(upper);
-  }
-
-  // Helper: checks if any sample point is visible from camera (not occluded by other meshes)
-  function isAnyPointVisible(worldPoints, currentObj, scene, camera) {
-    // Gather all occluders except currentObj
-    const occluders = [];
-    scene.traverse(obj => {
-      if (obj.isMesh && obj !== currentObj && obj.visible) {
-        occluders.push(obj);
-      }
-    });
-
-    for (let wp of worldPoints) {
-      raycaster.set(camera.position, wp.clone().sub(camera.position).normalize());
-      raycaster.far = camera.position.distanceTo(wp);
-
-      const hits = raycaster.intersectObjects(occluders, true);
-      // If no hits, this point is visible
-      if (hits.length === 0) return true;
-    }
-    return false;
+  // Helper to project a 3D point to NDC and then to screen
+  function projectToScreen(v, camera) {
+    const p = v.clone().project(camera);
+    return {
+      x: (p.x * 0.5 + 0.5) * canvas.width,
+      y: (-p.y * 0.5 + 0.5) * canvas.height,
+      z: p.z
+    };
   }
 
   const api = {
     domElement: canvas,
-    options: {
-      strictNearClip: true,
-    },
     setSize(w, h, updateStyle = true) {
       canvas.width = w;
       canvas.height = h;
@@ -890,7 +845,7 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
     _clearColor: { hex: 0x000000, alpha: 1 },
 
     render(scene, camera) {
-      // Clear with the clear color (converted to CSS)
+      // Clear
       const c = api._clearColor;
       const r = (c.hex >> 16) & 0xff;
       const g = (c.hex >> 8) & 0xff;
@@ -904,280 +859,116 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
       camera.updateMatrixWorld();
       if (camera.updateProjectionMatrix) camera.updateProjectionMatrix();
 
-      const camInv = tmpMat.copy(camera.matrixWorld).invert();
+      // Depth buffer: initialize to farthest
+      const depthBuffer = new Float32Array(canvas.width * canvas.height);
+      depthBuffer.fill(1); // z in NDC goes from -1 (near) to 1 (far)
 
-      const drawables = [];
-      scene.traverse((obj) => {
-        if (!obj.visible) return;
-        if (obj.isCamera || obj.isLight) return;
+      // Collect meshes
+      const meshes = [];
+      scene.traverse(obj => {
+        if (obj.visible && obj.isMesh && obj.geometry && obj.material) meshes.push(obj);
+      });
 
-        obj.getWorldPosition(tmpPos);
-        proj.copy(tmpPos).project(camera);
+      // For each mesh, rasterize triangles
+      for (const mesh of meshes) {
+        // Get geometry
+        const geom = mesh.geometry;
+        const posAttr = geom.attributes.position;
+        const indexAttr = geom.index;
 
-        const sx = (proj.x * 0.5 + 0.5) * canvas.width;
-        const sy = (-proj.y * 0.5 + 0.5) * canvas.height;
-        const centerDist = camera.position.distanceTo(tmpPos);
-
-        const mapImage = obj.material && obj.material.map && obj.material.map.image ? obj.material.map.image : null;
-        const alwaysRender = !!obj.userData?.alwaysRender;
-
-        function sampleWorldPointsFor(obj, geom) {
-          const worldPoints = [];
-          if (geom && geom.boundingBox) {
-            const bb = geom.boundingBox;
-            const min = bb.min;
-            const max = bb.max;
-            const corners = [
-              [min.x, min.y, min.z],
-              [min.x, min.y, max.z],
-              [min.x, max.y, min.z],
-              [min.x, max.y, max.z],
-              [max.x, min.y, min.z],
-              [max.x, min.y, max.z],
-              [max.x, max.y, min.z],
-              [max.x, max.y, max.z],
-            ];
-            for (let c of corners) {
-              tmpVec.set(c[0], c[1], c[2]).applyMatrix4(obj.matrixWorld);
-              worldPoints.push(tmpVec.clone());
-            }
-          } else if (geom && geom.boundingSphere) {
-            const bs = geom.boundingSphere;
-            const center = bs.center.clone().applyMatrix4(obj.matrixWorld);
-            const r = bs.radius * (obj.matrixWorld.getMaxScaleOnAxis ? obj.matrixWorld.getMaxScaleOnAxis() : 1);
-            worldPoints.push(center.clone());
-            worldPoints.push(center.clone().add(new THREE.Vector3(r, 0, 0)));
-            worldPoints.push(center.clone().add(new THREE.Vector3(-r, 0, 0)));
-            worldPoints.push(center.clone().add(new THREE.Vector3(0, r, 0)));
-            worldPoints.push(center.clone().add(new THREE.Vector3(0, -r, 0)));
-            worldPoints.push(center.clone().add(new THREE.Vector3(0, 0, r)));
-            worldPoints.push(center.clone().add(new THREE.Vector3(0, 0, -r)));
-          } else if (geom && geom.attributes && geom.attributes.position && geom.attributes.position.count > 0) {
-            const posAttr = geom.attributes.position;
-            for (let i = 0; i < Math.min(12, posAttr.count); i += Math.max(1, Math.floor(posAttr.count / 12))) {
-              tmpVec.set(
-                posAttr.getX(i),
-                posAttr.getY(i),
-                posAttr.getZ(i)
-              ).applyMatrix4(obj.matrixWorld);
-              worldPoints.push(tmpVec.clone());
-            }
-          } else {
-            worldPoints.push(tmpPos.clone());
-          }
-          return worldPoints;
+        // Get color
+        let color = mesh.userData?.color;
+        if (!color && mesh.material.color) {
+          color = mesh.material.color.getStyle ? mesh.material.color.getStyle() : (`#${mesh.material.color.getHexString()}`);
         }
+        color = color || 'white';
 
-        // SPRITE/IMAGE OBJECTS
-        if (mapImage) {
-          let worldPoints = [];
-          if (obj.geometry) {
-            worldPoints = sampleWorldPointsFor(obj, obj.geometry);
+        // Loop triangles
+        const getVertex = i => {
+          const v = new THREE.Vector3(
+            posAttr.getX(i),
+            posAttr.getY(i),
+            posAttr.getZ(i)
+          );
+          v.applyMatrix4(mesh.matrixWorld);
+          return v;
+        };
+
+        const triCount = indexAttr ? indexAttr.count / 3 : posAttr.count / 3;
+        for (let t = 0; t < triCount; t++) {
+          let i0, i1, i2;
+          if (indexAttr) {
+            i0 = indexAttr.getX(t * 3);
+            i1 = indexAttr.getX(t * 3 + 1);
+            i2 = indexAttr.getX(t * 3 + 2);
           } else {
-            worldPoints = [tmpPos.clone()];
+            i0 = t * 3;
+            i1 = t * 3 + 1;
+            i2 = t * 3 + 2;
           }
+          const v0 = getVertex(i0), v1 = getVertex(i1), v2 = getVertex(i2);
 
-          // === OCCLUSION CULLING ===
-          if (!isAnyPointVisible(worldPoints, obj, scene, camera) && !alwaysRender) return;
+          // Project to screen
+          const p0 = projectToScreen(v0, camera);
+          const p1 = projectToScreen(v1, camera);
+          const p2 = projectToScreen(v2, camera);
 
-          const dists = worldPoints.map(wp => camera.position.distanceTo(wp));
-          const distNear = Math.min(...dists);
-          const distFar = Math.max(...dists);
+          // Bounding box
+          const minX = Math.max(0, Math.floor(Math.min(p0.x, p1.x, p2.x)));
+          const maxX = Math.min(canvas.width - 1, Math.ceil(Math.max(p0.x, p1.x, p2.x)));
+          const minY = Math.max(0, Math.floor(Math.min(p0.y, p1.y, p2.y)));
+          const maxY = Math.min(canvas.height - 1, Math.ceil(Math.max(p0.y, p1.y, p2.y)));
 
-          drawables.push({ type: 'image', obj, sx, sy, distNear, distFar, projZ: proj.z, mapImage });
-          return;
-        }
-        // MESH OBJECTS
-        else if (obj.isMesh && obj.geometry) {
-          const geom = obj.geometry;
-          if (!geom.boundingBox) geom.computeBoundingBox && geom.computeBoundingBox();
-          if (!geom.boundingSphere) geom.computeBoundingSphere && geom.computeBoundingSphere();
-
-          const worldPoints = sampleWorldPointsFor(obj, geom);
-
-          // === OCCLUSION CULLING ===
-          if (!isAnyPointVisible(worldPoints, obj, scene, camera) && !alwaysRender) return;
-
-          if (worldPoints.length === 0) {
-            if (obj.userData?.forceMarker) {
-              drawables.push({ type: 'rect', obj, sx, sy, distNear: centerDist, distFar: centerDist, sizePx: obj.userData?.markerSizePx ?? 6 });
-            }
-            return;
-          }
-
-          const dists = worldPoints.map(wp => camera.position.distanceTo(wp));
-          const distNear = Math.min(...dists);
-          const distFar = Math.max(...dists);
-
-          const camSpacePts = worldPoints.map(wp => wp.clone().applyMatrix4(camInv));
-          const nearZ = - (camera.near !== undefined ? camera.near : 0.1);
-          const farZ = - (camera.far !== undefined ? camera.far : 1e12);
-
-          const pts2d = [];
-          for (let i = 0; i < worldPoints.length; i++) {
-            const camPt = camSpacePts[i];
-            const wp = worldPoints[i];
-
-            if (camPt.z <= nearZ && camPt.z >= farZ) {
-              proj.copy(wp).project(camera);
-              const px = (proj.x * 0.5 + 0.5) * canvas.width;
-              const py = (-proj.y * 0.5 + 0.5) * canvas.height;
-              pts2d.push({ x: px, y: py, ndcZ: proj.z });
-            }
-          }
-
-          for (let i = 0; i < worldPoints.length; i++) {
-            for (let j = i + 1; j < worldPoints.length; j++) {
-              const z1 = camSpacePts[i].z;
-              const z2 = camSpacePts[j].z;
-
-              if ((z1 <= nearZ && z2 > nearZ) || (z2 <= nearZ && z1 > nearZ)) {
-                const denom = (z2 - z1);
-                if (Math.abs(denom) < 1e-9) continue;
-                const t = (nearZ - z1) / denom;
-                if (t < 0 || t > 1) continue;
-                const ip = worldPoints[i].clone().lerp(worldPoints[j], t);
-                proj.copy(ip).project(camera);
-                const px = (proj.x * 0.5 + 0.5) * canvas.width;
-                const py = (-proj.y * 0.5 + 0.5) * canvas.height;
-                pts2d.push({ x: px, y: py, ndcZ: proj.z });
+          // Barycentric rasterization
+          const area = ((p1.x - p0.x)*(p2.y - p0.y) - (p2.x - p0.x)*(p1.y - p0.y));
+          if (Math.abs(area) < 1e-6) continue;
+          for (let y = minY; y <= maxY; y++) {
+            for (let x = minX; x <= maxX; x++) {
+              // Barycentric coordinates
+              const w0 = ((p1.x - x)*(p2.y - y) - (p2.x - x)*(p1.y - y)) / area;
+              const w1 = ((p2.x - x)*(p0.y - y) - (p0.x - x)*(p2.y - y)) / area;
+              const w2 = ((p0.x - x)*(p1.y - y) - (p1.x - x)*(p0.y - y)) / area;
+              if (w0 >= -1e-4 && w1 >= -1e-4 && w2 >= -1e-4) {
+                // Interpolate depth
+                const z = w0 * p0.z + w1 * p1.z + w2 * p2.z;
+                const bufIdx = x + y * canvas.width;
+                if (z < depthBuffer[bufIdx]) {
+                  depthBuffer[bufIdx] = z;
+                  // Draw pixel
+                  ctx.fillStyle = color;
+                  ctx.fillRect(x, y, 1, 1);
+                }
               }
             }
           }
-
-          if (!api.options.strictNearClip && pts2d.length === 0) {
-            proj.copy(tmpPos).project(camera);
-            const px = (proj.x * 0.5 + 0.5) * canvas.width;
-            const py = (-proj.y * 0.5 + 0.5) * canvas.height;
-            pts2d.push({ x: px, y: py, ndcZ: proj.z });
-          }
-
-          if (pts2d.length === 0) {
-            if (alwaysRender || obj.userData?.forceMarker) {
-              const cx = Math.max(0, Math.min(canvas.width, sx));
-              const cy = Math.max(0, Math.min(canvas.height, sy));
-              drawables.push({ type: 'rect', obj, sx: cx, sy: cy, distNear, distFar, sizePx: obj.userData?.markerSizePx ?? 6 });
-            }
-            return;
-          }
-
-          const hull = convexHull(pts2d);
-
-          if (hull.length >= 3) {
-            drawables.push({ type: 'poly', obj, pts: hull, distNear, distFar, projZ: proj.z });
-          } else if (hull.length === 2) {
-            drawables.push({ type: 'line', obj, pts: hull, distNear, distFar });
-          } else {
-            const p = hull[0] || pts2d[0];
-            if (alwaysRender || obj.userData?.forceMarker) {
-              drawables.push({ type: 'rect', obj, sx: p.x, sy: p.y, distNear, distFar, sizePx: obj.userData?.markerSizePx ?? 6 });
-            }
-          }
-          return;
-        }
-        // UNKNOWN/FALLBACK
-        else {
-          if (obj.userData?.forceMarker) {
-            drawables.push({ type: 'rect', obj, sx, sy, distNear: centerDist, distFar: centerDist, sizePx: obj.userData?.markerSizePx ?? 6 });
-          }
-        }
-      });
-
-      // Painter's order: sort by farthest sampled point first
-      drawables.sort((a, b) => {
-        const aFar = (a.distFar !== undefined) ? a.distFar : (a.dist !== undefined ? a.dist : 0);
-        const bFar = (b.distFar !== undefined) ? b.distFar : (b.dist !== undefined ? b.dist : 0);
-        if (aFar === bFar) {
-          const aNear = (a.distNear !== undefined) ? a.distNear : (a.dist !== undefined ? a.dist : 0);
-          const bNear = (b.distNear !== undefined) ? b.distNear : (b.dist !== undefined ? b.dist : 0);
-          return bNear - aNear;
-        }
-        return bFar - aFar;
-      });
-
-      // draw
-      for (let i = 0; i < drawables.length; i++) {
-        const d = drawables[i];
-        const { obj } = d;
-        const avgDist = ((d.distNear ?? d.dist ?? 0) + (d.distFar ?? d.dist ?? 0)) * 0.5;
-
-        let color = obj.userData?.color;
-        if (!color && obj.material && obj.material.color) {
-          try {
-            color = obj.material.color.getStyle ? obj.material.color.getStyle() : (`#${obj.material.color.getHexString()}`);
-          } catch (e) {
-            color = obj.userData?.color || 'white';
-          }
-        }
-        color = color || obj.userData?.color || 'white';
-
-        if (d.type === 'image' && d.mapImage && d.mapImage.width) {
-          let size;
-          if (obj.geometry && obj.geometry.boundingBox) {
-            const bb = obj.geometry.boundingBox;
-            const corners = [
-              [bb.min.x, bb.min.y, bb.min.z],
-              [bb.max.x, bb.max.y, bb.max.z]
-            ];
-            const screenPts = [];
-            for (let c of corners) {
-              tmpVec.set(c[0], c[1], c[2]).applyMatrix4(obj.matrixWorld);
-              const p = tmpVec.project(camera);
-              screenPts.push({ x: (p.x * 0.5 + 0.5) * canvas.width, y: (-p.y * 0.5 + 0.5) * canvas.height });
-            }
-            const wPx = Math.abs(screenPts[0].x - screenPts[1].x);
-            const hPx = Math.abs(screenPts[0].y - screenPts[1].y);
-            size = Math.max(8, obj.userData?.sizePx ?? Math.max(wPx, hPx, 32));
-          } else {
-            const baseSize = obj.userData?.sizePx ?? 300;
-            size = Math.max(8, baseSize * (1 / Math.max(0.1, avgDist * 0.05)));
-          }
-          ctx.save();
-          ctx.translate(d.sx, d.sy);
-          const rot = obj.userData?.rotation ?? (obj.rotation?.z ?? 0);
-          if (rot) ctx.rotate(rot);
-          ctx.globalAlpha = obj.userData?.opacity ?? (obj.material?.opacity ?? 1);
-          ctx.drawImage(d.mapImage, -size / 2, -size / 2, size, size);
-          ctx.restore();
-        } else if (d.type === 'poly' && d.pts) {
-          ctx.save();
-          ctx.beginPath();
-          ctx.moveTo(d.pts[0].x, d.pts[0].y);
-          for (let j = 1; j < d.pts.length; j++) ctx.lineTo(d.pts[j].x, d.pts[j].y);
-          ctx.closePath();
-          ctx.globalAlpha = Math.max(0.2, Math.min(1, 1 - (avgDist * 0.002)));
-          ctx.fillStyle = color;
-          ctx.fill();
-          ctx.globalAlpha = 0.6;
-          ctx.lineWidth = Math.max(1, 2 - (avgDist * 0.001));
-          ctx.strokeStyle = 'rgba(0,0,0,0.6)';
-          ctx.stroke();
-          ctx.restore();
-        } else if (d.type === 'line' && d.pts && d.pts.length === 2) {
-          ctx.beginPath();
-          ctx.moveTo(d.pts[0].x, d.pts[0].y);
-          ctx.lineTo(d.pts[1].x, d.pts[1].y);
-          ctx.strokeStyle = color;
-          ctx.lineWidth = obj.userData?.lineWidth ?? 3;
-          ctx.globalAlpha = 1 - Math.min(0.9, avgDist * 0.002);
-          ctx.stroke();
-        } else if (d.type === 'rect') {
-          const size = d.sizePx ?? Math.max(2, Math.round(12 * (1 / Math.max(0.1, avgDist * 0.05))));
-          const x = (d.sx || d.sx === 0) ? d.sx : 0;
-          const y = (d.sy || d.sy === 0) ? d.sy : 0;
-          ctx.save();
-          ctx.globalAlpha = Math.max(0.5, Math.min(1, 1 - (avgDist * 0.002)));
-          ctx.fillStyle = color;
-          ctx.fillRect(x - size / 2, y - size / 2, size, size);
-          ctx.restore();
         }
       }
+      // Optionally: Render sprites, only if their center is visible (depth check)
+      scene.traverse(obj => {
+        if (!obj.visible) return;
+        const mapImage = obj.material && obj.material.map && obj.material.map.image ? obj.material.map.image : null;
+        if (!mapImage) return;
+        obj.getWorldPosition(tmpVec);
+        const p = projectToScreen(tmpVec, camera);
+        const x = Math.round(p.x), y = Math.round(p.y);
+        const bufIdx = x + y * canvas.width;
+        if (x >= 0 && y >= 0 && x < canvas.width && y < canvas.height) {
+          if (p.z < depthBuffer[bufIdx]) {
+            ctx.save();
+            ctx.globalAlpha = obj.userData?.opacity ?? (obj.material?.opacity ?? 1);
+            ctx.drawImage(mapImage, x - 16, y - 16, 32, 32);
+            ctx.restore();
+          }
+        }
+      });
     }
   };
 
+  // For projectToScreen
+  const tmpVec = new THREE.Vector3();
+
   return api;
 }
-
 
 /* ---------- Updated scene initializers (CPU renderer) ---------- */
 
@@ -3279,6 +3070,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
