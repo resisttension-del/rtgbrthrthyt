@@ -1023,7 +1023,7 @@ function compareBoundingBoxes(aBox, bBox, camera) {
       });
 
       // Sort drawables by bounding box layering relative to camera position
-      drawables.sort((a, b) => compareBoundingBoxes(a.bbox, b.bbox, camera.position));
+      drawables.sort((a, b) => compareBoundingBoxes(a.bbox, b.bbox, camera));
 
       // Now draw in order (farther first, closer last)
       for (const d of drawables) {
@@ -3238,6 +3238,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
