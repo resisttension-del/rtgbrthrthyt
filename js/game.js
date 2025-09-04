@@ -1000,9 +1000,10 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
           // Convert points to camera space (z is negative in front of camera for THREE cameras)
           const camSpacePts = worldPoints.map(wp => wp.clone().applyMatrix4(camInv));
 
-          // near plane in camera space (z <= -near is in front)
-          const nearZ = - (camera.near !== undefined ? camera.near : 0.1);
-          const farZ = - (camera.far !== undefined ? camera.far : 1e12);
+          // near plane in camera space (z is negative in front of camera for THREE cameras)
+          // near plane is at a Z value of -camera.near
+          const nearZ = -camera.near;
+          const farZ = -camera.far;
 
           // Collect projected screen points for those in front of near and within far
           const pts2d = [];
@@ -1011,9 +1012,9 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
             const camPt = camSpacePts[i];
             const wp = worldPoints[i];
 
-            // Point is visible if it's in front of the near plane and not behind the far plane.
-            // Z in camera space is negative in front of the camera, so `camPt.z < nearZ`.
-            if (camPt.z < nearZ && camPt.z > farZ) {
+            // A point is visible if it's in front of the near plane and not behind the far plane.
+            // Z in camera space is negative in front of the camera, so `camPt.z <= nearZ`.
+            if (camPt.z <= nearZ && camPt.z >= farZ) {
               // point is in front of near and not beyond far -> project normally
               proj.copy(wp).project(camera);
               const px = (proj.x * 0.5 + 0.5) * canvas.width;
@@ -1028,8 +1029,8 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
               const z1 = camSpacePts[i].z;
               const z2 = camSpacePts[j].z;
 
-              // If one side is in front (< nearZ) and the other is at or behind (>= nearZ), there's a crossing
-              if ((z1 < nearZ && z2 >= nearZ) || (z2 < nearZ && z1 >= nearZ)) {
+              // If one side is in front (<= nearZ) and the other is at or behind (> nearZ), there's a crossing
+              if ((z1 <= nearZ && z2 > nearZ) || (z2 <= nearZ && z1 > nearZ)) {
                 // Avoid numerical division by zero
                 const denom = (z2 - z1);
                 if (Math.abs(denom) < 1e-9) continue;
@@ -1191,7 +1192,6 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
 
   return api;
 }
-
 
 
 
@@ -3296,6 +3296,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
