@@ -1091,16 +1091,10 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
         }
       });
 
-      // Painter's order: sort by farthest sampled point first (so large objects that *span* far will be drawn behind)
-      // fallback to center-based dist if distFar is missing.
+      // Corrected sorting logic: sort by farthest sampled point first
       drawables.sort((a, b) => {
         const aFar = (a.distFar !== undefined) ? a.distFar : (a.dist !== undefined ? a.dist : 0);
         const bFar = (b.distFar !== undefined) ? b.distFar : (b.dist !== undefined ? b.dist : 0);
-        if (aFar === bFar) {
-          const aNear = (a.distNear !== undefined) ? a.distNear : (a.dist !== undefined ? a.dist : 0);
-          const bNear = (b.distNear !== undefined) ? b.distNear : (b.dist !== undefined ? b.dist : 0);
-          return bNear - aNear; // tie-breaker: draw object with larger near distance first
-        }
         return bFar - aFar; // farthest first
       });
 
@@ -1192,7 +1186,6 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
 
   return api;
 }
-
 
 
 
@@ -3296,6 +3289,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
