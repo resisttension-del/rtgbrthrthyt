@@ -868,323 +868,381 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
     _clearColor: { hex: 0x000000, alpha: 1 },
 
     // Basic render: draw sprites (material.map.image) and approximated shapes for meshes
-    render(scene, camera) {
-      // Clear with the clear color (converted to CSS)
-      const c = api._clearColor;
-      const r = (c.hex >> 16) & 0xff;
-      const g = (c.hex >> 8) & 0xff;
-      const b = c.hex & 0xff;
-      ctx.save();
-      ctx.setTransform(1, 0, 0, 1, 0, 0);
-      ctx.fillStyle = `rgba(${r},${g},${b},${c.alpha})`;
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-      ctx.restore();
+// drop-in replacement for api.render(...)
+render(scene, camera) {
+  // Clear with the clear color
+  const c = api._clearColor;
+  const r = (c.hex >> 16) & 0xff;
+  const g = (c.hex >> 8) & 0xff;
+  const b = c.hex & 0xff;
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = `rgba(${r},${g},${b},${c.alpha})`;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.restore();
 
-      // update camera matrices once
-      camera.updateMatrixWorld();
-      if (camera.updateProjectionMatrix) camera.updateProjectionMatrix();
+  // update camera matrices once
+  camera.updateMatrixWorld();
+  if (camera.updateProjectionMatrix) camera.updateProjectionMatrix();
+  const camInv = tmpMat.copy(camera.matrixWorld).invert();
 
-      // camera world->camera matrix (inverse of matrixWorld)
-      const camInv = tmpMat.copy(camera.matrixWorld).invert();
+  // Raycaster used for occlusion testing
+  const raycaster = new THREE.Raycaster();
 
-      // collect drawables (so we can sort by depth)
-      const drawables = [];
-      scene.traverse((obj) => {
-        if (!obj.visible) return;
-        if (obj.isCamera || obj.isLight) return;
+  // Small helper: detect ancestor/descendant relationship (skip self-intersections)
+  function isDescendant(ancestor, node) {
+    let cur = node;
+    while (cur) {
+      if (cur === ancestor) return true;
+      cur = cur.parent;
+    }
+    return false;
+  }
 
-        // World position (center)
-        obj.getWorldPosition(tmpPos);
-        proj.copy(tmpPos).project(camera); // NDC -1..1 (center)
+  // Occlusion options (tweak these from outside via api.options)
+  // api.options.occlusionEnabled = true/false
+  // api.options.occlusionBias = 0.01 (meters) small gap to avoid self-hit due to numerical issues
+  const occlusionEnabled = (api.options.occlusionEnabled !== undefined) ? api.options.occlusionEnabled : true;
+  const occlusionBias = api.options.occlusionBias ?? 0.01;
+  const maxSampleRaysPerObject = api.options.occlusionSampleLimit ?? 12;
 
-        // screen coords of center (used as fallback)
-        const sx = (proj.x * 0.5 + 0.5) * canvas.width;
-        const sy = (-proj.y * 0.5 + 0.5) * canvas.height;
+  // Build occluder list (simple: all visible meshes with geometry)
+  // You can refine by material.opacity/transparent or userData.occluder = false to exclude
+  const occluders = [];
+  scene.traverse(o => {
+    if (!o.visible) return;
+    if (o.isMesh && o.geometry) {
+      // skip if user explicitly turned off occlusion for this mesh
+      if (o.userData && o.userData.occluder === false) return;
+      occluders.push(o);
+    }
+  });
 
-        // center distance for fallback (still useful)
-        const centerDist = camera.position.distanceTo(tmpPos);
+  // collect drawables (so we can sort by depth)
+  const drawables = [];
+  scene.traverse((obj) => {
+    if (!obj.visible) return;
+    if (obj.isCamera || obj.isLight) return;
 
-        // check for texture (sprites)
-        const mapImage = obj.material && obj.material.map && obj.material.map.image ? obj.material.map.image : null;
+    // World position (center)
+    obj.getWorldPosition(tmpPos);
+    proj.copy(tmpPos).project(camera); // NDC -1..1 (center)
 
-        // If user explicitly wants to always render, skip strict culling checks later
-        const alwaysRender = !!obj.userData?.alwaysRender;
+    // screen coords of center (used as fallback)
+    const sx = (proj.x * 0.5 + 0.5) * canvas.width;
+    const sy = (-proj.y * 0.5 + 0.5) * canvas.height;
 
-        // Helper: assemble sample world points for an object (bbox corners / sphere / subset of positions)
-        function sampleWorldPointsFor(obj, geom) {
-          const worldPoints = [];
-          if (geom && geom.boundingBox) {
-            const bb = geom.boundingBox;
-            const min = bb.min;
-            const max = bb.max;
-            const corners = [
-              [min.x, min.y, min.z],
-              [min.x, min.y, max.z],
-              [min.x, max.y, min.z],
-              [min.x, max.y, max.z],
-              [max.x, min.y, min.z],
-              [max.x, min.y, max.z],
-              [max.x, max.y, min.z],
-              [max.x, max.y, max.z],
-            ];
-            for (let c of corners) {
-              tmpVec.set(c[0], c[1], c[2]).applyMatrix4(obj.matrixWorld);
-              worldPoints.push(tmpVec.clone());
-            }
-          } else if (geom && geom.boundingSphere) {
-            const bs = geom.boundingSphere;
-            const center = bs.center.clone().applyMatrix4(obj.matrixWorld);
-            const r = bs.radius * (obj.matrixWorld.getMaxScaleOnAxis ? obj.matrixWorld.getMaxScaleOnAxis() : 1);
-            worldPoints.push(center.clone());
-            worldPoints.push(center.clone().add(new THREE.Vector3(r, 0, 0)));
-            worldPoints.push(center.clone().add(new THREE.Vector3(-r, 0, 0)));
-            worldPoints.push(center.clone().add(new THREE.Vector3(0, r, 0)));
-            worldPoints.push(center.clone().add(new THREE.Vector3(0, -r, 0)));
-            worldPoints.push(center.clone().add(new THREE.Vector3(0, 0, r)));
-            worldPoints.push(center.clone().add(new THREE.Vector3(0, 0, -r)));
-          } else if (geom && geom.attributes && geom.attributes.position && geom.attributes.position.count > 0) {
-            const posAttr = geom.attributes.position;
-            for (let i = 0; i < Math.min(12, posAttr.count); i += Math.max(1, Math.floor(posAttr.count / 12))) {
-              tmpVec.set(
-                posAttr.getX(i),
-                posAttr.getY(i),
-                posAttr.getZ(i)
-              ).applyMatrix4(obj.matrixWorld);
-              worldPoints.push(tmpVec.clone());
-            }
-          } else {
-            // fallback to center
-            worldPoints.push(tmpPos.clone());
-          }
-          return worldPoints;
+    // center distance for fallback (still useful)
+    const centerDist = camera.position.distanceTo(tmpPos);
+
+    // check for texture (sprites)
+    const mapImage = obj.material && obj.material.map && obj.material.map.image ? obj.material.map.image : null;
+
+    const alwaysRender = !!obj.userData?.alwaysRender;
+
+    // Helper: assemble sample world points for an object (bbox corners / sphere / subset of positions)
+    function sampleWorldPointsFor(obj, geom) {
+      const worldPoints = [];
+      if (geom && geom.boundingBox) {
+        const bb = geom.boundingBox;
+        const min = bb.min;
+        const max = bb.max;
+        const corners = [
+          [min.x, min.y, min.z],
+          [min.x, min.y, max.z],
+          [min.x, max.y, min.z],
+          [min.x, max.y, max.z],
+          [max.x, min.y, min.z],
+          [max.x, min.y, max.z],
+          [max.x, max.y, min.z],
+          [max.x, max.y, max.z],
+        ];
+        for (let c of corners) {
+          tmpVec.set(c[0], c[1], c[2]).applyMatrix4(obj.matrixWorld);
+          worldPoints.push(tmpVec.clone());
         }
+      } else if (geom && geom.boundingSphere) {
+        const bs = geom.boundingSphere;
+        const center = bs.center.clone().applyMatrix4(obj.matrixWorld);
+        const r = bs.radius * (obj.matrixWorld.getMaxScaleOnAxis ? obj.matrixWorld.getMaxScaleOnAxis() : 1);
+        worldPoints.push(center.clone());
+        worldPoints.push(center.clone().add(new THREE.Vector3(r, 0, 0)));
+        worldPoints.push(center.clone().add(new THREE.Vector3(-r, 0, 0)));
+        worldPoints.push(center.clone().add(new THREE.Vector3(0, r, 0)));
+        worldPoints.push(center.clone().add(new THREE.Vector3(0, -r, 0)));
+        worldPoints.push(center.clone().add(new THREE.Vector3(0, 0, r)));
+        worldPoints.push(center.clone().add(new THREE.Vector3(0, 0, -r)));
+      } else if (geom && geom.attributes && geom.attributes.position && geom.attributes.position.count > 0) {
+        const posAttr = geom.attributes.position;
+        // sample up to maxSampleRaysPerObject points from the positions to limit raycasts
+        const step = Math.max(1, Math.floor(posAttr.count / Math.min(maxSampleRaysPerObject, 12)));
+        for (let i = 0; i < posAttr.count && worldPoints.length < maxSampleRaysPerObject; i += step) {
+          tmpVec.set(
+            posAttr.getX(i),
+            posAttr.getY(i),
+            posAttr.getZ(i)
+          ).applyMatrix4(obj.matrixWorld);
+          worldPoints.push(tmpVec.clone());
+        }
+      } else {
+        // fallback to center
+        worldPoints.push(tmpPos.clone());
+      }
+      return worldPoints;
+    }
 
-        // If sprite/image
-        if (mapImage) {
-          // try to create sample points to compute near/far distances
-          let worldPoints = [];
-          if (obj.geometry) {
-            worldPoints = sampleWorldPointsFor(obj, obj.geometry);
-          } else {
-            worldPoints = [tmpPos.clone()];
-          }
-          // compute distances to camera for these samples
-          const dists = worldPoints.map(wp => camera.position.distanceTo(wp));
-          const distNear = Math.min(...dists);
-          const distFar = Math.max(...dists);
+    // If sprite/image
+    if (mapImage) {
+      let worldPoints = [];
+      if (obj.geometry) {
+        worldPoints = sampleWorldPointsFor(obj, obj.geometry);
+      } else {
+        worldPoints = [tmpPos.clone()];
+      }
+      const dists = worldPoints.map(wp => camera.position.distanceTo(wp));
+      const distNear = Math.min(...dists);
+      const distFar = Math.max(...dists);
 
-          drawables.push({ type: 'image', obj, sx, sy, distNear, distFar, projZ: proj.z, mapImage });
-          return;
-        } else if (obj.isMesh && obj.geometry) {
-          const geom = obj.geometry;
-          if (!geom.boundingBox) geom.computeBoundingBox && geom.computeBoundingBox();
-          if (!geom.boundingSphere) geom.computeBoundingSphere && geom.computeBoundingSphere();
+      drawables.push({ type: 'image', obj, sx, sy, distNear, distFar, projZ: proj.z, mapImage });
+      return;
+    } else if (obj.isMesh && obj.geometry) {
+      const geom = obj.geometry;
+      if (!geom.boundingBox) geom.computeBoundingBox && geom.computeBoundingBox();
+      if (!geom.boundingSphere) geom.computeBoundingSphere && geom.computeBoundingSphere();
 
-          // Build sample points in world space (bbox corners, sphere points, or subset of positions)
-          const worldPoints = sampleWorldPointsFor(obj, geom);
+      const worldPoints = sampleWorldPointsFor(obj, geom);
+      if (worldPoints.length === 0) {
+        if (obj.userData?.forceMarker) {
+          drawables.push({ type: 'rect', obj, sx, sy, distNear: centerDist, distFar: centerDist, sizePx: obj.userData?.markerSizePx ?? 6 });
+        }
+        return;
+      }
 
-          // If no world points, fallback to center marker (rare)
-          if (worldPoints.length === 0) {
-            if (obj.userData?.forceMarker) {
-              drawables.push({ type: 'rect', obj, sx, sy, distNear: centerDist, distFar: centerDist, sizePx: obj.userData?.markerSizePx ?? 6 });
+      // compute distances to camera for the sample points
+      const dists = worldPoints.map(wp => camera.position.distanceTo(wp));
+      const distNear = Math.min(...dists);
+      const distFar = Math.max(...dists);
+
+      // Convert points to camera space (z is negative in front of camera for THREE cameras)
+      const camSpacePts = worldPoints.map(wp => wp.clone().applyMatrix4(camInv));
+      const nearZ = - (camera.near !== undefined ? camera.near : 0.1);
+      const farZ = - (camera.far !== undefined ? camera.far : 1e12);
+
+      // Collect projected screen points for those in front of near and within far, but only if not occluded
+      const pts2d = [];
+
+      for (let i = 0; i < worldPoints.length; i++) {
+        const camPt = camSpacePts[i];
+        const wp = worldPoints[i];
+
+        if (camPt.z <= nearZ && camPt.z >= farZ) {
+          // Occlusion test: cast ray from camera to wp and ensure no other occluder lies closer than wp
+          let visibleSample = true;
+          if (occlusionEnabled && occluders.length > 0) {
+            // direction and distance to sample
+            const dir = wp.clone().sub(camera.position);
+            const distToPt = dir.length();
+            if (distToPt > 1e-6) {
+              dir.normalize();
+              raycaster.set(camera.position, dir);
+              // intersect occluders; true => check descendants (full traversal)
+              const hits = raycaster.intersectObjects(occluders, true);
+              for (const h of hits) {
+                // skip hits that belong to the same object (or its children)
+                if (isDescendant(obj, h.object)) continue;
+                // If an intersection lies closer than the sample point (with small bias), it's occluding
+                if (h.distance < distToPt - occlusionBias) {
+                  visibleSample = false;
+                  break;
+                }
+                // otherwise if it's at/equal to the same distance or further, it doesn't occlude this sample
+              }
             }
-            return;
           }
 
-          // compute distances to camera for the sample points (this is the key change)
-          const dists = worldPoints.map(wp => camera.position.distanceTo(wp));
-          const distNear = Math.min(...dists);
-          const distFar = Math.max(...dists);
+          if (visibleSample) {
+            proj.copy(wp).project(camera);
+            const px = (proj.x * 0.5 + 0.5) * canvas.width;
+            const py = (-proj.y * 0.5 + 0.5) * canvas.height;
+            pts2d.push({ x: px, y: py, ndcZ: proj.z });
+          } else {
+            // sample occluded -> skip
+          }
+        }
+      }
 
-          // === CLIPPING AGAINST NEAR PLANE (camera space) ===
-          // Convert points to camera space (z is negative in front of camera for THREE cameras)
-          const camSpacePts = worldPoints.map(wp => wp.clone().applyMatrix4(camInv));
+      // Handle edges crossing near plane same as before (we still include those intersections)
+      for (let i = 0; i < worldPoints.length; i++) {
+        for (let j = i + 1; j < worldPoints.length; j++) {
+          const z1 = camSpacePts[i].z;
+          const z2 = camSpacePts[j].z;
+          if ((z1 <= nearZ && z2 > nearZ) || (z2 <= nearZ && z1 > nearZ)) {
+            const denom = (z2 - z1);
+            if (Math.abs(denom) < 1e-9) continue;
+            const t = (nearZ - z1) / denom;
+            if (t < 0 || t > 1) continue;
+            const ip = worldPoints[i].clone().lerp(worldPoints[j], t);
 
-          // near plane in camera space (z <= -near is in front)
-          const nearZ = - (camera.near !== undefined ? camera.near : 0.1);
-          const farZ = - (camera.far !== undefined ? camera.far : 1e12);
+            // occlusion check for intersection point as well
+            let visibleIp = true;
+            if (occlusionEnabled && occluders.length > 0) {
+              const dir = ip.clone().sub(camera.position);
+              const distToIp = dir.length();
+              if (distToIp > 1e-6) {
+                dir.normalize();
+                raycaster.set(camera.position, dir);
+                const hits = raycaster.intersectObjects(occluders, true);
+                for (const h of hits) {
+                  if (isDescendant(obj, h.object)) continue;
+                  if (h.distance < distToIp - occlusionBias) {
+                    visibleIp = false;
+                    break;
+                  }
+                }
+              }
+            }
 
-          // Collect projected screen points for those in front of near and within far
-          const pts2d = [];
-
-          for (let i = 0; i < worldPoints.length; i++) {
-            const camPt = camSpacePts[i];
-            const wp = worldPoints[i];
-
-            if (camPt.z <= nearZ && camPt.z >= farZ) {
-              // point is in front of near and not beyond far -> project normally
-              proj.copy(wp).project(camera);
+            if (visibleIp) {
+              proj.copy(ip).project(camera);
               const px = (proj.x * 0.5 + 0.5) * canvas.width;
               const py = (-proj.y * 0.5 + 0.5) * canvas.height;
               pts2d.push({ x: px, y: py, ndcZ: proj.z });
             }
           }
-
-          // For edges that cross the near plane, compute intersection point and include it
-          for (let i = 0; i < worldPoints.length; i++) {
-            for (let j = i + 1; j < worldPoints.length; j++) {
-              const z1 = camSpacePts[i].z;
-              const z2 = camSpacePts[j].z;
-
-              // If one side is in front (<= nearZ) and the other is behind (> nearZ), there's a crossing
-              if ((z1 <= nearZ && z2 > nearZ) || (z2 <= nearZ && z1 > nearZ)) {
-                // Avoid numerical division by zero
-                const denom = (z2 - z1);
-                if (Math.abs(denom) < 1e-9) continue;
-                const t = (nearZ - z1) / denom; // 0..1 along segment i->j where z == nearZ
-                if (t < 0 || t > 1) continue;
-                // Interpolate in world space to get accurate intersection position
-                const ip = worldPoints[i].clone().lerp(worldPoints[j], t);
-                proj.copy(ip).project(camera);
-                const px = (proj.x * 0.5 + 0.5) * canvas.width;
-                const py = (-proj.y * 0.5 + 0.5) * canvas.height;
-                pts2d.push({ x: px, y: py, ndcZ: proj.z });
-              }
-            }
-          }
-
-          // If strict near clipping is disabled, include center projection as a loose fallback
-          if (!api.options.strictNearClip && pts2d.length === 0) {
-            proj.copy(tmpPos).project(camera);
-            const px = (proj.x * 0.5 + 0.5) * canvas.width;
-            const py = (-proj.y * 0.5 + 0.5) * canvas.height;
-            pts2d.push({ x: px, y: py, ndcZ: proj.z });
-          }
-
-          // If after near-plane clipping we have zero pts, we may still want a fallback marker,
-          // but only if user asked or object is forced to render.
-          if (pts2d.length === 0) {
-            if (alwaysRender || obj.userData?.forceMarker) {
-              // clamp center to screen bounds so we get a marker on-screen
-              const cx = Math.max(0, Math.min(canvas.width, sx));
-              const cy = Math.max(0, Math.min(canvas.height, sy));
-              drawables.push({ type: 'rect', obj, sx: cx, sy: cy, distNear, distFar, sizePx: obj.userData?.markerSizePx ?? 6 });
-            }
-            return;
-          }
-
-          // Build convex hull from the collected projected points
-          const hull = convexHull(pts2d);
-
-          // If hull is trivial (1 or 2 points), but user forced rendering, make fallback shapes
-          if (hull.length >= 3) {
-            drawables.push({ type: 'poly', obj, pts: hull, distNear, distFar, projZ: proj.z });
-          } else if (hull.length === 2) {
-            drawables.push({ type: 'line', obj, pts: hull, distNear, distFar });
-          } else {
-            // single point fallback
-            const p = hull[0] || pts2d[0];
-            if (alwaysRender || obj.userData?.forceMarker) {
-              drawables.push({ type: 'rect', obj, sx: p.x, sy: p.y, distNear, distFar, sizePx: obj.userData?.markerSizePx ?? 6 });
-            }
-          }
-
-          return;
-        } else {
-          // unknown / fallback: only draw marker if explicitly requested
-          if (obj.userData?.forceMarker) {
-            drawables.push({ type: 'rect', obj, sx, sy, distNear: centerDist, distFar: centerDist, sizePx: obj.userData?.markerSizePx ?? 6 });
-          }
-        }
-      });
-
-      // Painter's order: sort by farthest sampled point first (so large objects that *span* far will be drawn behind)
-      // fallback to center-based dist if distFar is missing.
-      drawables.sort((a, b) => {
-        const aFar = (a.distFar !== undefined) ? a.distFar : (a.dist !== undefined ? a.dist : 0);
-        const bFar = (b.distFar !== undefined) ? b.distFar : (b.dist !== undefined ? b.dist : 0);
-        if (aFar === bFar) {
-          const aNear = (a.distNear !== undefined) ? a.distNear : (a.dist !== undefined ? a.dist : 0);
-          const bNear = (b.distNear !== undefined) ? b.distNear : (b.dist !== undefined ? b.dist : 0);
-          return bNear - aNear; // tie-breaker: draw object with larger near distance first
-        }
-        return bFar - aFar; // farthest first
-      });
-
-      // draw
-      for (let i = 0; i < drawables.length; i++) {
-        const d = drawables[i];
-        const { obj } = d;
-
-        // compute an average distance for alpha/linewidth falloffs (keeps visuals smooth)
-        const avgDist = ((d.distNear ?? d.dist ?? 0) + (d.distFar ?? d.dist ?? 0)) * 0.5;
-
-        // common color selection
-        let color = obj.userData?.color;
-        if (!color && obj.material && obj.material.color) {
-          try {
-            color = obj.material.color.getStyle ? obj.material.color.getStyle() : (`#${obj.material.color.getHexString()}`);
-          } catch (e) {
-            color = obj.userData?.color || 'white';
-          }
-        }
-        color = color || obj.userData?.color || 'white';
-
-        if (d.type === 'image' && d.mapImage && d.mapImage.width) {
-          let size;
-          if (obj.geometry && obj.geometry.boundingBox) {
-            const bb = obj.geometry.boundingBox;
-            const corners = [
-              [bb.min.x, bb.min.y, bb.min.z],
-              [bb.max.x, bb.max.y, bb.max.z]
-            ];
-            const screenPts = [];
-            for (let c of corners) {
-              tmpVec.set(c[0], c[1], c[2]).applyMatrix4(obj.matrixWorld);
-              const p = tmpVec.project(camera);
-              screenPts.push({ x: (p.x * 0.5 + 0.5) * canvas.width, y: (-p.y * 0.5 + 0.5) * canvas.height });
-            }
-            const wPx = Math.abs(screenPts[0].x - screenPts[1].x);
-            const hPx = Math.abs(screenPts[0].y - screenPts[1].y);
-            size = Math.max(8, obj.userData?.sizePx ?? Math.max(wPx, hPx, 32));
-          } else {
-            const baseSize = obj.userData?.sizePx ?? 300;
-            size = Math.max(8, baseSize * (1 / Math.max(0.1, avgDist * 0.05)));
-          }
-          ctx.save();
-          ctx.translate(d.sx, d.sy);
-          const rot = obj.userData?.rotation ?? (obj.rotation?.z ?? 0);
-          if (rot) ctx.rotate(rot);
-          ctx.globalAlpha = obj.userData?.opacity ?? (obj.material?.opacity ?? 1);
-          ctx.drawImage(d.mapImage, -size / 2, -size / 2, size, size);
-          ctx.restore();
-        } else if (d.type === 'poly' && d.pts) {
-          ctx.save();
-          ctx.beginPath();
-          ctx.moveTo(d.pts[0].x, d.pts[0].y);
-          for (let j = 1; j < d.pts.length; j++) ctx.lineTo(d.pts[j].x, d.pts[j].y);
-          ctx.closePath();
-          ctx.globalAlpha = Math.max(0.2, Math.min(1, 1 - (avgDist * 0.002)));
-          ctx.fillStyle = color;
-          ctx.fill();
-          ctx.globalAlpha = 0.6;
-          ctx.lineWidth = Math.max(1, 2 - (avgDist * 0.001));
-          ctx.strokeStyle = 'rgba(0,0,0,0.6)';
-          ctx.stroke();
-          ctx.restore();
-        } else if (d.type === 'line' && d.pts && d.pts.length === 2) {
-          ctx.beginPath();
-          ctx.moveTo(d.pts[0].x, d.pts[0].y);
-          ctx.lineTo(d.pts[1].x, d.pts[1].y);
-          ctx.strokeStyle = color;
-          ctx.lineWidth = obj.userData?.lineWidth ?? 3;
-          ctx.globalAlpha = 1 - Math.min(0.9, avgDist * 0.002);
-          ctx.stroke();
-        } else if (d.type === 'rect') {
-          // small centered rectangle marker (replaces prior circle/sphere)
-          const size = d.sizePx ?? Math.max(2, Math.round(12 * (1 / Math.max(0.1, avgDist * 0.05))));
-          const x = (d.sx || d.sx === 0) ? d.sx : 0;
-          const y = (d.sy || d.sy === 0) ? d.sy : 0;
-          ctx.save();
-          ctx.globalAlpha = Math.max(0.5, Math.min(1, 1 - (avgDist * 0.002)));
-          ctx.fillStyle = color;
-          ctx.fillRect(x - size / 2, y - size / 2, size, size);
-          ctx.restore();
-        } else {
-          // nothing
         }
       }
+
+      // If strict near clipping is disabled, include center projection as a loose fallback
+      if (!api.options.strictNearClip && pts2d.length === 0) {
+        proj.copy(tmpPos).project(camera);
+        const px = (proj.x * 0.5 + 0.5) * canvas.width;
+        const py = (-proj.y * 0.5 + 0.5) * canvas.height;
+        pts2d.push({ x: px, y: py, ndcZ: proj.z });
+      }
+
+      // If after near-plane clipping and occlusion checks we have zero pts, we may still want a fallback marker,
+      // but only if user asked or object is forced to render.
+      if (pts2d.length === 0) {
+        if (alwaysRender || obj.userData?.forceMarker) {
+          const cx = Math.max(0, Math.min(canvas.width, sx));
+          const cy = Math.max(0, Math.min(canvas.height, sy));
+          drawables.push({ type: 'rect', obj, sx: cx, sy: cy, distNear, distFar, sizePx: obj.userData?.markerSizePx ?? 6 });
+        }
+        return;
+      }
+
+      // Build convex hull from the collected projected (and visible) points
+      const hull = convexHull(pts2d);
+
+      if (hull.length >= 3) {
+        drawables.push({ type: 'poly', obj, pts: hull, distNear, distFar, projZ: proj.z });
+      } else if (hull.length === 2) {
+        drawables.push({ type: 'line', obj, pts: hull, distNear, distFar });
+      } else {
+        const p = hull[0] || pts2d[0];
+        if (alwaysRender || obj.userData?.forceMarker) {
+          drawables.push({ type: 'rect', obj, sx: p.x, sy: p.y, distNear, distFar, sizePx: obj.userData?.markerSizePx ?? 6 });
+        }
+      }
+      return;
+    } else {
+      if (obj.userData?.forceMarker) {
+        drawables.push({ type: 'rect', obj, sx, sy, distNear: centerDist, distFar: centerDist, sizePx: obj.userData?.markerSizePx ?? 6 });
+      }
     }
+  });
+
+  // Painter's order (same as before)
+  drawables.sort((a, b) => {
+    const aFar = (a.distFar !== undefined) ? a.distFar : (a.dist !== undefined ? a.dist : 0);
+    const bFar = (b.distFar !== undefined) ? b.distFar : (b.dist !== undefined ? b.dist : 0);
+    if (aFar === bFar) {
+      const aNear = (a.distNear !== undefined) ? a.distNear : (a.dist !== undefined ? a.dist : 0);
+      const bNear = (b.distNear !== undefined) ? b.distNear : (b.dist !== undefined ? b.dist : 0);
+      return bNear - aNear;
+    }
+    return bFar - aFar;
+  });
+
+  // draw (unchanged drawing code)
+  for (let i = 0; i < drawables.length; i++) {
+    const d = drawables[i];
+    const { obj } = d;
+    const avgDist = ((d.distNear ?? d.dist ?? 0) + (d.distFar ?? d.dist ?? 0)) * 0.5;
+    let color = obj.userData?.color;
+    if (!color && obj.material && obj.material.color) {
+      try {
+        color = obj.material.color.getStyle ? obj.material.color.getStyle() : (`#${obj.material.color.getHexString()}`);
+      } catch (e) {
+        color = obj.userData?.color || 'white';
+      }
+    }
+    color = color || obj.userData?.color || 'white';
+
+    if (d.type === 'image' && d.mapImage && d.mapImage.width) {
+      // same as your image draw code...
+      let size;
+      if (obj.geometry && obj.geometry.boundingBox) {
+        const bb = obj.geometry.boundingBox;
+        const corners = [
+          [bb.min.x, bb.min.y, bb.min.z],
+          [bb.max.x, bb.max.y, bb.max.z]
+        ];
+        const screenPts = [];
+        for (let c of corners) {
+          tmpVec.set(c[0], c[1], c[2]).applyMatrix4(obj.matrixWorld);
+          const p = tmpVec.project(camera);
+          screenPts.push({ x: (p.x * 0.5 + 0.5) * canvas.width, y: (-p.y * 0.5 + 0.5) * canvas.height });
+        }
+        const wPx = Math.abs(screenPts[0].x - screenPts[1].x);
+        const hPx = Math.abs(screenPts[0].y - screenPts[1].y);
+        size = Math.max(8, obj.userData?.sizePx ?? Math.max(wPx, hPx, 32));
+      } else {
+        const baseSize = obj.userData?.sizePx ?? 300;
+        size = Math.max(8, baseSize * (1 / Math.max(0.1, avgDist * 0.05)));
+      }
+      ctx.save();
+      ctx.translate(d.sx, d.sy);
+      const rot = obj.userData?.rotation ?? (obj.rotation?.z ?? 0);
+      if (rot) ctx.rotate(rot);
+      ctx.globalAlpha = obj.userData?.opacity ?? (obj.material?.opacity ?? 1);
+      ctx.drawImage(d.mapImage, -size / 2, -size / 2, size, size);
+      ctx.restore();
+    } else if (d.type === 'poly' && d.pts) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(d.pts[0].x, d.pts[0].y);
+      for (let j = 1; j < d.pts.length; j++) ctx.lineTo(d.pts[j].x, d.pts[j].y);
+      ctx.closePath();
+      ctx.globalAlpha = Math.max(0.2, Math.min(1, 1 - (avgDist * 0.002)));
+      ctx.fillStyle = color;
+      ctx.fill();
+      ctx.globalAlpha = 0.6;
+      ctx.lineWidth = Math.max(1, 2 - (avgDist * 0.001));
+      ctx.strokeStyle = 'rgba(0,0,0,0.6)';
+      ctx.stroke();
+      ctx.restore();
+    } else if (d.type === 'line' && d.pts && d.pts.length === 2) {
+      ctx.beginPath();
+      ctx.moveTo(d.pts[0].x, d.pts[0].y);
+      ctx.lineTo(d.pts[1].x, d.pts[1].y);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = obj.userData?.lineWidth ?? 3;
+      ctx.globalAlpha = 1 - Math.min(0.9, avgDist * 0.002);
+      ctx.stroke();
+    } else if (d.type === 'rect') {
+      const size = d.sizePx ?? Math.max(2, Math.round(12 * (1 / Math.max(0.1, avgDist * 0.05))));
+      const x = (d.sx || d.sx === 0) ? d.sx : 0;
+      const y = (d.sy || d.sy === 0) ? d.sy : 0;
+      ctx.save();
+      ctx.globalAlpha = Math.max(0.5, Math.min(1, 1 - (avgDist * 0.002)));
+      ctx.fillStyle = color;
+      ctx.fillRect(x - size / 2, y - size / 2, size, size);
+      ctx.restore();
+    }
+  }
+} // end render
+
   };
 
   return api;
@@ -3293,6 +3351,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
