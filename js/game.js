@@ -819,13 +819,38 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
   canvas.height = height;
   const ctx = canvas.getContext('2d');
 
-  // Helper to project a 3D point to NDC and then to screen
+  // Scratch vars for projections & temp math
+  const proj = new THREE.Vector3();
+  const tmpVec = new THREE.Vector3();
+
+  // Helper: build convex hull (Andrew monotone chain) of 2D points
+  function convexHull(points) {
+    if (points.length <= 1) return points.slice();
+    const pts = points.slice().sort((a, b) => (a.x === b.x ? a.y - b.y : a.x - b.x));
+    const cross = (o, a, b) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+    const lower = [];
+    for (let p of pts) {
+      while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop();
+      lower.push(p);
+    }
+    const upper = [];
+    for (let i = pts.length - 1; i >= 0; i--) {
+      const p = pts[i];
+      while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop();
+      upper.push(p);
+    }
+    lower.pop();
+    upper.pop();
+    return lower.concat(upper);
+  }
+
+  // Project a 3D point to screen
   function projectToScreen(v, camera) {
     const p = v.clone().project(camera);
     return {
       x: (p.x * 0.5 + 0.5) * canvas.width,
       y: (-p.y * 0.5 + 0.5) * canvas.height,
-      z: p.z
+      z: p.z,
     };
   }
 
@@ -859,113 +884,74 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
       camera.updateMatrixWorld();
       if (camera.updateProjectionMatrix) camera.updateProjectionMatrix();
 
-      // Depth buffer: initialize to farthest
-      const depthBuffer = new Float32Array(canvas.width * canvas.height);
-      depthBuffer.fill(1); // z in NDC goes from -1 (near) to 1 (far)
+      // Collect drawables (boxes only)
+      const drawables = [];
+      scene.traverse((obj) => {
+        if (!obj.visible) return;
+        if (!obj.isMesh || !obj.geometry || !obj.geometry.boundingBox) return;
 
-      // Collect meshes
-      const meshes = [];
-      scene.traverse(obj => {
-        if (obj.visible && obj.isMesh && obj.geometry && obj.material) meshes.push(obj);
-      });
+        // Get box corners in world space
+        const bb = obj.geometry.boundingBox;
+        const min = bb.min, max = bb.max;
+        const corners = [
+          [min.x, min.y, min.z],
+          [min.x, min.y, max.z],
+          [min.x, max.y, min.z],
+          [min.x, max.y, max.z],
+          [max.x, min.y, min.z],
+          [max.x, min.y, max.z],
+          [max.x, max.y, min.z],
+          [max.x, max.y, max.z],
+        ];
+        const worldCorners = corners.map(c => {
+          tmpVec.set(c[0], c[1], c[2]).applyMatrix4(obj.matrixWorld);
+          return tmpVec.clone();
+        });
 
-      // For each mesh, rasterize triangles
-      for (const mesh of meshes) {
-        // Get geometry
-        const geom = mesh.geometry;
-        const posAttr = geom.attributes.position;
-        const indexAttr = geom.index;
+        // Project corners to screen
+        const screenCorners = worldCorners.map(v => projectToScreen(v, camera));
+
+        // Use minimum screen Z for layering (painter's algorithm)
+        const minZ = Math.min(...screenCorners.map(p => p.z));
+
+        // Build convex hull for drawing polygon
+        const hull2d = convexHull(screenCorners);
 
         // Get color
-        let color = mesh.userData?.color;
-        if (!color && mesh.material.color) {
-          color = mesh.material.color.getStyle ? mesh.material.color.getStyle() : (`#${mesh.material.color.getHexString()}`);
+        let color = obj.userData?.color;
+        if (!color && obj.material && obj.material.color) {
+          color = obj.material.color.getStyle
+            ? obj.material.color.getStyle()
+            : `#${obj.material.color.getHexString()}`;
         }
         color = color || 'white';
 
-        // Loop triangles
-        const getVertex = i => {
-          const v = new THREE.Vector3(
-            posAttr.getX(i),
-            posAttr.getY(i),
-            posAttr.getZ(i)
-          );
-          v.applyMatrix4(mesh.matrixWorld);
-          return v;
-        };
-
-        const triCount = indexAttr ? indexAttr.count / 3 : posAttr.count / 3;
-        for (let t = 0; t < triCount; t++) {
-          let i0, i1, i2;
-          if (indexAttr) {
-            i0 = indexAttr.getX(t * 3);
-            i1 = indexAttr.getX(t * 3 + 1);
-            i2 = indexAttr.getX(t * 3 + 2);
-          } else {
-            i0 = t * 3;
-            i1 = t * 3 + 1;
-            i2 = t * 3 + 2;
-          }
-          const v0 = getVertex(i0), v1 = getVertex(i1), v2 = getVertex(i2);
-
-          // Project to screen
-          const p0 = projectToScreen(v0, camera);
-          const p1 = projectToScreen(v1, camera);
-          const p2 = projectToScreen(v2, camera);
-
-          // Bounding box
-          const minX = Math.max(0, Math.floor(Math.min(p0.x, p1.x, p2.x)));
-          const maxX = Math.min(canvas.width - 1, Math.ceil(Math.max(p0.x, p1.x, p2.x)));
-          const minY = Math.max(0, Math.floor(Math.min(p0.y, p1.y, p2.y)));
-          const maxY = Math.min(canvas.height - 1, Math.ceil(Math.max(p0.y, p1.y, p2.y)));
-
-          // Barycentric rasterization
-          const area = ((p1.x - p0.x)*(p2.y - p0.y) - (p2.x - p0.x)*(p1.y - p0.y));
-          if (Math.abs(area) < 1e-6) continue;
-          for (let y = minY; y <= maxY; y++) {
-            for (let x = minX; x <= maxX; x++) {
-              // Barycentric coordinates
-              const w0 = ((p1.x - x)*(p2.y - y) - (p2.x - x)*(p1.y - y)) / area;
-              const w1 = ((p2.x - x)*(p0.y - y) - (p0.x - x)*(p2.y - y)) / area;
-              const w2 = ((p0.x - x)*(p1.y - y) - (p1.x - x)*(p0.y - y)) / area;
-              if (w0 >= -1e-4 && w1 >= -1e-4 && w2 >= -1e-4) {
-                // Interpolate depth
-                const z = w0 * p0.z + w1 * p1.z + w2 * p2.z;
-                const bufIdx = x + y * canvas.width;
-                if (z < depthBuffer[bufIdx]) {
-                  depthBuffer[bufIdx] = z;
-                  // Draw pixel
-                  ctx.fillStyle = color;
-                  ctx.fillRect(x, y, 1, 1);
-                }
-              }
-            }
-          }
-        }
-      }
-      // Optionally: Render sprites, only if their center is visible (depth check)
-      scene.traverse(obj => {
-        if (!obj.visible) return;
-        const mapImage = obj.material && obj.material.map && obj.material.map.image ? obj.material.map.image : null;
-        if (!mapImage) return;
-        obj.getWorldPosition(tmpVec);
-        const p = projectToScreen(tmpVec, camera);
-        const x = Math.round(p.x), y = Math.round(p.y);
-        const bufIdx = x + y * canvas.width;
-        if (x >= 0 && y >= 0 && x < canvas.width && y < canvas.height) {
-          if (p.z < depthBuffer[bufIdx]) {
-            ctx.save();
-            ctx.globalAlpha = obj.userData?.opacity ?? (obj.material?.opacity ?? 1);
-            ctx.drawImage(mapImage, x - 16, y - 16, 32, 32);
-            ctx.restore();
-          }
-        }
+        drawables.push({
+          hull2d,
+          minZ,
+          color
+        });
       });
+
+      // Sort boxes from back to front (farthest to nearest)
+      drawables.sort((a, b) => a.minZ - b.minZ);
+
+      // Draw polygons in order (nearest last)
+      for (const d of drawables) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.moveTo(d.hull2d[0].x, d.hull2d[0].y);
+        for (let j = 1; j < d.hull2d.length; j++) {
+          ctx.lineTo(d.hull2d[j].x, d.hull2d[j].y);
+        }
+        ctx.closePath();
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = d.color;
+        ctx.fill();
+        ctx.restore();
+      }
     }
   };
-
-  // For projectToScreen
-  const tmpVec = new THREE.Vector3();
 
   return api;
 }
@@ -3070,6 +3056,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
