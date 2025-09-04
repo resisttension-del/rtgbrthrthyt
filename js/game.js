@@ -886,52 +886,57 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
 
       // Collect drawables (boxes only)
       const drawables = [];
-      scene.traverse((obj) => {
-        if (!obj.visible) return;
-        if (!obj.isMesh || !obj.geometry || !obj.geometry.boundingBox) return;
+scene.traverse((obj) => {
+  if (!obj.visible) return;
+  if (!obj.isMesh || !obj.geometry || !obj.geometry.boundingBox) return;
 
-        // Get box corners in world space
-        const bb = obj.geometry.boundingBox;
-        const min = bb.min, max = bb.max;
-        const corners = [
-          [min.x, min.y, min.z],
-          [min.x, min.y, max.z],
-          [min.x, max.y, min.z],
-          [min.x, max.y, max.z],
-          [max.x, min.y, min.z],
-          [max.x, min.y, max.z],
-          [max.x, max.y, min.z],
-          [max.x, max.y, max.z],
-        ];
-        const worldCorners = corners.map(c => {
-          tmpVec.set(c[0], c[1], c[2]).applyMatrix4(obj.matrixWorld);
-          return tmpVec.clone();
-        });
+  // Get box corners in world space
+  const bb = obj.geometry.boundingBox;
+  const min = bb.min, max = bb.max;
+  const corners = [
+    [min.x, min.y, min.z],
+    [min.x, min.y, max.z],
+    [min.x, max.y, min.z],
+    [min.x, max.y, max.z],
+    [max.x, min.y, min.z],
+    [max.x, min.y, max.z],
+    [max.x, max.y, min.z],
+    [max.x, max.y, max.z],
+  ];
+  const worldCorners = corners.map(c => {
+    tmpVec.set(c[0], c[1], c[2]).applyMatrix4(obj.matrixWorld);
+    return tmpVec.clone();
+  });
 
-        // Project corners to screen
-        const screenCorners = worldCorners.map(v => projectToScreen(v, camera));
+  // Project corners to screen
+  const screenCorners = worldCorners.map(v => projectToScreen(v, camera));
 
-        // Use minimum screen Z for layering (painter's algorithm)
-        const minZ = Math.min(...screenCorners.map(p => p.z));
+  // Only keep corners in front of the camera (z < 1 in NDC, z > -1 is inside frustum)
+  const inFront = screenCorners.filter(p => p.z < 1 && p.z > -1);
+  if (inFront.length === 0) return; // Don't draw boxes fully behind camera or outside frustum
 
-        // Build convex hull for drawing polygon
-        const hull2d = convexHull(screenCorners);
+  // Use minimum screen Z for layering
+  const minZ = Math.min(...inFront.map(p => p.z));
 
-        // Get color
-        let color = obj.userData?.color;
-        if (!color && obj.material && obj.material.color) {
-          color = obj.material.color.getStyle
-            ? obj.material.color.getStyle()
-            : `#${obj.material.color.getHexString()}`;
-        }
-        color = color || 'white';
+  // Build convex hull for drawing polygon
+  const hull2d = convexHull(inFront);
 
-        drawables.push({
-          hull2d,
-          minZ,
-          color
-        });
-      });
+  // Get color
+  let color = obj.userData?.color;
+  if (!color && obj.material && obj.material.color) {
+    color = obj.material.color.getStyle
+      ? obj.material.color.getStyle()
+      : `#${obj.material.color.getHexString()}`;
+  }
+  color = color || 'white';
+
+  drawables.push({
+    hull2d,
+    minZ,
+    color
+  });
+});
+
 
       // Sort boxes from back to front (farthest to nearest)
       drawables.sort((a, b) => a.minZ - b.minZ);
@@ -3056,6 +3061,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
