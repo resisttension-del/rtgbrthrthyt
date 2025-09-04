@@ -847,6 +847,65 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
     return lower.concat(upper);
   }
 
+  // ---------- NEW: 2D polygon helpers for overlap tests ----------
+  function bboxFromPts(pts) {
+    if (!pts || pts.length === 0) return null;
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const p of pts) {
+      if (p.x < minX) minX = p.x;
+      if (p.y < minY) minY = p.y;
+      if (p.x > maxX) maxX = p.x;
+      if (p.y > maxY) maxY = p.y;
+    }
+    return { minX, minY, maxX, maxY };
+  }
+  function bboxOverlap(a, b) {
+    if (!a || !b) return false;
+    return !(a.maxX < b.minX || a.minX > b.maxX || a.maxY < b.minY || a.minY > b.maxY);
+  }
+  function pointInPoly(pt, poly) {
+    // winding / raycast method
+    let inside = false;
+    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+      const xi = poly[i].x, yi = poly[i].y;
+      const xj = poly[j].x, yj = poly[j].y;
+      const intersect = ((yi > pt.y) !== (yj > pt.y)) &&
+        (pt.x < (xj - xi) * (pt.y - yi) / (yj - yi + 1e-12) + xi);
+      if (intersect) inside = !inside;
+    }
+    return inside;
+  }
+  function segIntersects(a1, a2, b1, b2) {
+    // segment intersection (2D)
+    const cross = (p, q, r) => (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x);
+    const d1 = cross(a1, a2, b1);
+    const d2 = cross(a1, a2, b2);
+    const d3 = cross(b1, b2, a1);
+    const d4 = cross(b1, b2, a2);
+    if (((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))) return true;
+    // collinear / endpoint checks (simple)
+    return false;
+  }
+  function polysOverlap(polyA, polyB) {
+    if (!polyA || !polyB || polyA.length === 0 || polyB.length === 0) return false;
+    const aB = bboxFromPts(polyA);
+    const bB = bboxFromPts(polyB);
+    if (!bboxOverlap(aB, bB)) return false;
+    // edge intersection
+    for (let i = 0; i < polyA.length; i++) {
+      const a1 = polyA[i], a2 = polyA[(i + 1) % polyA.length];
+      for (let j = 0; j < polyB.length; j++) {
+        const b1 = polyB[j], b2 = polyB[(j + 1) % polyB.length];
+        if (segIntersects(a1, a2, b1, b2)) return true;
+      }
+    }
+    // containment tests
+    if (pointInPoly(polyA[0], polyB)) return true;
+    if (pointInPoly(polyB[0], polyA)) return true;
+    return false;
+  }
+  // ----------------------------------------------------------------
+
   const api = {
     domElement: canvas,
     options: {
@@ -959,60 +1018,65 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
           return worldPoints;
         }
 
-        // If sprite/image
-        if (mapImage) {
-          // try to create sample points to compute near/far distances
-          let worldPoints = [];
-          if (obj.geometry) {
-            worldPoints = sampleWorldPointsFor(obj, obj.geometry);
-          } else {
-            worldPoints = [tmpPos.clone()];
-          }
-          // compute distances to camera for these samples
-          const dists = worldPoints.map(wp => camera.position.distanceTo(wp));
-          const distNear = Math.min(...dists);
-          const distFar = Math.max(...dists);
+        // Build sample points & camera-space data for any object so we can handle occlusion ordering later
+        let worldPoints = [];
+        if (obj.geometry) {
+          worldPoints = sampleWorldPointsFor(obj, obj.geometry);
+        } else {
+          worldPoints = [tmpPos.clone()];
+        }
 
-          drawables.push({ type: 'image', obj, sx, sy, distNear, distFar, projZ: proj.z, mapImage });
+        // compute camera-space points and a positive depth measure (front of camera -> smaller depth)
+        const camSpacePts = worldPoints.map(wp => wp.clone().applyMatrix4(camInv));
+        // Convert camera-space z to positive depth (front of camera gives positive depth)
+        const camDepths = camSpacePts.map(p => -p.z); // more positive => further in front
+        const depthNear = Math.min(...camDepths);
+        const depthFar = Math.max(...camDepths);
+
+        // Now handle specific drawable types:
+        if (mapImage) {
+          // compute screen coordinate for center (used to draw)
+          proj.copy(tmpPos).project(camera);
+          const centerSX = (proj.x * 0.5 + 0.5) * canvas.width;
+          const centerSY = (-proj.y * 0.5 + 0.5) * canvas.height;
+
+          // approximate hull as bounding box of some projected sample points
+          const projPts = [];
+          for (let wp of worldPoints) {
+            proj.copy(wp).project(camera);
+            projPts.push({ x: (proj.x * 0.5 + 0.5) * canvas.width, y: (-proj.y * 0.5 + 0.5) * canvas.height });
+          }
+          const hull = convexHull(projPts);
+
+          drawables.push({
+            type: 'image',
+            obj,
+            sx: centerSX,
+            sy: centerSY,
+            mapImage,
+            worldPoints,
+            camSpacePts,
+            depthNear,
+            depthFar,
+            projZ: proj.z,
+            hull
+          });
           return;
         } else if (obj.isMesh && obj.geometry) {
           const geom = obj.geometry;
           if (!geom.boundingBox) geom.computeBoundingBox && geom.computeBoundingBox();
           if (!geom.boundingSphere) geom.computeBoundingSphere && geom.computeBoundingSphere();
 
-          // Build sample points in world space (bbox corners, sphere points, or subset of positions)
-          const worldPoints = sampleWorldPointsFor(obj, geom);
-
-          // If no world points, fallback to center marker (rare)
-          if (worldPoints.length === 0) {
-            if (obj.userData?.forceMarker) {
-              drawables.push({ type: 'rect', obj, sx, sy, distNear: centerDist, distFar: centerDist, sizePx: obj.userData?.markerSizePx ?? 6 });
-            }
-            return;
-          }
-
-          // compute distances to camera for the sample points (this is the key change)
-          const dists = worldPoints.map(wp => camera.position.distanceTo(wp));
-          const distNear = Math.min(...dists);
-          const distFar = Math.max(...dists);
-
-          // === CLIPPING AGAINST NEAR PLANE (camera space) ===
-          // Convert points to camera space (z is negative in front of camera for THREE cameras)
-          const camSpacePts = worldPoints.map(wp => wp.clone().applyMatrix4(camInv));
-
-          // near plane in camera space (z <= -near is in front)
+          // Build projected pts considering near plane (same as before)
+          const camSpacePtsLocal = camSpacePts; // array of points in camera space
           const nearZ = - (camera.near !== undefined ? camera.near : 0.1);
           const farZ = - (camera.far !== undefined ? camera.far : 1e12);
 
-          // Collect projected screen points for those in front of near and within far
           const pts2d = [];
-
           for (let i = 0; i < worldPoints.length; i++) {
-            const camPt = camSpacePts[i];
+            const camPt = camSpacePtsLocal[i];
             const wp = worldPoints[i];
-
             if (camPt.z <= nearZ && camPt.z >= farZ) {
-              // point is in front of near and not beyond far -> project normally
               proj.copy(wp).project(camera);
               const px = (proj.x * 0.5 + 0.5) * canvas.width;
               const py = (-proj.y * 0.5 + 0.5) * canvas.height;
@@ -1020,20 +1084,16 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
             }
           }
 
-          // For edges that cross the near plane, compute intersection point and include it
+          // near-plane edge intersections (as before)
           for (let i = 0; i < worldPoints.length; i++) {
             for (let j = i + 1; j < worldPoints.length; j++) {
-              const z1 = camSpacePts[i].z;
-              const z2 = camSpacePts[j].z;
-
-              // If one side is in front (<= nearZ) and the other is behind (> nearZ), there's a crossing
+              const z1 = camSpacePtsLocal[i].z;
+              const z2 = camSpacePtsLocal[j].z;
               if ((z1 <= nearZ && z2 > nearZ) || (z2 <= nearZ && z1 > nearZ)) {
-                // Avoid numerical division by zero
                 const denom = (z2 - z1);
                 if (Math.abs(denom) < 1e-9) continue;
-                const t = (nearZ - z1) / denom; // 0..1 along segment i->j where z == nearZ
+                const t = (nearZ - z1) / denom;
                 if (t < 0 || t > 1) continue;
-                // Interpolate in world space to get accurate intersection position
                 const ip = worldPoints[i].clone().lerp(worldPoints[j], t);
                 proj.copy(ip).project(camera);
                 const px = (proj.x * 0.5 + 0.5) * canvas.width;
@@ -1043,7 +1103,6 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
             }
           }
 
-          // If strict near clipping is disabled, include center projection as a loose fallback
           if (!api.options.strictNearClip && pts2d.length === 0) {
             proj.copy(tmpPos).project(camera);
             const px = (proj.x * 0.5 + 0.5) * canvas.width;
@@ -1051,58 +1110,181 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
             pts2d.push({ x: px, y: py, ndcZ: proj.z });
           }
 
-          // If after near-plane clipping we have zero pts, we may still want a fallback marker,
-          // but only if user asked or object is forced to render.
           if (pts2d.length === 0) {
             if (alwaysRender || obj.userData?.forceMarker) {
-              // clamp center to screen bounds so we get a marker on-screen
               const cx = Math.max(0, Math.min(canvas.width, sx));
               const cy = Math.max(0, Math.min(canvas.height, sy));
-              drawables.push({ type: 'rect', obj, sx: cx, sy: cy, distNear, distFar, sizePx: obj.userData?.markerSizePx ?? 6 });
+              drawables.push({
+                type: 'rect',
+                obj,
+                sx: cx,
+                sy: cy,
+                distNear: depthNear,
+                distFar: depthFar,
+                camSpacePts,
+                depthNear,
+                depthFar,
+                hull: [{ x: cx, y: cy }],
+                sizePx: obj.userData?.markerSizePx ?? 6
+              });
             }
             return;
           }
 
-          // Build convex hull from the collected projected points
           const hull = convexHull(pts2d);
-
-          // If hull is trivial (1 or 2 points), but user forced rendering, make fallback shapes
           if (hull.length >= 3) {
-            drawables.push({ type: 'poly', obj, pts: hull, distNear, distFar, projZ: proj.z });
+            drawables.push({
+              type: 'poly',
+              obj,
+              pts: hull,
+              distNear: depthNear,
+              distFar: depthFar,
+              projZ: proj.z,
+              camSpacePts,
+              depthNear,
+              depthFar,
+              hull
+            });
           } else if (hull.length === 2) {
-            drawables.push({ type: 'line', obj, pts: hull, distNear, distFar });
+            drawables.push({
+              type: 'line',
+              obj,
+              pts: hull,
+              distNear: depthNear,
+              distFar: depthFar,
+              camSpacePts,
+              depthNear,
+              depthFar,
+              hull
+            });
           } else {
-            // single point fallback
             const p = hull[0] || pts2d[0];
             if (alwaysRender || obj.userData?.forceMarker) {
-              drawables.push({ type: 'rect', obj, sx: p.x, sy: p.y, distNear, distFar, sizePx: obj.userData?.markerSizePx ?? 6 });
+              drawables.push({
+                type: 'rect',
+                obj,
+                sx: p.x,
+                sy: p.y,
+                distNear: depthNear,
+                distFar: depthFar,
+                camSpacePts,
+                depthNear,
+                depthFar,
+                hull: [{ x: p.x, y: p.y }],
+                sizePx: obj.userData?.markerSizePx ?? 6
+              });
             }
           }
-
           return;
         } else {
-          // unknown / fallback: only draw marker if explicitly requested
+          // fallback: only draw marker if explicitly requested
           if (obj.userData?.forceMarker) {
-            drawables.push({ type: 'rect', obj, sx, sy, distNear: centerDist, distFar: centerDist, sizePx: obj.userData?.markerSizePx ?? 6 });
+            drawables.push({
+              type: 'rect',
+              obj,
+              sx,
+              sy,
+              distNear: depthNear,
+              distFar: depthFar,
+              camSpacePts,
+              depthNear,
+              depthFar,
+              hull: [{ x: sx, y: sy }],
+              sizePx: obj.userData?.markerSizePx ?? 6
+            });
           }
         }
       });
 
-      // Painter's order: sort by farthest sampled point first (so large objects that *span* far will be drawn behind)
-      // fallback to center-based dist if distFar is missing.
-      drawables.sort((a, b) => {
-        const aFar = (a.distFar !== undefined) ? a.distFar : (a.dist !== undefined ? a.dist : 0);
-        const bFar = (b.distFar !== undefined) ? b.distFar : (b.dist !== undefined ? b.dist : 0);
-        if (aFar === bFar) {
-          const aNear = (a.distNear !== undefined) ? a.distNear : (a.dist !== undefined ? a.dist : 0);
-          const bNear = (b.distNear !== undefined) ? b.distNear : (b.dist !== undefined ? b.dist : 0);
-          return bNear - aNear; // tie-breaker: draw object with larger near distance first
-        }
-        return bFar - aFar; // farthest first
-      });
+      // ---------- NEW: Occlusion-aware ordering ----------
+      // Build partial order edges for overlapping drawables using camera-space depths.
+      // depthNear / depthFar are positive-depth values (smaller == closer).
+      const n = drawables.length;
+      const adj = new Map(); // adjacency list: key -> Set of nodes that must come after key
+      const inDeg = new Map();
+      for (let i = 0; i < n; i++) {
+        adj.set(i, new Set());
+        inDeg.set(i, 0);
+      }
 
-      // draw
-      for (let i = 0; i < drawables.length; i++) {
+      const EPS = 1e-6;
+      for (let i = 0; i < n; i++) {
+        const A = drawables[i];
+        const hullA = A.hull || (A.pts ? A.pts : [{ x: A.sx, y: A.sy }]);
+        const aB = bboxFromPts(hullA);
+        for (let j = i + 1; j < n; j++) {
+          const B = drawables[j];
+          const hullB = B.hull || (B.pts ? B.pts : [{ x: B.sx, y: B.sy }]);
+          const bB = bboxFromPts(hullB);
+          if (!bboxOverlap(aB, bB)) continue; // no screen overlap -> ignore
+          // further check actual polygon overlap
+          if (!polysOverlap(hullA, hullB)) continue;
+
+          // If A is completely behind B: depthNearA > depthFarB -> draw A before B
+          // If B is completely behind A: depthNearB > depthFarA -> draw B before A
+          const depthNearA = (A.depthNear !== undefined) ? A.depthNear : (A.distNear ?? 1e6);
+          const depthFarA = (A.depthFar !== undefined) ? A.depthFar : (A.distFar ?? 1e6);
+          const depthNearB = (B.depthNear !== undefined) ? B.depthNear : (B.distNear ?? 1e6);
+          const depthFarB = (B.depthFar !== undefined) ? B.depthFar : (B.distFar ?? 1e6);
+
+          if (depthNearA > depthFarB + EPS) {
+            // A entirely behind B -> A should be drawn first
+            if (!adj.get(i).has(j)) {
+              adj.get(i).add(j);
+              inDeg.set(j, (inDeg.get(j) || 0) + 1);
+            }
+          } else if (depthNearB > depthFarA + EPS) {
+            // B entirely behind A -> B should be drawn first
+            if (!adj.get(j).has(i)) {
+              adj.get(j).add(i);
+              inDeg.set(i, (inDeg.get(i) || 0) + 1);
+            }
+          } else {
+            // partially overlapping in depth -> no strict ordering from this test
+            // we'll leave it unresolved (fallback to depth sort later if cycles)
+          }
+        }
+      }
+
+      // Topological sort (Kahn). If it succeeds, use that order; otherwise fallback to depthFar sort.
+      const q = [];
+      for (let i = 0; i < n; i++) {
+        if ((inDeg.get(i) || 0) === 0) q.push(i);
+      }
+      const topo = [];
+      while (q.length > 0) {
+        const u = q.shift();
+        topo.push(u);
+        for (const v of adj.get(u)) {
+          inDeg.set(v, inDeg.get(v) - 1);
+          if (inDeg.get(v) === 0) q.push(v);
+        }
+      }
+
+      let order;
+      if (topo.length === n) {
+        // topo order gives earlier -> drawn earlier (behind). We want painter's: draw behind first.
+        order = topo;
+      } else {
+        // cycle detected or no strict ordering found for some pairs. fallback to original far-first depth sort:
+        order = Array.from({ length: n }, (_, i) => i);
+        order.sort((ia, ib) => {
+          const a = drawables[ia];
+          const b = drawables[ib];
+          const aFar = (a.depthFar !== undefined) ? a.depthFar : (a.distFar !== undefined ? a.distFar : 0);
+          const bFar = (b.depthFar !== undefined) ? b.depthFar : (b.distFar !== undefined ? b.distFar : 0);
+          if (aFar === bFar) {
+            const aNear = (a.depthNear !== undefined) ? a.depthNear : (a.distNear !== undefined ? a.distNear : 0);
+            const bNear = (b.depthNear !== undefined) ? b.depthNear : (b.distNear !== undefined ? b.distNear : 0);
+            return bNear - aNear; // tiebreaker
+          }
+          return bFar - aFar; // farthest first (larger depthFar => further)
+        });
+      }
+
+      // draw in the resolved order
+      for (let idx = 0; idx < order.length; idx++) {
+        const i = order[idx];
         const d = drawables[i];
         const { obj } = d;
 
@@ -1189,6 +1371,7 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
 
   return api;
 }
+
 
 
 
@@ -3293,6 +3476,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
