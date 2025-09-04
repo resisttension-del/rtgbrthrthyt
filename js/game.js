@@ -847,73 +847,11 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
     return lower.concat(upper);
   }
 
-  // helpers for barycentric / triangle point tests (2D)
-  function pointInTri(px, py, ax, ay, bx, by, cx, cy) {
-    const v0x = cx - ax, v0y = cy - ay;
-    const v1x = bx - ax, v1y = by - ay;
-    const v2x = px - ax, v2y = py - ay;
-    const dot00 = v0x * v0x + v0y * v0y;
-    const dot01 = v0x * v1x + v0y * v1y;
-    const dot02 = v0x * v2x + v0y * v2y;
-    const dot11 = v1x * v1x + v1y * v1y;
-    const dot12 = v1x * v2x + v1y * v2y;
-    const denom = dot00 * dot11 - dot01 * dot01;
-    if (Math.abs(denom) < 1e-9) return { inside: false };
-    const invDenom = 1 / denom;
-    const u = (dot11 * dot02 - dot01 * dot12) * invDenom;
-    const v = (dot00 * dot12 - dot01 * dot02) * invDenom;
-    return { inside: (u >= -1e-8 && v >= -1e-8 && (u + v) <= 1 + 1e-8), u, v };
-  }
-
-  // sample depth from a convex polygon (triangulated as fan). pts: [{x,y,camZ}, ...]
-  function depthAtPointFromPoly(pts, px, py) {
-    if (!pts || pts.length === 0) return Infinity;
-    if (pts.length === 1) {
-      // single point: compute distance from that screen point (not ideal)
-      // but we can return its depth if sample is very close
-      const dx = pts[0].x - px, dy = pts[0].y - py;
-      if (dx * dx + dy * dy < 9) return -pts[0].camZ; // small radius
-      return Infinity;
-    }
-    // triangulate fan using pts[0]
-    const a = pts[0];
-    for (let i = 1; i < pts.length - 1; i++) {
-      const b = pts[i], c = pts[i + 1];
-      const test = pointInTri(px, py, a.x, a.y, b.x, b.y, c.x, c.y);
-      if (test.inside) {
-        // interpolate camZ using barycentric (u,v). We derived u,v for corner vectors (with v0=c-a, v1=b-a)
-        // Convert u,v returned to barycentric weights for a,b,c:
-        // using u and v from solver: weights for (a,b,c) are (1-u-v, v, u) when v0=c-a, v1=b-a
-        const wA = 1 - test.u - test.v;
-        const wB = test.v;
-        const wC = test.u;
-        // camZ is camera-space z (negative in front normally). We return positive depth = -camZ.
-        return - (a.camZ * wA + b.camZ * wB + c.camZ * wC);
-      }
-    }
-    return Infinity;
-  }
-
-  // bounding box helper
-  function bboxFromPts(pts) {
-    if (!pts || pts.length === 0) return { minX: 0, minY: 0, maxX: 0, maxY: 0 };
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (const p of pts) {
-      if (p.x < minX) minX = p.x;
-      if (p.y < minY) minY = p.y;
-      if (p.x > maxX) maxX = p.x;
-      if (p.y > maxY) maxY = p.y;
-    }
-    return { minX, minY, maxX, maxY };
-  }
-
   const api = {
     domElement: canvas,
     options: {
       // if you ever want to toggle strict near-plane clipping:
-      strictNearClip: true,
-      // occlusion sampling settings
-      occlusionSample: { x: 3, y: 3 } // 3x3 sampling in overlap box (tune for perf/accuracy)
+      strictNearClip: true
     },
     setSize(w, h, updateStyle = true) {
       canvas.width = w;
@@ -1035,42 +973,7 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
           const distNear = Math.min(...dists);
           const distFar = Math.max(...dists);
 
-          // ALSO compute screen-space corner projections and per-corner camZ so occlusion works for sprites
-          const cornerWorld = [];
-          if (obj.geometry && obj.geometry.boundingBox) {
-            const bb = obj.geometry.boundingBox;
-            cornerWorld.push(tmpVec.set(bb.min.x, bb.min.y, bb.min.z).applyMatrix4(obj.matrixWorld).clone());
-            cornerWorld.push(tmpVec.set(bb.min.x, bb.min.y, bb.max.z).applyMatrix4(obj.matrixWorld).clone());
-            cornerWorld.push(tmpVec.set(bb.min.x, bb.max.y, bb.min.z).applyMatrix4(obj.matrixWorld).clone());
-            cornerWorld.push(tmpVec.set(bb.max.x, bb.max.y, bb.max.z).applyMatrix4(obj.matrixWorld).clone());
-          } else {
-            // use a simple quad around center
-            const baseSize = 0.5;
-            cornerWorld.push(tmpPos.clone().add(new THREE.Vector3(-baseSize, -baseSize, 0)));
-            cornerWorld.push(tmpPos.clone().add(new THREE.Vector3(baseSize, -baseSize, 0)));
-            cornerWorld.push(tmpPos.clone().add(new THREE.Vector3(baseSize, baseSize, 0)));
-            cornerWorld.push(tmpPos.clone().add(new THREE.Vector3(-baseSize, baseSize, 0)));
-          }
-          const quadPts = [];
-          for (let cw of cornerWorld) {
-            const projPt = cw.clone().project(camera);
-            const px = (projPt.x * 0.5 + 0.5) * canvas.width;
-            const py = (-projPt.y * 0.5 + 0.5) * canvas.height;
-            const camSpace = cw.clone().applyMatrix4(camInv);
-            quadPts.push({ x: px, y: py, ndcZ: projPt.z, camZ: camSpace.z });
-          }
-
-          drawables.push({
-            type: 'image',
-            obj,
-            sx,
-            sy,
-            distNear,
-            distFar,
-            projZ: proj.z,
-            mapImage,
-            pts: quadPts // quad with camZ for occlusion sampling
-          });
+          drawables.push({ type: 'image', obj, sx, sy, distNear, distFar, projZ: proj.z, mapImage });
           return;
         } else if (obj.isMesh && obj.geometry) {
           const geom = obj.geometry;
@@ -1113,7 +1016,7 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
               proj.copy(wp).project(camera);
               const px = (proj.x * 0.5 + 0.5) * canvas.width;
               const py = (-proj.y * 0.5 + 0.5) * canvas.height;
-              pts2d.push({ x: px, y: py, ndcZ: proj.z, camZ: camPt.z });
+              pts2d.push({ x: px, y: py, ndcZ: proj.z });
             }
           }
 
@@ -1135,9 +1038,7 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
                 proj.copy(ip).project(camera);
                 const px = (proj.x * 0.5 + 0.5) * canvas.width;
                 const py = (-proj.y * 0.5 + 0.5) * canvas.height;
-                // compute camera-space z for the interpolated point
-                const ipCamZ = ip.clone().applyMatrix4(camInv).z;
-                pts2d.push({ x: px, y: py, ndcZ: proj.z, camZ: ipCamZ });
+                pts2d.push({ x: px, y: py, ndcZ: proj.z });
               }
             }
           }
@@ -1147,7 +1048,7 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
             proj.copy(tmpPos).project(camera);
             const px = (proj.x * 0.5 + 0.5) * canvas.width;
             const py = (-proj.y * 0.5 + 0.5) * canvas.height;
-            pts2d.push({ x: px, y: py, ndcZ: proj.z, camZ: tmpPos.clone().applyMatrix4(camInv).z });
+            pts2d.push({ x: px, y: py, ndcZ: proj.z });
           }
 
           // If after near-plane clipping we have zero pts, we may still want a fallback marker,
@@ -1162,7 +1063,7 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
             return;
           }
 
-          // Build convex hull from the collected projected points (they include camZ)
+          // Build convex hull from the collected projected points
           const hull = convexHull(pts2d);
 
           // If hull is trivial (1 or 2 points), but user forced rendering, make fallback shapes
@@ -1187,86 +1088,17 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
         }
       });
 
-      // === OCCLUSION-AWARE SORT ===
-      // We'll use a pairwise overlap sampling test. If two drawables overlap on-screen,
-      // sample a small grid inside the intersection and decide which drawable is closer.
-      const occlusionSampleX = api.options.occlusionSample.x || 3;
-      const occlusionSampleY = api.options.occlusionSample.y || 3;
-
-      function rectsOverlap(a, b) {
-        return !(a.maxX < b.minX || a.minX > b.maxX || a.maxY < b.minY || a.minY > b.maxY);
-      }
-
-      function decideOrderByOcclusion(a, b) {
-        // a and b are drawables; both may have .pts with camZ for per-vertex depth
-        const aPts = a.pts || (a.type === 'rect' ? [{ x: a.sx, y: a.sy, camZ: - (a.distNear || a.dist || 1) }] : []);
-        const bPts = b.pts || (b.type === 'rect' ? [{ x: b.sx, y: b.sy, camZ: - (b.distNear || b.dist || 1) }] : []);
-
-        if (!aPts.length || !bPts.length) return 0; // can't decide
-
-        const aBox = bboxFromPts(aPts);
-        const bBox = bboxFromPts(bPts);
-        if (!rectsOverlap(aBox, bBox)) return 0; // no overlap, leave to other sort rules
-
-        const ix0 = Math.max(0, Math.floor(Math.max(aBox.minX, bBox.minX)));
-        const iy0 = Math.max(0, Math.floor(Math.max(aBox.minY, bBox.minY)));
-        const ix1 = Math.min(canvas.width - 1, Math.ceil(Math.min(aBox.maxX, bBox.maxX)));
-        const iy1 = Math.min(canvas.height - 1, Math.ceil(Math.min(aBox.maxY, bBox.maxY)));
-        if (ix1 < ix0 || iy1 < iy0) return 0;
-
-        // sample grid inside intersection
-        let aCloser = 0, bCloser = 0, undecided = 0;
-        for (let sx = 0; sx < occlusionSampleX; sx++) {
-          for (let sy = 0; sy < occlusionSampleY; sy++) {
-            const fx = (sx + 0.5) / occlusionSampleX;
-            const fy = (sy + 0.5) / occlusionSampleY;
-            const px = ix0 + fx * (ix1 - ix0 + 1);
-            const py = iy0 + fy * (iy1 - iy0 + 1);
-
-            // find depth at px,py for each poly
-            const da = depthAtPointFromPoly(aPts, px, py);
-            const db = depthAtPointFromPoly(bPts, px, py);
-
-            if (!isFinite(da) && !isFinite(db)) {
-              undecided++;
-              continue;
-            } else if (!isFinite(da)) {
-              bCloser++;
-            } else if (!isFinite(db)) {
-              aCloser++;
-            } else {
-              // smaller depth value = closer (we returned -camZ)
-              if (Math.abs(da - db) < 1e-4) undecided++;
-              else if (da < db) aCloser++;
-              else bCloser++;
-            }
-          }
-        }
-
-        // majority decision
-        const total = aCloser + bCloser;
-        if (total === 0) return 0;
-        if (aCloser > bCloser) return -1; // a should be drawn after b (a is in front)
-        if (bCloser > aCloser) return 1;  // b should be drawn after a
-        return 0;
-      }
-
-      // Painter's order fallback: sort by farthest sampled point first (so large objects that *span* far will be drawn behind)
-      // but use occlusion sampling to override when overlapping.
-      drawables.sort((A, B) => {
-        // first try occlusion sampling if overlap
-        const ocRes = decideOrderByOcclusion(A, B);
-        if (ocRes !== 0) return ocRes;
-
-        const aFar = (A.distFar !== undefined) ? A.distFar : (A.dist !== undefined ? A.dist : 0);
-        const bFar = (B.distFar !== undefined) ? B.distFar : (B.dist !== undefined ? B.dist : 0);
+      // Painter's order: sort by farthest sampled point first (so large objects that *span* far will be drawn behind)
+      // fallback to center-based dist if distFar is missing.
+      drawables.sort((a, b) => {
+        const aFar = (a.distFar !== undefined) ? a.distFar : (a.dist !== undefined ? a.dist : 0);
+        const bFar = (b.distFar !== undefined) ? b.distFar : (b.dist !== undefined ? b.dist : 0);
         if (aFar === bFar) {
-          const aNear = (A.distNear !== undefined) ? A.distNear : (A.dist !== undefined ? A.dist : 0);
-          const bNear = (B.distNear !== undefined) ? B.distNear : (B.dist !== undefined ? B.dist : 0);
+          const aNear = (a.distNear !== undefined) ? a.distNear : (a.dist !== undefined ? a.dist : 0);
+          const bNear = (b.distNear !== undefined) ? b.distNear : (b.dist !== undefined ? b.dist : 0);
           return bNear - aNear; // tie-breaker: draw object with larger near distance first
         }
-        // farthest first so nearer objects drawn later (painter)
-        return bFar - aFar;
+        return bFar - aFar; // farthest first
       });
 
       // draw
@@ -1290,17 +1122,7 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
 
         if (d.type === 'image' && d.mapImage && d.mapImage.width) {
           let size;
-          if (d.pts && d.pts.length >= 2) {
-            // compute width/height from projected quad if present
-            const screenPts = d.pts;
-            const xs = screenPts.map(p => p.x);
-            const ys = screenPts.map(p => p.y);
-            const minX = Math.min(...xs), maxX = Math.max(...xs);
-            const minY = Math.min(...ys), maxY = Math.max(...ys);
-            const wPx = Math.abs(maxX - minX);
-            const hPx = Math.abs(maxY - minY);
-            size = Math.max(8, obj.userData?.sizePx ?? Math.max(wPx, hPx, 32));
-          } else if (obj.geometry && obj.geometry.boundingBox) {
+          if (obj.geometry && obj.geometry.boundingBox) {
             const bb = obj.geometry.boundingBox;
             const corners = [
               [bb.min.x, bb.min.y, bb.min.z],
@@ -1367,6 +1189,7 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
 
   return api;
 }
+
 
 
 
@@ -3471,6 +3294,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
