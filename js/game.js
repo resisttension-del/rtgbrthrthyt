@@ -847,26 +847,6 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
     return lower.concat(upper);
   }
 
-  // ----- Image/color helpers for software compositing -----
-  function makeTempCanvas(w, h) {
-    const c = document.createElement('canvas');
-    c.width = w;
-    c.height = h;
-    return c;
-  }
-
-  // parse arbitrary CSS color to rgba using a tiny canvas
-  const _colorParseCanvas = makeTempCanvas(1, 1);
-  const _colorParseCtx = _colorParseCanvas.getContext('2d');
-  function cssColorToRGBA(css) {
-    _colorParseCtx.clearRect(0, 0, 1, 1);
-    _colorParseCtx.fillStyle = css || 'white';
-    _colorParseCtx.fillRect(0, 0, 1, 1);
-    const d = _colorParseCtx.getImageData(0, 0, 1, 1).data;
-    return { r: d[0], g: d[1], b: d[2], a: d[3] / 255 };
-  }
-
-  // ----------------- API and options -----------------
   const api = {
     domElement: canvas,
     options: {
@@ -889,41 +869,25 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
 
     // Basic render: draw sprites (material.map.image) and approximated shapes for meshes
     render(scene, camera) {
-      // Ensure camera matrices
-      camera.updateMatrixWorld();
-      if (camera.updateProjectionMatrix) camera.updateProjectionMatrix();
-
-      // Clear canvas using clear color (we'll also prepare a software buffer)
-      const ccol = api._clearColor;
-      const rc = (ccol.hex >> 16) & 0xff;
-      const gc = (ccol.hex >> 8) & 0xff;
-      const bc = ccol.hex & 0xff;
+      // Clear with the clear color (converted to CSS)
+      const c = api._clearColor;
+      const r = (c.hex >> 16) & 0xff;
+      const g = (c.hex >> 8) & 0xff;
+      const b = c.hex & 0xff;
       ctx.save();
       ctx.setTransform(1, 0, 0, 1, 0, 0);
-      ctx.fillStyle = `rgba(${rc},${gc},${bc},${ccol.alpha})`;
+      ctx.fillStyle = `rgba(${r},${g},${b},${c.alpha})`;
       ctx.fillRect(0, 0, canvas.width, canvas.height);
       ctx.restore();
 
-      // Prepare offscreen software buffers
-      const W = canvas.width;
-      const H = canvas.height;
-      const pixelCount = W * H;
-      const colorBuffer = ctx.createImageData(W, H); // Uint8ClampedArray
-      // Initialize color buffer to clear color
-      for (let i = 0, p = 0; i < pixelCount; i++, p += 4) {
-        colorBuffer.data[p] = rc;
-        colorBuffer.data[p + 1] = gc;
-        colorBuffer.data[p + 2] = bc;
-        colorBuffer.data[p + 3] = Math.round(255 * ccol.alpha);
-      }
-      // depthBuffer stores positive camera-space depth (smaller = nearer). Initialize to +Infinity (far).
-      const depthBuffer = new Float32Array(pixelCount);
-      for (let i = 0; i < pixelCount; i++) depthBuffer[i] = Infinity;
+      // update camera matrices once
+      camera.updateMatrixWorld();
+      if (camera.updateProjectionMatrix) camera.updateProjectionMatrix();
 
       // camera world->camera matrix (inverse of matrixWorld)
       const camInv = tmpMat.copy(camera.matrixWorld).invert();
 
-      // collect drawables (so we can sort by depth if desired - but depth test will resolve occlusion)
+      // collect drawables (so we can sort by depth)
       const drawables = [];
       scene.traverse((obj) => {
         if (!obj.visible) return;
@@ -934,8 +898,8 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
         proj.copy(tmpPos).project(camera); // NDC -1..1 (center)
 
         // screen coords of center (used as fallback)
-        const sx = (proj.x * 0.5 + 0.5) * W;
-        const sy = (-proj.y * 0.5 + 0.5) * H;
+        const sx = (proj.x * 0.5 + 0.5) * canvas.width;
+        const sy = (-proj.y * 0.5 + 0.5) * canvas.height;
 
         // center distance for fallback (still useful)
         const centerDist = camera.position.distanceTo(tmpPos);
@@ -1009,7 +973,6 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
           const distNear = Math.min(...dists);
           const distFar = Math.max(...dists);
 
-          // We'll treat sprite as image-drawable with a single depth value (avg)
           drawables.push({ type: 'image', obj, sx, sy, distNear, distFar, projZ: proj.z, mapImage });
           return;
         } else if (obj.isMesh && obj.geometry) {
@@ -1051,10 +1014,9 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
             if (camPt.z <= nearZ && camPt.z >= farZ) {
               // point is in front of near and not beyond far -> project normally
               proj.copy(wp).project(camera);
-              const px = (proj.x * 0.5 + 0.5) * W;
-              const py = (-proj.y * 0.5 + 0.5) * H;
-              // store cam-space z (negative in front), and also positive depth = -camPt.z
-              pts2d.push({ x: px, y: py, ndcZ: proj.z, camZ: camPt.z, depth: -camPt.z });
+              const px = (proj.x * 0.5 + 0.5) * canvas.width;
+              const py = (-proj.y * 0.5 + 0.5) * canvas.height;
+              pts2d.push({ x: px, y: py, ndcZ: proj.z });
             }
           }
 
@@ -1073,12 +1035,10 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
                 if (t < 0 || t > 1) continue;
                 // Interpolate in world space to get accurate intersection position
                 const ip = worldPoints[i].clone().lerp(worldPoints[j], t);
-                // compute camera space ipZ
-                const camIp = ip.clone().applyMatrix4(camInv);
                 proj.copy(ip).project(camera);
-                const px = (proj.x * 0.5 + 0.5) * W;
-                const py = (-proj.y * 0.5 + 0.5) * H;
-                pts2d.push({ x: px, y: py, ndcZ: proj.z, camZ: camIp.z, depth: -camIp.z });
+                const px = (proj.x * 0.5 + 0.5) * canvas.width;
+                const py = (-proj.y * 0.5 + 0.5) * canvas.height;
+                pts2d.push({ x: px, y: py, ndcZ: proj.z });
               }
             }
           }
@@ -1086,9 +1046,9 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
           // If strict near clipping is disabled, include center projection as a loose fallback
           if (!api.options.strictNearClip && pts2d.length === 0) {
             proj.copy(tmpPos).project(camera);
-            const px = (proj.x * 0.5 + 0.5) * W;
-            const py = (-proj.y * 0.5 + 0.5) * H;
-            pts2d.push({ x: px, y: py, ndcZ: proj.z, camZ: -proj.z, depth: Math.abs(proj.z) });
+            const px = (proj.x * 0.5 + 0.5) * canvas.width;
+            const py = (-proj.y * 0.5 + 0.5) * canvas.height;
+            pts2d.push({ x: px, y: py, ndcZ: proj.z });
           }
 
           // If after near-plane clipping we have zero pts, we may still want a fallback marker,
@@ -1096,8 +1056,8 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
           if (pts2d.length === 0) {
             if (alwaysRender || obj.userData?.forceMarker) {
               // clamp center to screen bounds so we get a marker on-screen
-              const cx = Math.max(0, Math.min(W, sx));
-              const cy = Math.max(0, Math.min(H, sy));
+              const cx = Math.max(0, Math.min(canvas.width, sx));
+              const cy = Math.max(0, Math.min(canvas.height, sy));
               drawables.push({ type: 'rect', obj, sx: cx, sy: cy, distNear, distFar, sizePx: obj.userData?.markerSizePx ?? 6 });
             }
             return;
@@ -1108,7 +1068,6 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
 
           // If hull is trivial (1 or 2 points), but user forced rendering, make fallback shapes
           if (hull.length >= 3) {
-            // hull points include 'depth' property (positive depth = -camZ)
             drawables.push({ type: 'poly', obj, pts: hull, distNear, distFar, projZ: proj.z });
           } else if (hull.length === 2) {
             drawables.push({ type: 'line', obj, pts: hull, distNear, distFar });
@@ -1129,97 +1088,27 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
         }
       });
 
-      // You can still keep painter order as a heuristic, but depthBuffer will ensure correct final occlusion.
+      // Painter's order: sort by farthest sampled point first (so large objects that *span* far will be drawn behind)
+      // fallback to center-based dist if distFar is missing.
       drawables.sort((a, b) => {
         const aFar = (a.distFar !== undefined) ? a.distFar : (a.dist !== undefined ? a.dist : 0);
         const bFar = (b.distFar !== undefined) ? b.distFar : (b.dist !== undefined ? b.dist : 0);
         if (aFar === bFar) {
           const aNear = (a.distNear !== undefined) ? a.distNear : (a.dist !== undefined ? a.dist : 0);
           const bNear = (b.distNear !== undefined) ? b.distNear : (b.dist !== undefined ? b.dist : 0);
-          return bNear - aNear;
+          return bNear - aNear; // tie-breaker: draw object with larger near distance first
         }
-        return bFar - aFar;
+        return bFar - aFar; // farthest first
       });
 
-      // Helper: set rgba pixel in colorBuffer
-      function setPixelInBuffer(x, y, r, g, b, a, depth) {
-        if (x < 0 || x >= W || y < 0 || y >= H) return;
-        const xi = x | 0;
-        const yi = y | 0;
-        const di = yi * W + xi;
-        if (depth >= depthBuffer[di]) return; // only write if nearer (smaller depth)
-        depthBuffer[di] = depth;
-        const pi = di * 4;
-        colorBuffer.data[pi] = r;
-        colorBuffer.data[pi + 1] = g;
-        colorBuffer.data[pi + 2] = b;
-        colorBuffer.data[pi + 3] = Math.round(255 * a);
-      }
-
-      // Tri rasterization for convex polygons (triangulate fan from v0)
-      function rasterizeConvexPolygonTriFan(pts, colorRGBA) {
-        // pts: [{x,y,depth}, ...] - convex polygon
-        const n = pts.length;
-        if (n < 3) return;
-        // precompute bounding box
-        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-        for (let p of pts) {
-          if (p.x < minX) minX = p.x;
-          if (p.y < minY) minY = p.y;
-          if (p.x > maxX) maxX = p.x;
-          if (p.y > maxY) maxY = p.y;
-        }
-        const bx0 = Math.max(0, Math.floor(minX));
-        const by0 = Math.max(0, Math.floor(minY));
-        const bx1 = Math.min(W - 1, Math.ceil(maxX));
-        const by1 = Math.min(H - 1, Math.ceil(maxY));
-        // Tri fan
-        const v0 = pts[0];
-        for (let i = 1; i < n - 1; i++) {
-          const v1 = pts[i];
-          const v2 = pts[i + 1];
-          // Precompute edge functions constants
-          const x0 = v0.x, y0 = v0.y, d0 = v0.depth;
-          const x1 = v1.x, y1 = v1.y, d1 = v1.depth;
-          const x2 = v2.x, y2 = v2.y, d2 = v2.depth;
-          // triangle bbox
-          const tminX = Math.max(bx0, Math.floor(Math.min(x0, x1, x2)));
-          const tminY = Math.max(by0, Math.floor(Math.min(y0, y1, y2)));
-          const tmaxX = Math.min(bx1, Math.ceil(Math.max(x0, x1, x2)));
-          const tmaxY = Math.min(by1, Math.ceil(Math.max(y0, y1, y2)));
-          // Compute area for barycentric denom
-          const denom = (y1 - y2) * (x0 - x2) + (x2 - x1) * (y0 - y2);
-          if (Math.abs(denom) < 1e-6) continue;
-          for (let yy = tminY; yy <= tmaxY; yy++) {
-            for (let xx = tminX; xx <= tmaxX; xx++) {
-              // pixel center
-              const px = xx + 0.5;
-              const py = yy + 0.5;
-              // barycentric coordinates
-              const w0 = ((y1 - y2) * (px - x2) + (x2 - x1) * (py - y2)) / denom;
-              const w1 = ((y2 - y0) * (px - x2) + (x0 - x2) * (py - y2)) / denom;
-              const w2 = 1 - w0 - w1;
-              if (w0 >= -1e-6 && w1 >= -1e-6 && w2 >= -1e-6) {
-                // Interpolate depth (per-vertex depth)
-                const depth = w0 * d0 + w1 * d1 + w2 * d2;
-                // Depth test & write
-                setPixelInBuffer(xx, yy, colorRGBA.r, colorRGBA.g, colorRGBA.b, colorRGBA.a, depth);
-              }
-            }
-          }
-        }
-      }
-
-      // Helper: draw non-triangle things (image, rect, stroked line) by drawing to a temp canvas and sampling pixels.
-      // depthForAllPixels is constant used for those drawables (avgDist or similar).
-      const tempCanvas = makeTempCanvas(W, H);
-      const tempCtx = tempCanvas.getContext('2d');
-
+      // draw
       for (let i = 0; i < drawables.length; i++) {
         const d = drawables[i];
         const { obj } = d;
+
         // compute an average distance for alpha/linewidth falloffs (keeps visuals smooth)
         const avgDist = ((d.distNear ?? d.dist ?? 0) + (d.distFar ?? d.dist ?? 0)) * 0.5;
+
         // common color selection
         let color = obj.userData?.color;
         if (!color && obj.material && obj.material.color) {
@@ -1230,17 +1119,8 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
           }
         }
         color = color || obj.userData?.color || 'white';
-        const colorRGBA = cssColorToRGBA(color);
 
-        if (d.type === 'poly' && d.pts) {
-          // d.pts are hull points with .depth (positive) available
-          // clamp depth to a minimum small positive value to avoid numerical issues
-          for (let p of d.pts) { if (!isFinite(p.depth) || p.depth <= 0) p.depth = 1e-3; }
-          rasterizeConvexPolygonTriFan(d.pts, colorRGBA);
-        } else if (d.type === 'image' && d.mapImage && d.mapImage.width) {
-          // We'll draw the sprite as a textured quad centered at d.sx, d.sy with constant depth = avgDist
-          tempCtx.clearRect(0, 0, W, H);
-          const map = d.mapImage;
+        if (d.type === 'image' && d.mapImage && d.mapImage.width) {
           let size;
           if (obj.geometry && obj.geometry.boundingBox) {
             const bb = obj.geometry.boundingBox;
@@ -1252,7 +1132,7 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
             for (let c of corners) {
               tmpVec.set(c[0], c[1], c[2]).applyMatrix4(obj.matrixWorld);
               const p = tmpVec.project(camera);
-              screenPts.push({ x: (p.x * 0.5 + 0.5) * W, y: (-p.y * 0.5 + 0.5) * H });
+              screenPts.push({ x: (p.x * 0.5 + 0.5) * canvas.width, y: (-p.y * 0.5 + 0.5) * canvas.height });
             }
             const wPx = Math.abs(screenPts[0].x - screenPts[1].x);
             const hPx = Math.abs(screenPts[0].y - screenPts[1].y);
@@ -1261,79 +1141,55 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
             const baseSize = obj.userData?.sizePx ?? 300;
             size = Math.max(8, baseSize * (1 / Math.max(0.1, avgDist * 0.05)));
           }
-          tempCtx.save();
-          tempCtx.translate(d.sx, d.sy);
+          ctx.save();
+          ctx.translate(d.sx, d.sy);
           const rot = obj.userData?.rotation ?? (obj.rotation?.z ?? 0);
-          if (rot) tempCtx.rotate(rot);
-          tempCtx.globalAlpha = obj.userData?.opacity ?? (obj.material?.opacity ?? 1);
-          tempCtx.drawImage(map, -size / 2, -size / 2, size, size);
-          tempCtx.restore();
-
-          // sample the temp canvas and perform depth test per pixel
-          const tdata = tempCtx.getImageData(0, 0, W, H).data;
-          const depthVal = Math.max(1e-6, avgDist); // positive depth
-          for (let py = 0, idx = 0; py < H; py++) {
-            for (let px = 0; px < W; px++, idx++) {
-              const ti = idx * 4;
-              const alpha = tdata[ti + 3];
-              if (alpha === 0) continue;
-              // premultiplied or straight? treat straight
-              const r = tdata[ti], g = tdata[ti + 1], b = tdata[ti + 2], a = alpha / 255;
-              setPixelInBuffer(px, py, r, g, b, a, depthVal);
-            }
-          }
+          if (rot) ctx.rotate(rot);
+          ctx.globalAlpha = obj.userData?.opacity ?? (obj.material?.opacity ?? 1);
+          ctx.drawImage(d.mapImage, -size / 2, -size / 2, size, size);
+          ctx.restore();
+        } else if (d.type === 'poly' && d.pts) {
+          ctx.save();
+          ctx.beginPath();
+          ctx.moveTo(d.pts[0].x, d.pts[0].y);
+          for (let j = 1; j < d.pts.length; j++) ctx.lineTo(d.pts[j].x, d.pts[j].y);
+          ctx.closePath();
+          ctx.globalAlpha = Math.max(0.2, Math.min(1, 1 - (avgDist * 0.002)));
+          ctx.fillStyle = color;
+          ctx.fill();
+          ctx.globalAlpha = 0.6;
+          ctx.lineWidth = Math.max(1, 2 - (avgDist * 0.001));
+          ctx.strokeStyle = 'rgba(0,0,0,0.6)';
+          ctx.stroke();
+          ctx.restore();
         } else if (d.type === 'line' && d.pts && d.pts.length === 2) {
-          // draw thick line to temp canvas then composite by depth
-          tempCtx.clearRect(0, 0, W, H);
-          tempCtx.beginPath();
-          tempCtx.moveTo(d.pts[0].x, d.pts[0].y);
-          tempCtx.lineTo(d.pts[1].x, d.pts[1].y);
-          tempCtx.lineWidth = obj.userData?.lineWidth ?? 3;
-          tempCtx.strokeStyle = color;
-          tempCtx.globalAlpha = 1 - Math.min(0.9, avgDist * 0.002);
-          tempCtx.stroke();
-
-          const tdata = tempCtx.getImageData(0, 0, W, H).data;
-          const depthVal = Math.max(1e-6, avgDist);
-          for (let py = 0, idx = 0; py < H; py++) {
-            for (let px = 0; px < W; px++, idx++) {
-              const ti = idx * 4;
-              const alpha = tdata[ti + 3];
-              if (alpha === 0) continue;
-              const r = tdata[ti], g = tdata[ti + 1], b = tdata[ti + 2], a = alpha / 255;
-              setPixelInBuffer(px, py, r, g, b, a, depthVal);
-            }
-          }
+          ctx.beginPath();
+          ctx.moveTo(d.pts[0].x, d.pts[0].y);
+          ctx.lineTo(d.pts[1].x, d.pts[1].y);
+          ctx.strokeStyle = color;
+          ctx.lineWidth = obj.userData?.lineWidth ?? 3;
+          ctx.globalAlpha = 1 - Math.min(0.9, avgDist * 0.002);
+          ctx.stroke();
         } else if (d.type === 'rect') {
-          // small centered rectangle marker (we'll just rasterize as filled rect into temp and composite)
+          // small centered rectangle marker (replaces prior circle/sphere)
           const size = d.sizePx ?? Math.max(2, Math.round(12 * (1 / Math.max(0.1, avgDist * 0.05))));
-          tempCtx.clearRect(0, 0, W, H);
-          tempCtx.globalAlpha = Math.max(0.5, Math.min(1, 1 - (avgDist * 0.002)));
-          tempCtx.fillStyle = color;
-          tempCtx.fillRect((d.sx || 0) - size / 2, (d.sy || 0) - size / 2, size, size);
-          const tdata = tempCtx.getImageData(0, 0, W, H).data;
-          const depthVal = Math.max(1e-6, avgDist);
-          for (let py = 0, idx = 0; py < H; py++) {
-            for (let px = 0; px < W; px++, idx++) {
-              const ti = idx * 4;
-              const alpha = tdata[ti + 3];
-              if (alpha === 0) continue;
-              const r = tdata[ti], g = tdata[ti + 1], b = tdata[ti + 2], a = alpha / 255;
-              setPixelInBuffer(px, py, r, g, b, a, depthVal);
-            }
-          }
+          const x = (d.sx || d.sx === 0) ? d.sx : 0;
+          const y = (d.sy || d.sy === 0) ? d.sy : 0;
+          ctx.save();
+          ctx.globalAlpha = Math.max(0.5, Math.min(1, 1 - (avgDist * 0.002)));
+          ctx.fillStyle = color;
+          ctx.fillRect(x - size / 2, y - size / 2, size, size);
+          ctx.restore();
         } else {
-          // unknown drawable - skip
+          // nothing
         }
       }
-
-      // After all drawables processed, push composed colorBuffer to the visible canvas
-      ctx.putImageData(colorBuffer, 0, 0);
     }
   };
 
   return api;
 }
+
 
 
 
@@ -3437,6 +3293,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
