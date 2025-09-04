@@ -825,7 +825,6 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
   const tmpVec = new THREE.Vector3();
   const tmpVec2 = new THREE.Vector3();
   const tmpMat = new THREE.Matrix4();
-  const raycaster = new THREE.Raycaster();
 
   // helper: build convex hull (Andrew monotone chain) of 2D points
   function convexHull(points) {
@@ -848,62 +847,11 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
     return lower.concat(upper);
   }
 
-  // Helper: Check if an object is occluded by walls/obstacles
-  function isOccluded(camera, targetObj, scene, targetDistance) {
-    // Skip occlusion check for objects marked as always visible
-    if (targetObj.userData?.ignoreOcclusion || targetObj.userData?.alwaysRender) {
-      return false;
-    }
-
-    // Get target world position
-    targetObj.getWorldPosition(tmpPos);
-    
-    // Create ray from camera to target
-    const direction = tmpVec.copy(tmpPos).sub(camera.position).normalize();
-    raycaster.set(camera.position, direction);
-    
-    // Collect potential occluders (objects that can block view)
-    const occluders = [];
-    scene.traverse((obj) => {
-      if (obj === targetObj) return; // Don't test against self
-      if (!obj.visible) return;
-      if (obj.isCamera || obj.isLight) return;
-      if (obj.userData?.nonOccluding) return; // Skip objects marked as non-occluding
-      
-      // Only consider meshes with geometry as potential occluders
-      if (obj.isMesh && obj.geometry) {
-        // Skip transparent or very small objects
-        const material = obj.material;
-        if (material && material.transparent && material.opacity < 0.5) return;
-        
-        occluders.push(obj);
-      }
-    });
-
-    // Perform raycast
-    const intersects = raycaster.intersectObjects(occluders, false);
-    
-    // Check if any intersection occurs before reaching the target
-    for (let intersect of intersects) {
-      const intersectDistance = intersect.distance;
-      
-      // If intersection is significantly closer than target, it's occluded
-      // Add small tolerance to prevent self-occlusion issues
-      if (intersectDistance < targetDistance - 0.1) {
-        return true;
-      }
-    }
-    
-    return false;
-  }
-
   const api = {
     domElement: canvas,
     options: {
       // if you ever want to toggle strict near-plane clipping:
-      strictNearClip: true,
-      // Enable/disable occlusion culling
-      enableOcclusion: true
+      strictNearClip: true
     },
     setSize(w, h, updateStyle = true) {
       canvas.width = w;
@@ -955,11 +903,6 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
 
         // center distance for fallback (still useful)
         const centerDist = camera.position.distanceTo(tmpPos);
-
-        // Occlusion culling check
-        if (api.options.enableOcclusion && isOccluded(camera, obj, scene, centerDist)) {
-          return; // Skip occluded objects
-        }
 
         // check for texture (sprites)
         const mapImage = obj.material && obj.material.map && obj.material.map.image ? obj.material.map.image : null;
@@ -1246,6 +1189,7 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
 
   return api;
 }
+
 
 /* ---------- Updated scene initializers (CPU renderer) ---------- */
 
@@ -3347,6 +3291,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
