@@ -851,14 +851,7 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
     domElement: canvas,
     options: {
       // if you ever want to toggle strict near-plane clipping:
-      strictNearClip: true,
-      // occlusion tuning (defaults below are safe starting values)
-      occlusionEnabled: true,
-      occlusionBiasFraction: 1e-4,
-      occlusionBiasMin: 1e-6,
-      occlusionSampleLimit: 8,
-      occluderExcludeTransparent: true,
-      silentProf: false
+      strictNearClip: true
     },
     setSize(w, h, updateStyle = true) {
       canvas.width = w;
@@ -874,9 +867,9 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
     },
     _clearColor: { hex: 0x000000, alpha: 1 },
 
-    // Fully updated render(...) with safer occlusion
+    // Basic render: draw sprites (material.map.image) and approximated shapes for meshes
     render(scene, camera) {
-      // Clear with the clear color
+      // Clear with the clear color (converted to CSS)
       const c = api._clearColor;
       const r = (c.hex >> 16) & 0xff;
       const g = (c.hex >> 8) & 0xff;
@@ -891,56 +884,8 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
       camera.updateMatrixWorld();
       if (camera.updateProjectionMatrix) camera.updateProjectionMatrix();
 
-      // helper matrices/positions (reuse the ones defined in closure)
+      // camera world->camera matrix (inverse of matrixWorld)
       const camInv = tmpMat.copy(camera.matrixWorld).invert();
-
-      // use camera.getWorldPosition to respect parent transforms
-      const camWorldPos = new THREE.Vector3();
-      camera.getWorldPosition(camWorldPos);
-
-      // Raycaster for occlusion
-      const raycaster = new THREE.Raycaster();
-
-      // Helper: detect ancestor/descendant relationship (skip self-intersections)
-      function isDescendant(ancestor, node) {
-        let cur = node;
-        while (cur) {
-          if (cur === ancestor) return true;
-          cur = cur.parent;
-        }
-        return false;
-      }
-
-      // Read runtime occlusion options (allow overrides on api.options)
-      const occlusionEnabled = (api.options.occlusionEnabled !== undefined) ? api.options.occlusionEnabled : true;
-      const occlusionBiasFraction = api.options.occlusionBiasFraction ?? 1e-4;
-      const occlusionBiasMin = api.options.occlusionBiasMin ?? 1e-6;
-      const occlusionSampleLimit = api.options.occlusionSampleLimit ?? 8;
-      const occluderExcludeTransparent = api.options.occluderExcludeTransparent ?? true;
-
-      // --- Build occluder list with world-space bounding spheres (cheap cull) ---
-      const occluders = [];
-      scene.traverse(o => {
-        if (!o.visible) return;
-        if (!o.isMesh || !o.geometry) return;
-        if (o.userData && o.userData.occluder === false) return;
-        if (occluderExcludeTransparent && o.material && o.material.transparent) return;
-
-        if (!o.geometry.boundingSphere) o.geometry.computeBoundingSphere && o.geometry.computeBoundingSphere();
-        const bs = o.geometry.boundingSphere;
-        if (!bs) {
-          occluders.push({ mesh: o, center: null, radius: null });
-        } else {
-          const worldCenter = bs.center.clone().applyMatrix4(o.matrixWorld);
-          const scale = (o.matrixWorld.getMaxScaleOnAxis ? o.matrixWorld.getMaxScaleOnAxis() : 1);
-          const worldRadius = bs.radius * Math.abs(scale);
-          occluders.push({ mesh: o, center: worldCenter, radius: worldRadius });
-        }
-      });
-
-      // profiler counters
-      let profRaycasts = 0, profHits = 0;
-      if (!api._lastProfLogTime) api._lastProfLogTime = performance.now();
 
       // collect drawables (so we can sort by depth)
       const drawables = [];
@@ -957,7 +902,7 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
         const sy = (-proj.y * 0.5 + 0.5) * canvas.height;
 
         // center distance for fallback (still useful)
-        const centerDist = camWorldPos.distanceTo(tmpPos);
+        const centerDist = camera.position.distanceTo(tmpPos);
 
         // check for texture (sprites)
         const mapImage = obj.material && obj.material.map && obj.material.map.image ? obj.material.map.image : null;
@@ -999,9 +944,7 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
             worldPoints.push(center.clone().add(new THREE.Vector3(0, 0, -r)));
           } else if (geom && geom.attributes && geom.attributes.position && geom.attributes.position.count > 0) {
             const posAttr = geom.attributes.position;
-            // sample up to occlusionSampleLimit points from the positions to limit raycasts
-            const step = Math.max(1, Math.floor(posAttr.count / Math.min(occlusionSampleLimit, 12)));
-            for (let i = 0; i < posAttr.count && worldPoints.length < occlusionSampleLimit; i += step) {
+            for (let i = 0; i < Math.min(12, posAttr.count); i += Math.max(1, Math.floor(posAttr.count / 12))) {
               tmpVec.set(
                 posAttr.getX(i),
                 posAttr.getY(i),
@@ -1026,7 +969,7 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
             worldPoints = [tmpPos.clone()];
           }
           // compute distances to camera for these samples
-          const dists = worldPoints.map(wp => camWorldPos.distanceTo(wp));
+          const dists = worldPoints.map(wp => camera.position.distanceTo(wp));
           const distNear = Math.min(...dists);
           const distFar = Math.max(...dists);
 
@@ -1049,7 +992,7 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
           }
 
           // compute distances to camera for the sample points (this is the key change)
-          const dists = worldPoints.map(wp => camWorldPos.distanceTo(wp));
+          const dists = worldPoints.map(wp => camera.position.distanceTo(wp));
           const distNear = Math.min(...dists);
           const distFar = Math.max(...dists);
 
@@ -1061,70 +1004,32 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
           const nearZ = - (camera.near !== undefined ? camera.near : 0.1);
           const farZ = - (camera.far !== undefined ? camera.far : 1e12);
 
-          // Collect projected screen points for those in front of near and within far, but only if not occluded
+          // Collect projected screen points for those in front of near and within far
           const pts2d = [];
 
           for (let i = 0; i < worldPoints.length; i++) {
             const camPt = camSpacePts[i];
             const wp = worldPoints[i];
 
-            if (camPt.z <= nearZ && camPt.z >= farZ) {
-              // Occlusion test: cast ray from camera to wp and ensure no other occluder lies closer than wp
-              let visibleSample = true;
-              if (occlusionEnabled && occluders.length > 0) {
-                // direction and distance to sample
-                const dir = wp.clone().sub(camWorldPos);
-                const distToPt = dir.length();
-                if (distToPt > 1e-6) {
-                  // cheap filter: only consider occluders whose sphere could intersect the ray segment
-                  const candidateMeshes = [];
-                  for (const oc of occluders) {
-                    if (isDescendant(obj, oc.mesh)) continue;
-                    if (oc.center && oc.radius != null) {
-                      const dOc = camWorldPos.distanceTo(oc.center);
-                      // occluder is entirely beyond the point? skip
-                      if (dOc - oc.radius > distToPt) continue;
-                    }
-                    candidateMeshes.push(oc.mesh);
-                  }
-
-                  if (candidateMeshes.length > 0) {
-                    dir.normalize();
-                    raycaster.set(camWorldPos, dir);
-                    const hits = raycaster.intersectObjects(candidateMeshes, true);
-                    profRaycasts++;
-                    if (hits && hits.length) {
-                      for (const h of hits) {
-                        if (isDescendant(obj, h.object)) continue;
-                        const bias = Math.max(occlusionBiasMin, distToPt * occlusionBiasFraction);
-                        if (h.distance < distToPt - bias) {
-                          visibleSample = false;
-                          profHits++;
-                          break;
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-
-              if (visibleSample) {
-                proj.copy(wp).project(camera);
-                const px = (proj.x * 0.5 + 0.5) * canvas.width;
-                const py = (-proj.y * 0.5 + 0.5) * canvas.height;
-                pts2d.push({ x: px, y: py, ndcZ: proj.z });
-              }
+            // Point is visible if it's in front of the near plane and not behind the far plane.
+            // Z in camera space is negative in front of the camera, so `camPt.z < nearZ`.
+            if (camPt.z < nearZ && camPt.z > farZ) {
+              // point is in front of near and not beyond far -> project normally
+              proj.copy(wp).project(camera);
+              const px = (proj.x * 0.5 + 0.5) * canvas.width;
+              const py = (-proj.y * 0.5 + 0.5) * canvas.height;
+              pts2d.push({ x: px, y: py, ndcZ: proj.z });
             }
           }
 
-          // For edges that cross the near plane, compute intersection point and include it (with occlusion check)
+          // For edges that cross the near plane, compute intersection point and include it
           for (let i = 0; i < worldPoints.length; i++) {
             for (let j = i + 1; j < worldPoints.length; j++) {
               const z1 = camSpacePts[i].z;
               const z2 = camSpacePts[j].z;
 
-              // If one side is in front (<= nearZ) and the other is behind (> nearZ), there's a crossing
-              if ((z1 <= nearZ && z2 > nearZ) || (z2 <= nearZ && z1 > nearZ)) {
+              // If one side is in front (< nearZ) and the other is at or behind (>= nearZ), there's a crossing
+              if ((z1 < nearZ && z2 >= nearZ) || (z2 < nearZ && z1 >= nearZ)) {
                 // Avoid numerical division by zero
                 const denom = (z2 - z1);
                 if (Math.abs(denom) < 1e-9) continue;
@@ -1132,49 +1037,10 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
                 if (t < 0 || t > 1) continue;
                 // Interpolate in world space to get accurate intersection position
                 const ip = worldPoints[i].clone().lerp(worldPoints[j], t);
-
-                // occlusion check for intersection point as well
-                let visibleIp = true;
-                if (occlusionEnabled && occluders.length > 0) {
-                  const dir = ip.clone().sub(camWorldPos);
-                  const distToIp = dir.length();
-                  if (distToIp > 1e-6) {
-                    // cheap filter
-                    const candidateMeshes = [];
-                    for (const oc of occluders) {
-                      if (isDescendant(obj, oc.mesh)) continue;
-                      if (oc.center && oc.radius != null) {
-                        const dOc = camWorldPos.distanceTo(oc.center);
-                        if (dOc - oc.radius > distToIp) continue;
-                      }
-                      candidateMeshes.push(oc.mesh);
-                    }
-                    if (candidateMeshes.length > 0) {
-                      dir.normalize();
-                      raycaster.set(camWorldPos, dir);
-                      const hits = raycaster.intersectObjects(candidateMeshes, true);
-                      profRaycasts++;
-                      if (hits && hits.length) {
-                        for (const h of hits) {
-                          if (isDescendant(obj, h.object)) continue;
-                          const bias = Math.max(occlusionBiasMin, distToIp * occlusionBiasFraction);
-                          if (h.distance < distToIp - bias) {
-                            visibleIp = false;
-                            profHits++;
-                            break;
-                          }
-                        }
-                      }
-                    }
-                  }
-                }
-
-                if (visibleIp) {
-                  proj.copy(ip).project(camera);
-                  const px = (proj.x * 0.5 + 0.5) * canvas.width;
-                  const py = (-proj.y * 0.5 + 0.5) * canvas.height;
-                  pts2d.push({ x: px, y: py, ndcZ: proj.z });
-                }
+                proj.copy(ip).project(camera);
+                const px = (proj.x * 0.5 + 0.5) * canvas.width;
+                const py = (-proj.y * 0.5 + 0.5) * canvas.height;
+                pts2d.push({ x: px, y: py, ndcZ: proj.z });
               }
             }
           }
@@ -1187,7 +1053,7 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
             pts2d.push({ x: px, y: py, ndcZ: proj.z });
           }
 
-          // If after near-plane clipping and occlusion checks we have zero pts, we may still want a fallback marker,
+          // If after near-plane clipping we have zero pts, we may still want a fallback marker,
           // but only if user asked or object is forced to render.
           if (pts2d.length === 0) {
             if (alwaysRender || obj.userData?.forceMarker) {
@@ -1199,7 +1065,7 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
             return;
           }
 
-          // Build convex hull from the collected projected (and visible) points
+          // Build convex hull from the collected projected points
           const hull = convexHull(pts2d);
 
           // If hull is trivial (1 or 2 points), but user forced rendering, make fallback shapes
@@ -1320,14 +1186,7 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
           // nothing
         }
       }
-
-      // profiler logging once per second
-      const now = performance.now();
-      if (now - api._lastProfLogTime > 1000) {
-        if (!api.options.silentProf) console.debug(`[voidEngine] raycasts/sec=${profRaycasts}, occlusionHits=${profHits}, drawables=${drawables.length}`);
-        api._lastProfLogTime = now;
-      }
-    } // end render
+    }
   };
 
   return api;
@@ -3437,6 +3296,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
