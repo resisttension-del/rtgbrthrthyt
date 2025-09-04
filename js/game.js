@@ -865,31 +865,69 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
 
   // Compare two bounding boxes relative to camera to determine draw order
   // Returns: -1 if a before b, 1 if b before a, 0 if ambiguous
-  function compareBoundingBoxes(aBox, bBox, cameraPos) {
-    // Strategy:
-    // If boxes do not overlap in screen space along view axis, order by distance to camera
-    // If overlap, order by near/far along view direction
-    // Approximate view direction as camera forward vector
+function compareBoundingBoxes(aBox, bBox, camera) {
+  // Get camera forward vector safely
+  let cameraForward;
+  if (camera && camera.quaternion && typeof camera.quaternion.clone === 'function') {
+    cameraForward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+  } else if (camera && camera.getWorldDirection) {
+    cameraForward = camera.getWorldDirection(new THREE.Vector3());
+  } else {
+    // fallback forward vector if camera quaternion or method missing
+    cameraForward = new THREE.Vector3(0, 0, -1);
+  }
 
-    // Get camera forward vector
-    const cameraForward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+  // Project centers
+  const cameraPos = camera.position ? camera.position : new THREE.Vector3();
+  const aCenter = aBox.getCenter(new THREE.Vector3());
+  const bCenter = bBox.getCenter(new THREE.Vector3());
 
-    // Project centers
-    const aCenter = aBox.getCenter(new THREE.Vector3());
-    const bCenter = bBox.getCenter(new THREE.Vector3());
+  // Vector from camera to centers
+  const aVec = aCenter.clone().sub(cameraPos);
+  const bVec = bCenter.clone().sub(cameraPos);
 
-    // Vector from camera to centers
-    const aVec = aCenter.clone().sub(cameraPos);
-    const bVec = bCenter.clone().sub(cameraPos);
+  // Distance along camera forward (depth)
+  const aDepth = aVec.dot(cameraForward);
+  const bDepth = bVec.dot(cameraForward);
 
-    // Distance along camera forward (depth)
-    const aDepth = aVec.dot(cameraForward);
-    const bDepth = bVec.dot(cameraForward);
+  // Check screen overlap
+  function getScreenBounds(box) {
+    const points = [
+      new THREE.Vector3(box.min.x, box.min.y, box.min.z),
+      new THREE.Vector3(box.min.x, box.min.y, box.max.z),
+      new THREE.Vector3(box.min.x, box.max.y, box.min.z),
+      new THREE.Vector3(box.min.x, box.max.y, box.max.z),
+      new THREE.Vector3(box.max.x, box.min.y, box.min.z),
+      new THREE.Vector3(box.max.x, box.min.y, box.max.z),
+      new THREE.Vector3(box.max.x, box.max.y, box.min.z),
+      new THREE.Vector3(box.max.x, box.max.y, box.max.z),
+    ];
+    const projected = points.map(p => {
+      const cp = p.clone().project(camera);
+      return { x: cp.x, y: cp.y };
+    });
+    const xs = projected.map(p => p.x);
+    const ys = projected.map(p => p.y);
+    return {
+      minX: Math.min(...xs),
+      maxX: Math.max(...xs),
+      minY: Math.min(...ys),
+      maxY: Math.max(...ys),
+    };
+  }
+  const aScreen = getScreenBounds(aBox);
+  const bScreen = getScreenBounds(bBox);
 
-    // Check if bounding boxes overlap in screen plane (approximate using bounding box projection)
-    // Project bbox corners into camera space to get 2D screen bounds
+  const overlapX = !(aScreen.maxX < bScreen.minX || aScreen.minX > bScreen.maxX);
+  const overlapY = !(aScreen.maxY < bScreen.minY || aScreen.minY > bScreen.maxY);
+  const overlap = overlapX && overlapY;
 
-    function getScreenBounds(box) {
+  if (!overlap) {
+    if (aDepth < bDepth) return 1;
+    if (aDepth > bDepth) return -1;
+    return 0;
+  } else {
+    function minDepth(box) {
       const points = [
         new THREE.Vector3(box.min.x, box.min.y, box.min.z),
         new THREE.Vector3(box.min.x, box.min.y, box.max.z),
@@ -900,64 +938,23 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
         new THREE.Vector3(box.max.x, box.max.y, box.min.z),
         new THREE.Vector3(box.max.x, box.max.y, box.max.z),
       ];
-      const projected = points.map(p => {
-        const cp = p.clone().project(camera);
-        return { x: cp.x, y: cp.y };
-      });
-      const xs = projected.map(p => p.x);
-      const ys = projected.map(p => p.y);
-      return {
-        minX: Math.min(...xs),
-        maxX: Math.max(...xs),
-        minY: Math.min(...ys),
-        maxY: Math.max(...ys),
-      };
-    }
-
-    const aScreen = getScreenBounds(aBox);
-    const bScreen = getScreenBounds(bBox);
-
-    // Check overlap in screen X and Y
-    const overlapX = !(aScreen.maxX < bScreen.minX || aScreen.minX > bScreen.maxX);
-    const overlapY = !(aScreen.maxY < bScreen.minY || aScreen.minY > bScreen.maxY);
-    const overlap = overlapX && overlapY;
-
-    if (!overlap) {
-      // No overlap on screen -> sort by depth (draw farther first)
-      if (aDepth < bDepth) return 1; // b before a
-      if (aDepth > bDepth) return -1; // a before b
-      return 0;
-    } else {
-      // If overlap, order by near-most depth of bbox (min corner along camera forward)
-      // Get min depth of bbox corners along camera forward
-      function minDepth(box) {
-        const points = [
-          new THREE.Vector3(box.min.x, box.min.y, box.min.z),
-          new THREE.Vector3(box.min.x, box.min.y, box.max.z),
-          new THREE.Vector3(box.min.x, box.max.y, box.min.z),
-          new THREE.Vector3(box.min.x, box.max.y, box.max.z),
-          new THREE.Vector3(box.max.x, box.min.y, box.min.z),
-          new THREE.Vector3(box.max.x, box.min.y, box.max.z),
-          new THREE.Vector3(box.max.x, box.max.y, box.min.z),
-          new THREE.Vector3(box.max.x, box.max.y, box.max.z),
-        ];
-        let minD = Infinity;
-        for (const p of points) {
-          const v = p.clone().sub(cameraPos);
-          const d = v.dot(cameraForward);
-          if (d < minD) minD = d;
-        }
-        return minD;
+      let minD = Infinity;
+      for (const p of points) {
+        const v = p.clone().sub(cameraPos);
+        const d = v.dot(cameraForward);
+        if (d < minD) minD = d;
       }
-
-      const aMinDepth = minDepth(aBox);
-      const bMinDepth = minDepth(bBox);
-
-      if (aMinDepth < bMinDepth) return -1; // a closer -> draw last (on top) so a before b means a after b in painter sort
-      if (aMinDepth > bMinDepth) return 1;
-      return 0;
+      return minD;
     }
+
+    const aMinDepth = minDepth(aBox);
+    const bMinDepth = minDepth(bBox);
+
+    if (aMinDepth < bMinDepth) return -1;
+    if (aMinDepth > bMinDepth) return 1;
+    return 0;
   }
+}
 
   const api = {
     domElement: canvas,
@@ -3241,6 +3238,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
