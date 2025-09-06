@@ -860,7 +860,7 @@ export function voidEngine({
   function clearBuffers() {
     ctx.fillStyle = `rgba(${Math.floor(clearColor.r*255)},${Math.floor(clearColor.g*255)},${Math.floor(clearColor.b*255)},${clearColor.a})`;
     ctx.fillRect(0, 0, internalW, internalH);
-    // init depth buffer to far (1.0)
+    // initialize depth to far (1.0)
     for (let i = 0, n = depthBuffer.length; i < n; i++) depthBuffer[i] = 1.0;
   }
 
@@ -940,6 +940,81 @@ export function voidEngine({
     ctx.fill();
   }
 
+  // -------------------------
+  // CULLING & TINY-TRI HELPERS
+  // -------------------------
+  function ensureBoundingSphere(geom) {
+    if (!geom.boundingSphere) geom.computeBoundingSphere();
+  }
+
+  // returns approximate projected pixel radius (in pixels) of the mesh bounding sphere
+  function projectedSphereRadiusPixels(mesh, camera, w, h) {
+    const geom = mesh.geometry;
+    if (!geom) return 0;
+    ensureBoundingSphere(geom);
+    const bs = geom.boundingSphere.clone(); // center in local space
+    // world center
+    const worldCenter = bs.center.clone().applyMatrix4(mesh.matrixWorld);
+
+    // surface point local in +X direction to estimate radius projection
+    const r = bs.radius * (mesh.matrixWorld.getMaxScaleOnAxis ? mesh.matrixWorld.getMaxScaleOnAxis() : 1);
+    const surfaceLocal = bs.center.clone().add(new THREE.Vector3(r, 0, 0));
+    const surfaceWorld = surfaceLocal.applyMatrix4(mesh.matrixWorld);
+
+    const projCenter = worldCenter.clone().project(camera);
+    const projSurface = surfaceWorld.clone().project(camera);
+
+    // if behind camera or out of clip, return 0
+    if (projCenter.z < -1 || projCenter.z > 1) return 0;
+
+    const cx = (projCenter.x * 0.5 + 0.5) * w;
+    const cy = (1 - (projCenter.y * 0.5 + 0.5)) * h;
+    const sx = (projSurface.x * 0.5 + 0.5) * w;
+    const sy = (1 - (projSurface.y * 0.5 + 0.5)) * h;
+
+    return Math.hypot(sx - cx, sy - cy);
+  }
+
+  function shouldRenderMesh(mesh, camera, w, h, options = {}) {
+    const minPixels = options.minPixels ?? 0.9;
+    const maxDistance = options.maxDistance ?? Infinity;
+
+    if (!mesh.visible) return false;
+    const geom = mesh.geometry;
+    if (!geom) return false;
+
+    // quick frustum via bounding sphere if present
+    if (geom.boundingSphere) {
+      const bs = geom.boundingSphere.clone().applyMatrix4(mesh.matrixWorld);
+      if (!sphereInFrustum(bs.center, bs.radius, camera)) return false;
+    } else {
+      // fallback: center projection
+      const c = new THREE.Vector3();
+      mesh.getWorldPosition(c);
+      const proj = c.clone().project(camera);
+      if (proj.z < -1 || proj.z > 1) return false;
+    }
+
+    // distance cull
+    const camPos = new THREE.Vector3(); camera.getWorldPosition(camPos);
+    const worldCenter = geom.boundingSphere ? geom.boundingSphere.center.clone().applyMatrix4(mesh.matrixWorld) : new THREE.Vector3().setFromMatrixPosition(mesh.matrixWorld);
+    const dist = camPos.distanceTo(worldCenter);
+    if (dist > maxDistance) return false;
+
+    // projected size cull
+    const pixelRadius = projectedSphereRadiusPixels(mesh, camera, w, h);
+    if (pixelRadius < minPixels) return false;
+
+    return true;
+  }
+
+  // screen-space triangle area (px^2)
+  function screenTriangleArea(A, B, C) {
+    const ax = B.sx - A.sx, ay = B.sy - A.sy;
+    const bx = C.sx - A.sx, by = C.sy - A.sy;
+    return Math.abs(ax * by - ay * bx) * 0.5;
+  }
+
   // ---------------------------------------
   // New: perspective-correct, single-imageData rasterizer
   // ---------------------------------------
@@ -949,12 +1024,10 @@ export function voidEngine({
     const x1 = B.sx, y1 = B.sy;
     const x2 = C.sx, y2 = C.sy;
 
-    // clipW & ndc z (we stored ndc in .z)
     const invW0 = 1 / (A.clipW || 1e-6);
     const invW1 = 1 / (B.clipW || 1e-6);
     const invW2 = 1 / (C.clipW || 1e-6);
 
-    // attributes * invW
     const z0_w = (A.z) * invW0;
     const z1_w = (B.z) * invW1;
     const z2_w = (C.z) * invW2;
@@ -981,7 +1054,6 @@ export function voidEngine({
         if (!inside) continue;
         const u = w0 / area, v = w1 / area, t = w2 / area;
 
-        // perspective-correct interpolation of invW
         const invW_interp = u*invW0 + v*invW1 + t*invW2;
         if (invW_interp <= 0) continue;
 
@@ -1057,6 +1129,7 @@ export function voidEngine({
       worldPoints.push(center.clone().add(new THREE.Vector3(0, 0, -r)));
     } else if (geom && geom.attributes && geom.attributes.position && geom.attributes.position.count > 0) {
       const posAttr = geom.attributes.position;
+      // sample at most 12 points; caller can change sample density by modifying posAttr.count / step
       const step = Math.max(1, Math.floor(posAttr.count / 12));
       for (let i = 0; i < posAttr.count && worldPoints.length < 12; i += step) {
         tmpVec.set(
@@ -1119,6 +1192,11 @@ export function voidEngine({
       if (!object.isMesh || !object.visible) return;
 
       const mesh = object;
+
+      // ----- NEW: cheap per-mesh skip (frustum + projected size + distance) -----
+      if (!shouldRenderMesh(mesh, camera, internalW, internalH, { minPixels: 0.9, maxDistance: 2500 })) return;
+      // ------------------------------------------------------------------------
+
       const geom = mesh.geometry;
       if (!geom) return;
 
@@ -1224,7 +1302,7 @@ export function voidEngine({
         C.nx = triNormal.x; C.ny = triNormal.y; C.nz = triNormal.z;
       }
 
-      // shade params computed once per mesh use current sceneLight
+      // shade params computed once per mesh using current sceneLight
       const shadeParamsMesh = { lightDir: sceneLight.dir, ambient: sceneLight.ambient, diffuse: sceneLight.diffuse };
 
       const pushTriangle = (i0, i1, i2) => {
@@ -1242,6 +1320,11 @@ export function voidEngine({
         if (A.nx == null || B.nx == null || C.nx == null) {
           computeTriangleNormals(i0, i1, i2);
         }
+
+        // ----- NEW: tiny-triangle rejection (screen-space area) -----
+        const areaPx = screenTriangleArea(A, B, C);
+        if (areaPx < 0.5) return; // tweak threshold (0.5px) as needed
+        // ------------------------------------------------------------
 
         // Determine a painter-friendly depth metric: use the nearest vertex camera-space z (min viewZ)
         const viewDepth = Math.min(A.viewZ, B.viewZ, C.viewZ);
@@ -1385,13 +1468,10 @@ export function voidEngine({
     // painter-mode draw sorted back-to-front using viewDepth (min vertex viewZ) — furthest (more negative) first
     if (mode === "painter") {
       triList.sort((a,b) => {
-        // a.viewDepth and b.viewDepth are camera-space Z (more negative is further)
-        // sort ascending so more negative (further) come first
         return a.viewDepth - b.viewDepth;
       });
       for (let i = 0; i < triList.length; i++) {
         const tri = triList[i];
-        // compute per-triangle normal average for simple lambert shading (keep existing behavior)
         let nx = (tri.A.nx + tri.B.nx + tri.C.nx) / 3;
         let ny = (tri.A.ny + tri.B.ny + tri.C.ny) / 3;
         let nz = (tri.A.nz + tri.B.nz + tri.C.nz) / 3;
@@ -1436,6 +1516,7 @@ export function voidEngine({
     }
   };
 }
+
 
 
 
@@ -3540,6 +3621,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
