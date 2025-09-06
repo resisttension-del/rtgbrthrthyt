@@ -109,6 +109,32 @@ export function voidEngine({ width = 640, height = 360, mode = "painter" } = {})
     return tris;
   }
 
+  // build AABB corners and face index layout for a box given min/max (world-space)
+  function buildBoxFaces(min, max) {
+    // eight corners
+    const v = [
+      new THREE.Vector3(min.x, min.y, min.z), // 0
+      new THREE.Vector3(max.x, min.y, min.z), // 1
+      new THREE.Vector3(max.x, max.y, min.z), // 2
+      new THREE.Vector3(min.x, max.y, min.z), // 3
+      new THREE.Vector3(min.x, min.y, max.z), // 4
+      new THREE.Vector3(max.x, min.y, max.z), // 5
+      new THREE.Vector3(max.x, max.y, max.z), // 6
+      new THREE.Vector3(min.x, max.y, max.z)  // 7
+    ];
+
+    // each face is 4 indices (ordered CCW when looking at the face from outside)
+    const faces = [
+      [4,5,6,7], // +Z (front)
+      [0,1,2,3], // -Z (back)
+      [0,4,5,1], // -Y (bottom)
+      [3,7,6,2], // +Y (top)
+      [1,5,6,2], // +X (right)
+      [0,3,7,4]  // -X (left)
+    ];
+    return { verts: v, faces };
+  }
+
   const api = {
     domElement: canvas,
     setSize(w, h, updateStyle = true) {
@@ -140,8 +166,11 @@ export function voidEngine({ width = 640, height = 360, mode = "painter" } = {})
         ctx.fillRect(0, 0, canvas.width, canvas.height);
       }
 
-      const triangles = [];
+      const facesToDraw = []; // we'll push individual visible faces (screen polys) here
       const sprites = [];
+
+      // simple directional light used to shade box faces (world-space)
+      const lightDir = new THREE.Vector3(1, 1, 0.6).normalize(); // tweakable
 
       scene.traverseVisible((object) => {
         if (object.isMesh && object.visible && object.geometry) {
@@ -161,14 +190,15 @@ export function voidEngine({ width = 640, height = 360, mode = "painter" } = {})
             }
             opacity = m.opacity !== undefined ? m.opacity : 1;
           }
-          const colorCss = `rgba(${Math.round(matColor.r)},${Math.round(matColor.g)},${Math.round(matColor.b)},${opacity})`;
+
+          const colorCssBase = `rgba(${Math.round(matColor.r)},${Math.round(matColor.g)},${Math.round(matColor.b)},${opacity})`;
 
           const index = geometry.index ? geometry.index.array : null;
           const posArray = posAttr.array;
           const itemSize = posAttr.itemSize || 3;
           const count = index ? index.length : posArray.length / itemSize;
 
-          // iterate triangles
+          // iterate triangles (we still iterate triangles to compute per-triangle bounding boxes)
           for (let i = 0; i < count; i += 3) {
             const ai = index ? index[i] : i;
             const bi = index ? index[i+1] : i+1;
@@ -185,95 +215,127 @@ export function voidEngine({ width = 640, height = 360, mode = "painter" } = {})
             const cC = wC.clone().applyMatrix4(camInv);
 
             const near = camera.near || 0.001;
-            const far = camera.far || 1e9;
 
-            // Clip triangle against near plane properly
+            // Clip triangle against near plane properly; if completely clipped skip
             const clippedTris = clipPolygonAgainstNear([wA, wB, wC], [cA, cB, cC], near);
             if (!clippedTris || clippedTris.length === 0) continue;
 
-            // for each resulting triangle, project and add to list with safety checks
+            // For each clipped triangle, create its world-space AABB and render that as a 3D box (cuboid)
             for (let ct = 0; ct < clippedTris.length; ct++) {
               const triW = clippedTris[ct];
-              
-              // 1. Compute camera-space z for sorting
-              const camV0 = triW[0].clone().applyMatrix4(camInv);
-              const camV1 = triW[1].clone().applyMatrix4(camInv);
-              const camV2 = triW[2].clone().applyMatrix4(camInv);
 
-              // compute "farthest" depth as positive distance
-              const depth0 = -camV0.z;
-              const depth1 = -camV1.z;
-              const depth2 = -camV2.z;
-              const farthestDepth = Math.max(depth0, depth1, depth2);
+              // Compute AABB from the triangle's world-space verts
+              const mins = new THREE.Vector3(
+                Math.min(triW[0].x, triW[1].x, triW[2].x),
+                Math.min(triW[0].y, triW[1].y, triW[2].y),
+                Math.min(triW[0].z, triW[1].z, triW[2].z)
+              );
+              const maxs = new THREE.Vector3(
+                Math.max(triW[0].x, triW[1].x, triW[2].x),
+                Math.max(triW[0].y, triW[1].y, triW[2].y),
+                Math.max(triW[0].z, triW[1].z, triW[2].z)
+              );
 
-              // 2. Project to NDC / screen as before
-              const pv0 = triW[0].clone().project(camera);
-              const pv1 = triW[1].clone().project(camera);
-              const pv2 = triW[2].clone().project(camera);
+              // ensure non-zero thickness so box is visible (small epsilon)
+              const eps = 1e-4;
+              if (maxs.x - mins.x < eps) { maxs.x += eps; mins.x -= eps; }
+              if (maxs.y - mins.y < eps) { maxs.y += eps; mins.y -= eps; }
+              if (maxs.z - mins.z < eps) { maxs.z += eps; mins.z -= eps; }
 
-              // drop if any non-finite
-              if (
-                !Number.isFinite(pv0.x) || !Number.isFinite(pv0.y) || !Number.isFinite(pv0.z) ||
-                !Number.isFinite(pv1.x) || !Number.isFinite(pv1.y) || !Number.isFinite(pv1.z) ||
-                !Number.isFinite(pv2.x) || !Number.isFinite(pv2.y) || !Number.isFinite(pv2.z)
-              ) continue;
+              const { verts: boxVerts, faces } = buildBoxFaces(mins, maxs);
 
-              // trivial off-screen test (all verts same side)
-              if (
-                (pv0.x < -1 && pv1.x < -1 && pv2.x < -1) ||
-                (pv0.x > 1 && pv1.x > 1 && pv2.x > 1) ||
-                (pv0.y < -1 && pv1.y < -1 && pv2.y < -1) ||
-                (pv0.y > 1 && pv1.y > 1 && pv2.y > 1) ||
-                (pv0.z < -1 && pv1.z < -1 && pv2.z < -1) ||
-                (pv0.z > 1 && pv1.z > 1 && pv2.z > 1)
-              ) {
-                continue;
-              }
+              // For each face, decide if it's front-facing and project it
+              for (let fi = 0; fi < faces.length; fi++) {
+                const idx = faces[fi];
+                const v0w = boxVerts[idx[0]];
+                const v1w = boxVerts[idx[1]];
+                const v2w = boxVerts[idx[2]];
+                const v3w = boxVerts[idx[3]];
 
-              // convert to screen coords
-              const sxA = (pv0.x * 0.5 + 0.5) * canvas.width;
-              const syA = (-pv0.y * 0.5 + 0.5) * canvas.height;
-              const sxB = (pv1.x * 0.5 + 0.5) * canvas.width;
-              const syB = (-pv1.y * 0.5 + 0.5) * canvas.height;
-              const sxC = (pv2.x * 0.5 + 0.5) * canvas.width;
-              const syC = (-pv2.y * 0.5 + 0.5) * canvas.height;
+                // world-space face normal (outward)
+                const e1 = new THREE.Vector3().subVectors(v1w, v0w);
+                const e2 = new THREE.Vector3().subVectors(v2w, v0w);
+                const faceNormal = new THREE.Vector3().crossVectors(e1, e2).normalize();
 
-              // sanity check coords
-              const MAX_SCREEN_COORD = 1e7;
-              if (
-                !Number.isFinite(sxA) || !Number.isFinite(syA) ||
-                !Number.isFinite(sxB) || !Number.isFinite(syB) ||
-                !Number.isFinite(sxC) || !Number.isFinite(syC) ||
-                Math.abs(sxA) > MAX_SCREEN_COORD || Math.abs(syA) > MAX_SCREEN_COORD ||
-                Math.abs(sxB) > MAX_SCREEN_COORD || Math.abs(syB) > MAX_SCREEN_COORD ||
-                Math.abs(sxC) > MAX_SCREEN_COORD || Math.abs(syC) > MAX_SCREEN_COORD
-              ) {
-                continue;
-              }
+                // face center (world)
+                const center = new THREE.Vector3().addVectors(v0w, v1w).add(v2w).add(v3w).multiplyScalar(0.25);
 
-              // skip degenerate / tiny triangles (keep threshold small since we're using boxes)
-              const ax = sxB - sxA, ay = syB - syA;
-              const bx = sxC - sxA, by = syC - syA;
-              const cross = Math.abs(ax * by - ay * bx);
-              const screenArea = cross * 0.5;
-              if (screenArea < 0.05) continue;
+                // backface cull: check if faceNormal faces the camera
+                const viewVec = new THREE.Vector3().subVectors(camera.position, center).normalize();
+                if (faceNormal.dot(viewVec) <= 0) continue; // face turned away
 
-              // 3. Instead of storing triangle verts for fill, compute bounding box in screen-space
-              const minX = Math.min(sxA, sxB, sxC);
-              const minY = Math.min(syA, syB, syC);
-              const maxX = Math.max(sxA, sxB, sxC);
-              const maxY = Math.max(syA, syB, syC);
+                // project each corner to camera/NDC and screen space
+                const camV0 = v0w.clone().applyMatrix4(camInv);
+                const camV1 = v1w.clone().applyMatrix4(camInv);
+                const camV2 = v2w.clone().applyMatrix4(camInv);
+                const camV3 = v3w.clone().applyMatrix4(camInv);
 
-              triangles.push({
-                // store box in screen coords
-                box: { x: minX, y: minY, w: Math.max(1, maxX - minX), h: Math.max(1, maxY - minY) },
-                // keep color and original material color/opacity for nicer fills
-                color: colorCss,
-                matColor: matColor,
-                opacity: opacity,
-                depth: farthestDepth
-              });
-            } // clipped tris loop
+                // if any vertex is behind near-plane, skip this face (avoid per-face clipping)
+                if (camV0.z > -near || camV1.z > -near || camV2.z > -near || camV3.z > -near) continue;
+
+                // depth for sorting: average camera-space depth (positive)
+                const depth = Math.max(0.000001,
+                  (-camV0.z + -camV1.z + -camV2.z + -camV3.z) * 0.25
+                );
+
+                // project to NDC
+                const pv0 = v0w.clone().project(camera);
+                const pv1 = v1w.clone().project(camera);
+                const pv2 = v2w.clone().project(camera);
+                const pv3 = v3w.clone().project(camera);
+
+                // skip invalid projections
+                if (
+                  !Number.isFinite(pv0.x) || !Number.isFinite(pv0.y) || !Number.isFinite(pv0.z) ||
+                  !Number.isFinite(pv1.x) || !Number.isFinite(pv1.y) || !Number.isFinite(pv1.z) ||
+                  !Number.isFinite(pv2.x) || !Number.isFinite(pv2.y) || !Number.isFinite(pv2.z) ||
+                  !Number.isFinite(pv3.x) || !Number.isFinite(pv3.y) || !Number.isFinite(pv3.z)
+                ) continue;
+
+                // trivial off-screen test if all verts are outside on same side
+                if (
+                  (pv0.x < -1 && pv1.x < -1 && pv2.x < -1 && pv3.x < -1) ||
+                  (pv0.x > 1 && pv1.x > 1 && pv2.x > 1 && pv3.x > 1) ||
+                  (pv0.y < -1 && pv1.y < -1 && pv2.y < -1 && pv3.y < -1) ||
+                  (pv0.y > 1 && pv1.y > 1 && pv2.y > 1 && pv3.y > 1) ||
+                  (pv0.z < -1 && pv1.z < -1 && pv2.z < -1 && pv3.z < -1) ||
+                  (pv0.z > 1 && pv1.z > 1 && pv2.z > 1 && pv3.z > 1)
+                ) {
+                  continue;
+                }
+
+                // convert to screen coords
+                const sx0 = (pv0.x * 0.5 + 0.5) * canvas.width;
+                const sy0 = (-pv0.y * 0.5 + 0.5) * canvas.height;
+                const sx1 = (pv1.x * 0.5 + 0.5) * canvas.width;
+                const sy1 = (-pv1.y * 0.5 + 0.5) * canvas.height;
+                const sx2 = (pv2.x * 0.5 + 0.5) * canvas.width;
+                const sy2 = (-pv2.y * 0.5 + 0.5) * canvas.height;
+                const sx3 = (pv3.x * 0.5 + 0.5) * canvas.width;
+                const sy3 = (-pv3.y * 0.5 + 0.5) * canvas.height;
+
+                // shading: lambert with small ambient
+                const lambert = Math.max(0, faceNormal.dot(lightDir));
+                const intensity = 0.14 + 0.86 * lambert; // ambient + diffuse
+                const shaded = {
+                  r: matColor.r * intensity,
+                  g: matColor.g * intensity,
+                  b: matColor.b * intensity,
+                  a: opacity
+                };
+
+                facesToDraw.push({
+                  pts: [
+                    { x: sx0, y: sy0 },
+                    { x: sx1, y: sy1 },
+                    { x: sx2, y: sy2 },
+                    { x: sx3, y: sy3 }
+                  ],
+                  color: rgbaToCss(shaded),
+                  depth
+                });
+              } // faces loop
+            } // clippedTris loop
           } // triangle iteration
         } // mesh handling
 
@@ -300,30 +362,19 @@ export function voidEngine({ width = 640, height = 360, mode = "painter" } = {})
         }
       }); // traverseVisible
 
-      // 4. Sort boxes by depth (farthest to nearest)
-      triangles.sort((a, b) => b.depth - a.depth);
+      // depth sort faces (farthest -> nearest)
+      facesToDraw.sort((a, b) => b.depth - a.depth);
 
-      // draw bounding boxes (far -> near)
-      for (let t = 0; t < triangles.length; t++) {
-        const tri = triangles[t];
-        const bx = tri.box.x;
-        const by = tri.box.y;
-        const bw = tri.box.w;
-        const bh = tri.box.h;
-
-        // small guard: skip extremely tiny boxes
-        if (bw < 0.5 || bh < 0.5) continue;
-
-        // stroked outline using exact material color & alpha
-        ctx.lineWidth = 1;
-        ctx.strokeStyle = tri.color;
-        ctx.strokeRect(bx, by, bw, bh);
-
-        // light fill to indicate the area (very low alpha, scaled by object opacity)
-        const fillAlpha = Math.max(0.02, Math.min(0.25, tri.opacity * 0.08));
-        const fillCss = rgbaToCss({ r: tri.matColor.r, g: tri.matColor.g, b: tri.matColor.b, a: fillAlpha });
-        ctx.fillStyle = fillCss;
-        ctx.fillRect(bx, by, bw, bh);
+      // draw filled faces (no outlines)
+      for (let i = 0; i < facesToDraw.length; i++) {
+        const f = facesToDraw[i];
+        if (!f || !f.pts || f.pts.length < 3) continue;
+        ctx.beginPath();
+        ctx.moveTo(f.pts[0].x, f.pts[0].y);
+        for (let j = 1; j < f.pts.length; j++) ctx.lineTo(f.pts[j].x, f.pts[j].y);
+        ctx.closePath();
+        ctx.fillStyle = f.color;
+        ctx.fill();
       }
 
       // sprites (far->near)
