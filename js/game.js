@@ -10,7 +10,7 @@ import { CopyShader } from "https://cdn.jsdelivr.net/npm/three@0.152.0/examples/
 import Stats from 'stats.js';
 import { dbRefs, disposeGame, fullCleanup, activeGameId, setupDamageListener } from "./network.js";
 import * as BufferGeometryUtils from 'three/examples/jsm/utils/BufferGeometryUtils.js';
-import { voidEngine } from './VoidEngine';
+import { voidEngine } from './VoidEngine.js';
 import {
     computeBoundsTree,
     disposeBoundsTree,
@@ -2916,6 +2916,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
