@@ -133,9 +133,13 @@ export async function createCrocodilosConstruction(scene, physicsController) {
     sunLight.shadow.camera.far = 200;
     scene.add(sunLight, sunLight.target);
 
-    // URL of the GLB model for the map
-    const GLB_MODEL_URL = 'https://raw.githubusercontent.com/thearthd/3d-models/main/Map/voidffa_temp_map.glb';
-    // 1) Load the GLB model into the scene and process it for collision detection
+
+  //  const GLB_MODEL_URL = 'https://raw.githubusercontent.com/thearthd/3d-models/main/Map/voidffa_temp_map.glb';
+
+    const GLB_MODEL_URL = 'https://raw.githubusercontent.com/thearthd/3d-models/main/Map/newmaptest.glb';
+
+    
+
     let gltfGroup = null;
     let onGLBProgress = () => {};
     const mapLoadPromise = new Promise((resolve, reject) => {
