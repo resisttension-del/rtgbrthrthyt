@@ -1016,162 +1016,226 @@ export function voidEngine({
   }
 
   // Main render function
-  function render(scene, camera) {
-    if (!scene || !camera) return;
-    // clear any cached frustum planes
-    if (camera.___frustumPlanes) delete camera.___frustumPlanes;
+// Fully updated render() function for voidEngine
+function render(scene, camera) {
+  if (!scene || !camera) return;
 
-    clearBuffers();
+  // Clear cached frustum planes so they re-generate per-frame (keeps frustum tests correct)
+  if (camera.___frustumPlanes) delete camera.___frustumPlanes;
 
-    // update world matrices
-    scene.updateMatrixWorld(true);
-    camera.updateMatrixWorld(true);
-    camera.updateProjectionMatrix();
+  // Clear buffers
+  clearBuffers();
 
-    // sample lighting
-    const sceneLight = sampleSceneLight(scene);
+  // Update matrices on Three objects
+  scene.updateMatrixWorld(true);
+  camera.updateMatrixWorld(true);
+  camera.updateProjectionMatrix();
 
-    // compute view-proj matrix elements in Float32Array for speed
-    const viewMat = camera.matrixWorldInverse.elements;
-    const projMat = camera.projectionMatrix.elements;
-    // viewProj = proj * view
-    const viewProj = new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
-    const viewProjE = viewProj.elements;
+  // sample lighting
+  const sceneLight = sampleSceneLight(scene);
 
-    // collect triangles (in painter mode we need tri list to sort; in zbuffer we stream)
-    const triList = [];
+  // viewProj matrix and elements reused
+  const viewProj = new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+  const viewProjE = viewProj.elements;
+  const viewE = camera.matrixWorldInverse.elements;
 
-    // traverse meshes
-    scene.traverse(object => {
-      if (!object.isMesh || !object.visible) return;
+  // collector for painter-mode triangles
+  const triList = [];
 
-      const mesh = object;
-      const geom = mesh.geometry;
-      if (!geom) return;
+  // traverse meshes in the scene
+  scene.traverse(object => {
+    if (!object.isMesh || !object.visible) return;
 
-      // geometry: BufferGeometry expected
-      const posAttr = geom.attributes.position;
-      if (!posAttr) return;
-      const idxAttr = geom.index;
-      const normalAttr = geom.attributes.normal;
+    const mesh = object;
+    const geom = mesh.geometry;
+    if (!geom) return;
 
-      // bounding sphere frustum culling
-      if (geom.boundingSphere) {
-        const bs = geom.boundingSphere.clone();
-        bs.applyMatrix4(mesh.matrixWorld);
-        if (!sphereInFrustum(bs.center, bs.radius, camera)) return;
-      }
+    const posAttr = geom.attributes.position;
+    if (!posAttr) return;
+    const idxAttr = geom.index;
+    const normalAttr = geom.attributes.normal;
 
-      // get material color
-      let matColor = { r: 200, g: 200, b: 200 };
-      if (mesh.material) {
-        if (mesh.material.color) {
-          matColor = {
-            r: Math.floor((mesh.material.color.r || 1) * 255),
-            g: Math.floor((mesh.material.color.g || 1) * 255),
-            b: Math.floor((mesh.material.color.b || 1) * 255)
-          };
-        } else if (mesh.userData && mesh.userData.color) {
-          const c = mesh.userData.color;
-          matColor = { r: (c >> 16) & 255, g: (c >> 8) & 255, b: c & 255 };
-        }
-      }
+    // bounding sphere frustum culling (if present)
+    if (geom.boundingSphere) {
+      const bs = geom.boundingSphere.clone();
+      bs.applyMatrix4(mesh.matrixWorld);
+      if (!sphereInFrustum(bs.center, bs.radius, camera)) return;
+    }
 
-      // extract positions into JS array of vec3
-      const posArray = posAttr.array;
-      const normalArray = normalAttr ? normalAttr.array : null;
-      const indexArray = idxAttr ? idxAttr.array : null;
-
-      // prepare model matrix
-      const modelMat = mesh.matrixWorld.elements;
-
-      // project all vertices to clip/ndc/screen once to reuse
-      const vcount = posAttr.count;
-      const projected = new Array(vcount);
-      for (let i = 0; i < vcount; i++) {
-        const px = posArray[i*3 + 0];
-        const py = posArray[i*3 + 1];
-        const pz = posArray[i*3 + 2];
-        // model space -> world space -> view-proj
-        const world = transformVec4(modelMat, [px, py, pz, 1]);
-        const clip = transformVec4(viewProjE, world);
-        // if w is zero skip (shouldn't happen)
-        const w = clip[3] || 1e-6;
-        const ndcX = clip[0] / w;
-        const ndcY = clip[1] / w;
-        const ndcZ = clip[2] / w; // in clip space range [-1,1]
-        const [sx, sy] = toScreen(ndcX, ndcY);
-        // world normal transform (approx): transform by normalMatrix (use modelMat upper-left)
-        let nx = 0, ny = 0, nz = 1;
-        if (normalArray) {
-          nx = normalArray[i*3 + 0];
-          ny = normalArray[i*3 + 1];
-          nz = normalArray[i*3 + 2];
-          // transform normal by inverse-transpose of modelMat (approx by ignoring scale)
-          // Using modelMat upper-left 3x3
-          const nmx = modelMat[0]*nx + modelMat[4]*ny + modelMat[8]*nz;
-          const nmy = modelMat[1]*nx + modelMat[5]*ny + modelMat[9]*nz;
-          const nmz = modelMat[2]*nx + modelMat[6]*ny + modelMat[10]*nz;
-          const len = Math.hypot(nmx, nmy, nmz) || 1;
-          nx = nmx / len; ny = nmy / len; nz = nmz / len;
-        }
-        projected[i] = { sx, sy, z: ndcZ, ndcZclip: clip[2] / w, nx, ny, nz, world: new THREE.Vector3(world[0], world[1], world[2]) };
-      }
-
-      // iterate triangles
-      const pushTriangle = (i0, i1, i2) => {
-        const A = projected[i0], B = projected[i1], C = projected[i2];
-        // trivial clip check: if all vertices w behind near plane? simple check using ndcZ maybe skip triangles completely outside [-1,1] z? keep for now
-        // backface cull in screen space:
-        const cross = (B.sx - A.sx)*(C.sy - A.sy) - (B.sy - A.sy)*(C.sx - A.sx);
-        if (cross >= 0) return; // cull clockwise (assuming canvas Y-down)
-        if (mode === "painter") {
-          const avgDepth = (A.z + B.z + C.z) / 3.0;
-          triList.push({ A, B, C, avgDepth, color: matColor, mesh });
-        } else {
-          // zbuffer: rasterize immediately
-          const shadeParams = { lightDir: sceneLight.dir, ambient: sceneLight.ambient, diffuse: sceneLight.diffuse };
-          // convert to structure expected by rasterizer
-          const a = { x: A.sx, y: A.sy, z: A.z, nx: A.nx, ny: A.ny, nz: A.nz };
-          const b = { x: B.sx, y: B.sy, z: B.z, nx: B.nx, ny: B.ny, nz: B.nz };
-          const c = { x: C.sx, y: C.sy, z: C.z, nx: C.nx, ny: C.ny, nz: C.nz };
-          rasterizeTriangleZ(a, b, c, matColor, shadeParams);
-        }
-      };
-
-      if (indexArray) {
-        for (let t = 0; t < indexArray.length; t += 3) {
-          pushTriangle(indexArray[t], indexArray[t+1], indexArray[t+2]);
-        }
-      } else {
-        // non-indexed
-        for (let t = 0; t < vcount; t += 3) {
-          pushTriangle(t, t+1, t+2);
-        }
-      }
-    });
-
-    // painter mode final draw sorted back-to-front
-    if (mode === "painter") {
-      triList.sort((a,b) => b.avgDepth - a.avgDepth); // furthest first
-      for (let i = 0; i < triList.length; i++) {
-        const tri = triList[i];
-        // compute simple shading per-triangle using surface normal average
-        let nx = (tri.A.nx + tri.B.nx + tri.C.nx) / 3;
-        let ny = (tri.A.ny + tri.B.ny + tri.C.ny) / 3;
-        let nz = (tri.A.nz + tri.B.nz + tri.C.nz) / 3;
-        const L = sceneLight.dir;
-        const dot = Math.max(0, nx*L.x + ny*L.y + nz*L.z);
-        const intensity = sceneLight.ambient + sceneLight.diffuse * dot;
-        const r = Math.max(0, Math.min(255, Math.floor(tri.color.r * intensity)));
-        const g = Math.max(0, Math.min(255, Math.floor(tri.color.g * intensity)));
-        const b = Math.max(0, Math.min(255, Math.floor(tri.color.b * intensity)));
-        drawTrianglePainter([tri.A.sx, tri.A.sy], [tri.B.sx, tri.B.sy], [tri.C.sx, tri.C.sy], `rgb(${r},${g},${b})`);
+    // material color fallback
+    let matColor = { r: 200, g: 200, b: 200 };
+    if (mesh.material) {
+      if (mesh.material.color) {
+        matColor = {
+          r: Math.floor((mesh.material.color.r || 1) * 255),
+          g: Math.floor((mesh.material.color.g || 1) * 255),
+          b: Math.floor((mesh.material.color.b || 1) * 255)
+        };
+      } else if (mesh.userData && mesh.userData.color) {
+        const c = mesh.userData.color;
+        matColor = { r: (c >> 16) & 255, g: (c >> 8) & 255, b: c & 255 };
       }
     }
 
-    // done
+    // prepare arrays
+    const posArray = posAttr.array;
+    const normalArray = normalAttr ? normalAttr.array : null;
+    const indexArray = idxAttr ? idxAttr.array : null;
+    const vcount = posAttr.count;
+
+    // precompute model matrix elements and normal transform areas
+    const modelMat = mesh.matrixWorld.elements;
+
+    // project vertices and store clip.w and camera-space z
+    const projected = new Array(vcount);
+    for (let i = 0; i < vcount; i++) {
+      const px = posArray[i*3 + 0];
+      const py = posArray[i*3 + 1];
+      const pz = posArray[i*3 + 2];
+
+      // world coordinates
+      const world = transformVec4(modelMat, [px, py, pz, 1]); // [wx,wy,wz,ww]
+
+      // camera-space (view) coordinates: view = V * world
+      const view = transformVec4(viewE, world);
+
+      // clip coordinates: clip = P * view * world
+      const clip = transformVec4(viewProjE, world);
+      const w = clip[3] || 1e-9;
+      const clipW = clip[3];
+
+      const ndcX = clip[0] / w;
+      const ndcY = clip[1] / w;
+      const ndcZ = clip[2] / w; // NDC z in [-1..1]
+
+      const [sx, sy] = toScreen(ndcX, ndcY);
+
+      // normals: transform if present, else mark null so we compute per-triangle later
+      let nx = null, ny = null, nz = null;
+      if (normalArray) {
+        nx = normalArray[i*3 + 0];
+        ny = normalArray[i*3 + 1];
+        nz = normalArray[i*3 + 2];
+        // transform normal by model upper-left 3x3 (approx)
+        const nmx = modelMat[0]*nx + modelMat[4]*ny + modelMat[8]*nz;
+        const nmy = modelMat[1]*nx + modelMat[5]*ny + modelMat[9]*nz;
+        const nmz = modelMat[2]*nx + modelMat[6]*ny + modelMat[10]*nz;
+        const len = Math.hypot(nmx, nmy, nmz) || 1;
+        nx = nmx / len; ny = nmy / len; nz = nmz / len;
+      }
+
+      projected[i] = {
+        sx, sy,
+        ndcZ,
+        z: ndcZ,
+        clipW,
+        viewZ: view[2],
+        nx, ny, nz,
+        world: new THREE.Vector3(world[0], world[1], world[2])
+      };
+    }
+
+    // determine if model world transform flips winding (negative determinant)
+    let flipCulling = false;
+    try {
+      const m3 = new THREE.Matrix3().setFromMatrix4(mesh.matrixWorld);
+      // try THREE determinant if available, else fallback manual
+      const det = (m3.determinant) ? m3.determinant() : (
+        m3.elements[0]*m3.elements[4]*m3.elements[8] -
+        m3.elements[0]*m3.elements[5]*m3.elements[7] -
+        m3.elements[1]*m3.elements[3]*m3.elements[8] +
+        m3.elements[1]*m3.elements[5]*m3.elements[6] +
+        m3.elements[2]*m3.elements[3]*m3.elements[7] -
+        m3.elements[2]*m3.elements[4]*m3.elements[6]
+      );
+      flipCulling = (det < 0);
+    } catch (e) {
+      flipCulling = false;
+    }
+
+    // helper to compute triangle normals (world-space) if normals missing
+    function computeTriangleNormals(ia, ib, ic) {
+      const A = projected[ia], B = projected[ib], C = projected[ic];
+      const vA = new THREE.Vector3().copy(A.world);
+      const vB = new THREE.Vector3().copy(B.world);
+      const vC = new THREE.Vector3().copy(C.world);
+      const e1 = vB.clone().sub(vA);
+      const e2 = vC.clone().sub(vA);
+      const triNormal = e1.cross(e2).normalize();
+      A.nx = triNormal.x; A.ny = triNormal.y; A.nz = triNormal.z;
+      B.nx = triNormal.x; B.ny = triNormal.y; B.nz = triNormal.z;
+      C.nx = triNormal.x; C.ny = triNormal.y; C.nz = triNormal.z;
+    }
+
+    // triangle push with safety checks
+    const pushTriangle = (i0, i1, i2) => {
+      const A = projected[i0], B = projected[i1], C = projected[i2];
+
+      // 1) If ALL three clipW <= 0 then triangle is fully behind camera -> skip
+      if (A.clipW <= 0 && B.clipW <= 0 && C.clipW <= 0) return;
+
+      // 2) Conservative fallback: if ANY clipW <= 0 then triangle crosses near plane -> skip (prevents exploding verts)
+      // If you want perfect rendering, replace this with clip-to-near-plane logic.
+      if (A.clipW <= 0 || B.clipW <= 0 || C.clipW <= 0) {
+        return;
+      }
+
+      // 3) Backface culling in screen space
+      const cross = (B.sx - A.sx)*(C.sy - A.sy) - (B.sy - A.sy)*(C.sx - A.sx);
+      const cull = (flipCulling ? (cross <= 0) : (cross >= 0));
+      if (cull) return;
+
+      // 4) Ensure normals exist (compute per-triangle if missing)
+      if (A.nx === null || B.nx === null || C.nx === null) {
+        computeTriangleNormals(i0, i1, i2);
+      }
+
+      if (mode === "painter") {
+        const avgDepth = (A.z + B.z + C.z) / 3.0;
+        triList.push({ A, B, C, avgDepth, color: matColor, mesh });
+      } else {
+        const shadeParams = { lightDir: sceneLight.dir, ambient: sceneLight.ambient, diffuse: sceneLight.diffuse };
+        const a = { x: A.sx, y: A.sy, z: A.z, nx: A.nx, ny: A.ny, nz: A.nz };
+        const b = { x: B.sx, y: B.sy, z: B.z, nx: B.nx, ny: B.ny, nz: B.nz };
+        const c = { x: C.sx, y: C.sy, z: C.z, nx: C.nx, ny: C.ny, nz: C.nz };
+        rasterizeTriangleZ(a, b, c, matColor, shadeParams);
+      }
+    };
+
+    // iterate triangles (indexed or sequential)
+    if (indexArray) {
+      for (let t = 0; t < indexArray.length; t += 3) {
+        pushTriangle(indexArray[t], indexArray[t+1], indexArray[t+2]);
+      }
+    } else {
+      for (let t = 0; t < vcount; t += 3) {
+        pushTriangle(t, t+1, t+2);
+      }
+    }
+  }); // end scene.traverse
+
+  // painter-mode: sort back-to-front and draw
+  if (mode === "painter") {
+    triList.sort((a,b) => b.avgDepth - a.avgDepth);
+    for (let i = 0; i < triList.length; i++) {
+      const tri = triList[i];
+      // per-triangle normal average for simple lambert shading
+      let nx = (tri.A.nx + tri.B.nx + tri.C.nx) / 3;
+      let ny = (tri.A.ny + tri.B.ny + tri.C.ny) / 3;
+      let nz = (tri.A.nz + tri.B.nz + tri.C.nz) / 3;
+      const L = sceneLight.dir;
+      const dot = Math.max(0, nx*L.x + ny*L.y + nz*L.z);
+      const intensity = sceneLight.ambient + sceneLight.diffuse * dot;
+      const r = Math.max(0, Math.min(255, Math.floor(tri.color.r * intensity)));
+      const g = Math.max(0, Math.min(255, Math.floor(tri.color.g * intensity)));
+      const b = Math.max(0, Math.min(255, Math.floor(tri.color.b * intensity)));
+      drawTrianglePainter([tri.A.sx, tri.A.sy], [tri.B.sx, tri.B.sy], [tri.C.sx, tri.C.sy], `rgb(${r},${g},${b})`);
+    }
   }
+
+  // finished frame render
+}
+
 
   // Exposed API
   return {
@@ -3292,6 +3356,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
