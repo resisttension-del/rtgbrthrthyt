@@ -835,7 +835,6 @@ export function voidEngine({ width = 640, height = 360, mode = "painter" } = {})
   const vA = new THREE.Vector3();
   const vB = new THREE.Vector3();
   const vC = new THREE.Vector3();
-  const worldPos = new THREE.Vector3();
 
   // Helper: convert hex to rgba object
   function hexToRgba(hex, alpha = 1) {
@@ -867,176 +866,169 @@ export function voidEngine({ width = 640, height = 360, mode = "painter" } = {})
       clearColor = hexToRgba(hex, alpha);
     },
     // main render call: simple painter algorithm
-render(scene, camera) {
-  if (!scene || !camera) return;
+    render(scene, camera) {
+      if (!scene || !camera) return;
 
-  scene.updateMatrixWorld(true);
-  camera.updateMatrixWorld(true);
+      scene.updateMatrixWorld(true);
+      camera.updateMatrixWorld(true);
 
-  // prepare frustum for quick object culling
-  const projScreenMatrix = new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
-  const frustum = new THREE.Frustum().setFromProjectionMatrix(projScreenMatrix);
+      // prepare frustum for quick object culling
+      const projScreenMatrix = new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+      const frustum = new THREE.Frustum().setFromProjectionMatrix(projScreenMatrix);
 
-  // clear
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  if (clearColor.a > 0) {
-    ctx.fillStyle = rgbaToCss(clearColor);
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-  }
-
-  const triangles = [];
-  const sprites = [];
-
-  // traverse scene but skip invisible quickly
-  scene.traverse((object) => {
-    if (!object.visible) return;
-
-    // skip non-triangle primitives that would produce stray "vertices"
-    if (object.isPoints || object.isLine || object.isLineSegments) return;
-
-    if (object.isSprite && object.visible) {
-      // sprite handling (unchanged)
-      object.updateMatrixWorld(true);
-      const wp = new THREE.Vector3();
-      object.getWorldPosition(wp);
-      wp.project(camera);
-      if (wp.x < -1 || wp.x > 1 || wp.y < -1 || wp.y > 1 || wp.z < -1 || wp.z > 1) return;
-      const sx = (wp.x * 0.5 + 0.5) * canvas.width;
-      const sy = (-wp.y * 0.5 + 0.5) * canvas.height;
-      const scale = object.scale ? (object.scale.x || 1) : 1;
-      let sizePx = 32 * scale;
-      if (camera.isPerspectiveCamera) {
-        const dist = object.getWorldPosition(new THREE.Vector3()).distanceTo(camera.getWorldPosition(new THREE.Vector3()));
-        sizePx = Math.max(4, sizePx / Math.max(0.001, dist * 0.1));
+      // clear
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      if (clearColor.a > 0) {
+        ctx.fillStyle = rgbaToCss(clearColor);
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
       }
-      sprites.push({ x: sx, y: sy, size: sizePx, material: object.material, depth: wp.z });
-      return;
-    }
 
-    // Mesh handling: ensure geometry and positions exist
-    if (object.isMesh && object.geometry && object.visible) {
-      const geometry = object.geometry;
-      const posAttr = geometry.attributes && geometry.attributes.position;
-      if (!posAttr) return;
-      if (posAttr.itemSize !== 3) return; // require 3 components per vertex
+      const triangles = [];
+      const sprites = [];
 
-      // Quick frustum culling using boundingSphere
-      if (!geometry.boundingSphere) geometry.computeBoundingSphere();
-      const sphere = geometry.boundingSphere.clone().applyMatrix4(object.matrixWorld);
-      if (!frustum.intersectsSphere(sphere)) return;
+      // traverse scene but skip invisible quickly
+      scene.traverse((object) => {
+        if (!object.visible) return;
 
-      object.updateMatrixWorld(true);
+        // Skip non-Mesh and non-Sprite objects
+        if (!object.isMesh && !object.isSprite) return;
 
-      // material color fallback
-      let matColor = { r: 255, g: 255, b: 255, a: 1 };
-      let opacity = 1;
-      if (object.material) {
-        const m = object.material;
-        if (m.color && m.color.isColor) matColor = { r: m.color.r * 255, g: m.color.g * 255, b: m.color.b * 255, a: 1 };
-        opacity = m.opacity !== undefined ? m.opacity : 1;
-      }
-      const colorCss = `rgba(${Math.round(matColor.r)},${Math.round(matColor.g)},${Math.round(matColor.b)},${opacity})`;
-
-      const indexAttr = geometry.index;
-      const indexArray = indexAttr ? indexAttr.array : null;
-      const posArray = posAttr.array;
-      const itemSize = posAttr.itemSize; // 3
-      const totalVerts = posArray.length / itemSize;
-
-      // determine triangle count robustly (floor to avoid stray vertex)
-      const triCount = indexArray ? Math.floor(indexArray.length / 3) : Math.floor(totalVerts / 3);
-
-      for (let t = 0; t < triCount; t++) {
-        // handle indexed and non-indexed uniformly
-        const ai = indexArray ? indexArray[t * 3] : t * 3;
-        const bi = indexArray ? indexArray[t * 3 + 1] : t * 3 + 1;
-        const ci = indexArray ? indexArray[t * 3 + 2] : t * 3 + 2;
-
-        // basic defensive checks
-        if (ai < 0 || bi < 0 || ci < 0 || ai >= totalVerts || bi >= totalVerts || ci >= totalVerts) continue;
-
-        vA.fromArray(posArray, ai * itemSize).applyMatrix4(object.matrixWorld);
-        vB.fromArray(posArray, bi * itemSize).applyMatrix4(object.matrixWorld);
-        vC.fromArray(posArray, ci * itemSize).applyMatrix4(object.matrixWorld);
-
-        // project to clip space
-        vA.project(camera);
-        vB.project(camera);
-        vC.project(camera);
-
-        // quick reject if any coordinate is NaN/Inf
-        const bad =
-          !isFinite(vA.x) || !isFinite(vA.y) || !isFinite(vA.z) ||
-          !isFinite(vB.x) || !isFinite(vB.y) || !isFinite(vB.z) ||
-          !isFinite(vC.x) || !isFinite(vC.y) || !isFinite(vC.z);
-        if (bad) continue;
-
-        // cull triangles that are fully outside clip volume
-        if (
-          (vA.x < -1 && vB.x < -1 && vC.x < -1) ||
-          (vA.x > 1 && vB.x > 1 && vC.x > 1) ||
-          (vA.y < -1 && vB.y < -1 && vC.y < -1) ||
-          (vA.y > 1 && vB.y > 1 && vC.y > 1) ||
-          (vA.z < -1 && vB.z < -1 && vC.z < -1) ||
-          (vA.z > 1 && vB.z > 1 && vC.z > 1)
-        ) {
-          continue;
+        if (object.isSprite) {
+          object.updateMatrixWorld(true);
+          const wp = new THREE.Vector3();
+          object.getWorldPosition(wp);
+          wp.project(camera);
+          if (wp.x < -1 || wp.x > 1 || wp.y < -1 || wp.y > 1 || wp.z < -1 || wp.z > 1) return;
+          const sx = (wp.x * 0.5 + 0.5) * canvas.width;
+          const sy = (-wp.y * 0.5 + 0.5) * canvas.height;
+          const scale = object.scale ? (object.scale.x || 1) : 1;
+          let sizePx = 32 * scale;
+          if (camera.isPerspectiveCamera) {
+            const dist = object.getWorldPosition(new THREE.Vector3()).distanceTo(camera.getWorldPosition(new THREE.Vector3()));
+            sizePx = Math.max(4, sizePx / Math.max(0.001, dist * 0.1));
+          }
+          sprites.push({ x: sx, y: sy, size: sizePx, material: object.material, depth: wp.z });
+          return;
         }
 
-        // convert to screen coords (defensive clamp for extremely large values)
-        const sxA = (vA.x * 0.5 + 0.5) * canvas.width;
-        const syA = (-vA.y * 0.5 + 0.5) * canvas.height;
-        const sxB = (vB.x * 0.5 + 0.5) * canvas.width;
-        const syB = (-vB.y * 0.5 + 0.5) * canvas.height;
-        const sxC = (vC.x * 0.5 + 0.5) * canvas.width;
-        const syC = (-vC.y * 0.5 + 0.5) * canvas.height;
+        // Mesh handling: ensure geometry and positions exist
+        if (object.isMesh && object.geometry) {
+          const geometry = object.geometry;
+          const posAttr = geometry.attributes && geometry.attributes.position;
+          if (!posAttr || posAttr.itemSize !== 3) return; // require 3 components per vertex
 
-        // skip triangles with insane screen coords (projection artifacts)
-        const maxAllowed = Math.max(canvas.width, canvas.height) * 10;
-        if (
-          Math.abs(sxA) > maxAllowed || Math.abs(syA) > maxAllowed ||
-          Math.abs(sxB) > maxAllowed || Math.abs(syB) > maxAllowed ||
-          Math.abs(sxC) > maxAllowed || Math.abs(syC) > maxAllowed
-        ) continue;
+          // Quick frustum culling using boundingSphere
+          if (!geometry.boundingSphere) geometry.computeBoundingSphere();
+          const sphere = geometry.boundingSphere.clone().applyMatrix4(object.matrixWorld);
+          if (!frustum.intersectsSphere(sphere)) return;
 
-        const avgZ = (vA.z + vB.z + vC.z) / 3;
-        triangles.push({
-          pts: [{ x: sxA, y: syA, z: vA.z }, { x: sxB, y: syB, z: vB.z }, { x: sxC, y: syC, z: vC.z }],
-          color: colorCss,
-          avgZ,
-        });
-      } // tri loop
-    } // isMesh
-  }); // traverse
+          object.updateMatrixWorld(true);
 
-  triangles.sort((a, b) => b.avgZ - a.avgZ);
-  for (let i = 0; i < triangles.length; i++) {
-    const tri = triangles[i];
-    const p0 = tri.pts[0], p1 = tri.pts[1], p2 = tri.pts[2];
-    ctx.beginPath();
-    ctx.moveTo(p0.x, p0.y);
-    ctx.lineTo(p1.x, p1.y);
-    ctx.lineTo(p2.x, p2.y);
-    ctx.closePath();
-    ctx.fillStyle = tri.color;
-    ctx.fill();
-  }
+          // material color fallback
+          let matColor = { r: 255, g: 255, b: 255, a: 1 };
+          let opacity = 1;
+          if (object.material) {
+            const m = object.material;
+            if (m.color && m.color.isColor) matColor = { r: m.color.r * 255, g: m.color.g * 255, b: m.color.b * 255, a: 1 };
+            opacity = m.opacity !== undefined ? m.opacity : 1;
+          }
+          const colorCss = `rgba(${Math.round(matColor.r)},${Math.round(matColor.g)},${Math.round(matColor.b)},${opacity})`;
 
-  sprites.sort((a, b) => b.depth - a.depth);
-  for (let s = 0; s < sprites.length; s++) {
-    const sp = sprites[s], mat = sp.material, half = sp.size * 0.5;
-    if (mat && mat.map && mat.map.image) {
-      try { ctx.drawImage(mat.map.image, sp.x - half, sp.y - half, sp.size, sp.size); } catch (e) {
-        ctx.fillStyle = (mat.color && mat.color.isColor) ? `rgba(${Math.round(mat.color.r*255)},${Math.round(mat.color.g*255)},${Math.round(mat.color.b*255)},${mat.opacity!==undefined?mat.opacity:1})` : "#fff";
-        ctx.fillRect(sp.x - half, sp.y - half, sp.size, sp.size);
+          const indexAttr = geometry.index;
+          const indexArray = indexAttr ? indexAttr.array : null;
+          const posArray = posAttr.array;
+          const totalVerts = posArray.length / posAttr.itemSize;
+          const totalIndices = indexArray ? indexArray.length : totalVerts;
+          const triCount = Math.floor(totalIndices / 3);
+
+          for (let t = 0; t < triCount; t++) {
+            const iA = t * 3, iB = iA + 1, iC = iA + 2;
+            const ai = indexArray ? indexArray[iA] : iA;
+            const bi = indexArray ? indexArray[iB] : iB;
+            const ci = indexArray ? indexArray[iC] : iC;
+
+            // Basic defensive checks against invalid indices
+            if (ai < 0 || bi < 0 || ci < 0 || ai >= totalVerts || bi >= totalVerts || ci >= totalVerts) continue;
+
+            vA.fromArray(posArray, ai * 3).applyMatrix4(object.matrixWorld);
+            vB.fromArray(posArray, bi * 3).applyMatrix4(object.matrixWorld);
+            vC.fromArray(posArray, ci * 3).applyMatrix4(object.matrixWorld);
+
+            // Project to clip space
+            vA.project(camera);
+            vB.project(camera);
+            vC.project(camera);
+
+            // Robust check for invalid projected vertices (NaN/Infinity)
+            if (
+              !isFinite(vA.x) || !isFinite(vA.y) || !isFinite(vA.z) ||
+              !isFinite(vB.x) || !isFinite(vB.y) || !isFinite(vB.z) ||
+              !isFinite(vC.x) || !isFinite(vC.y) || !isFinite(vC.z)
+            ) continue;
+
+            // Check if all three vertices are completely outside the clip volume
+            if (
+              (vA.x < -1 && vB.x < -1 && vC.x < -1) || (vA.x > 1 && vB.x > 1 && vC.x > 1) ||
+              (vA.y < -1 && vB.y < -1 && vC.y < -1) || (vA.y > 1 && vB.y > 1 && vC.y > 1) ||
+              (vA.z < -1 && vB.z < -1 && vC.z < -1) || (vA.z > 1 && vB.z > 1 && vC.z > 1)
+            ) {
+              continue;
+            }
+
+            // Convert to screen coords
+            const sxA = (vA.x * 0.5 + 0.5) * canvas.width;
+            const syA = (-vA.y * 0.5 + 0.5) * canvas.height;
+            const sxB = (vB.x * 0.5 + 0.5) * canvas.width;
+            const syB = (-vB.y * 0.5 + 0.5) * canvas.height;
+            const sxC = (vC.x * 0.5 + 0.5) * canvas.width;
+            const syC = (-vC.y * 0.5 + 0.5) * canvas.height;
+
+            // Add the valid triangle to our render list
+            const avgZ = (vA.z + vB.z + vC.z) / 3;
+            triangles.push({
+              pts: [{ x: sxA, y: syA, z: vA.z }, { x: sxB, y: syB, z: vB.z }, { x: sxC, y: syC, z: vC.z }],
+              color: colorCss,
+              avgZ,
+            });
+          } // tri loop
+        } // isMesh
+      }); // traverse
+
+      // Sort and draw triangles
+      triangles.sort((a, b) => b.avgZ - a.avgZ);
+      for (let i = 0; i < triangles.length; i++) {
+        const tri = triangles[i];
+        const p0 = tri.pts[0], p1 = tri.pts[1], p2 = tri.pts[2];
+        ctx.beginPath();
+        ctx.moveTo(p0.x, p0.y);
+        ctx.lineTo(p1.x, p1.y);
+        ctx.lineTo(p2.x, p2.y);
+        ctx.closePath();
+        ctx.fillStyle = tri.color;
+        ctx.fill();
       }
-    } else {
-      let colorCss = "#ffffff";
-      if (mat && mat.color && mat.color.isColor) colorCss = `rgba(${Math.round(mat.color.r*255)},${Math.round(mat.color.g*255)},${Math.round(mat.color.b*255)},${mat.opacity!==undefined?mat.opacity:1})`;
-      ctx.beginPath(); ctx.fillStyle = colorCss; ctx.arc(sp.x, sp.y, Math.max(1, half), 0, Math.PI*2); ctx.fill();
-    }
-  }
-},
+
+      // Sort and draw sprites
+      sprites.sort((a, b) => b.depth - a.depth);
+      for (let s = 0; s < sprites.length; s++) {
+        const sp = sprites[s], mat = sp.material, half = sp.size * 0.5;
+        if (mat && mat.map && mat.map.image) {
+          try {
+            ctx.drawImage(mat.map.image, sp.x - half, sp.y - half, sp.size, sp.size);
+          } catch (e) {
+            ctx.fillStyle = (mat.color && mat.color.isColor) ? `rgba(${Math.round(mat.color.r * 255)},${Math.round(mat.color.g * 255)},${Math.round(mat.color.b * 255)},${mat.opacity !== undefined ? mat.opacity : 1})` : "#fff";
+            ctx.fillRect(sp.x - half, sp.y - half, sp.size, sp.size);
+          }
+        } else {
+          let colorCss = "#ffffff";
+          if (mat && mat.color && mat.color.isColor) colorCss = `rgba(${Math.round(mat.color.r * 255)},${Math.round(mat.color.g * 255)},${Math.round(mat.color.b * 255)},${mat.opacity !== undefined ? mat.opacity : 1})`;
+          ctx.beginPath();
+          ctx.fillStyle = colorCss;
+          ctx.arc(sp.x, sp.y, Math.max(1, half), 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+    },
 
     // tiny utility
     dispose() {
