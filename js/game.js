@@ -812,709 +812,262 @@ function setupDetailToggle() {
 
 
 
-export function voidEngine({
-  width = 640,
-  height = 360,
-  mode = "painter", // "painter" (fast) or "zbuffer" (correcter, slower)
-  pixelRatio = 1 // scale internal buffer if needed
-} = {}) {
-  // --- DOM + buffers ---
+// voidEngine.js
+// Minimal CPU canvas renderer for THREE scenes (painter-style triangle rasterization).
+// Supports: THREE.Mesh (filled triangles using MeshBasicMaterial.color), THREE.Sprite (simple quad or image).
+// Exposes: domElement (canvas), setSize(w,h,updateStyle=true), setClearColor(hex,alpha),
+//          render(scene,camera), dispose()
+
+export function voidEngine({ width = 640, height = 360, mode = "painter" } = {}) {
+  // --- Canvas setup ---
   const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
   canvas.style.display = "block";
-  canvas.width = Math.max(1, Math.floor(width * pixelRatio));
-  canvas.height = Math.max(1, Math.floor(height * pixelRatio));
+  // let CSS size be set externally (your resize code sets style.width/height)
   canvas.style.imageRendering = "pixelated";
   const ctx = canvas.getContext("2d", { alpha: true });
 
+  // Clear color state
   let clearColor = { r: 0, g: 0, b: 0, a: 1 };
 
-  let internalW = canvas.width;
-  let internalH = canvas.height;
-  let depthBuffer = new Float32Array(internalW * internalH);
+  // Scratch objects to avoid allocations every frame
+  const vA = new THREE.Vector3();
+  const vB = new THREE.Vector3();
+  const vC = new THREE.Vector3();
+  const worldPos = new THREE.Vector3();
 
-  function setSize(w, h, updateCss = true) {
-    internalW = Math.max(1, Math.floor(w * pixelRatio));
-    internalH = Math.max(1, Math.floor(h * pixelRatio));
-    canvas.width = internalW;
-    canvas.height = internalH;
-    if (updateCss) {
-      canvas.style.width = `${w}px`;
-      canvas.style.height = `${h}px`;
-    }
-    depthBuffer = new Float32Array(internalW * internalH);
-  }
-
-  function hexToRgb(hex) {
-    hex = Number(hex);
+  // Helper: convert hex to rgba object
+  function hexToRgba(hex, alpha = 1) {
     const r = (hex >> 16) & 255;
     const g = (hex >> 8) & 255;
     const b = hex & 255;
-    return { r, g, b };
+    return { r, g, b, a: alpha };
   }
 
-  function setClearColor(hex = 0x000000, a = 1) {
-    const rgb = hexToRgb(hex);
-    clearColor = { r: rgb.r / 255, g: rgb.g / 255, b: rgb.b / 255, a };
+  function rgbaToCss({ r, g, b, a }) {
+    return `rgba(${Math.round(r)},${Math.round(g)},${Math.round(b)},${a})`;
   }
 
-  function clearBuffers() {
-    ctx.fillStyle = `rgba(${Math.floor(clearColor.r*255)},${Math.floor(clearColor.g*255)},${Math.floor(clearColor.b*255)},${clearColor.a})`;
-    ctx.fillRect(0, 0, internalW, internalH);
-    // initialize depth to far (1.0)
-    for (let i = 0, n = depthBuffer.length; i < n; i++) depthBuffer[i] = 1.0;
-  }
-
-  // Multiply 4x4 mat by vec4
-  function transformVec4(m, v) {
-    return [
-      m[0]*v[0] + m[4]*v[1] + m[8]*v[2] + m[12]*v[3],
-      m[1]*v[0] + m[5]*v[1] + m[9]*v[2] + m[13]*v[3],
-      m[2]*v[0] + m[6]*v[1] + m[10]*v[2] + m[14]*v[3],
-      m[3]*v[0] + m[7]*v[1] + m[11]*v[2] + m[15]*v[3]
-    ];
-  }
-
-  function toScreen(ndcX, ndcY) {
-    const x = Math.round((ndcX * 0.5 + 0.5) * (internalW - 1));
-    const y = Math.round((1 - (ndcY * 0.5 + 0.5)) * (internalH - 1));
-    return [x, y];
-  }
-
-  // Bounding-sphere frustum check (camera.frustum planes optional)
-  function sphereInFrustum(centerWorld, radius, camera) {
-    if (!camera.___frustumPlanes) {
-      const proj = camera.projectionMatrix.clone();
-      const view = camera.matrixWorldInverse.clone();
-      const pv = new THREE.Matrix4().multiplyMatrices(proj, view);
-      const planes = [];
-      const me = pv.elements;
-      planes.push([me[3] + me[0], me[7] + me[4], me[11] + me[8], me[15] + me[12]]);
-      planes.push([me[3] - me[0], me[7] - me[4], me[11] - me[8], me[15] - me[12]]);
-      planes.push([me[3] + me[1], me[7] + me[5], me[11] + me[9], me[15] + me[13]]);
-      planes.push([me[3] - me[1], me[7] - me[5], me[11] - me[9], me[15] - me[13]]);
-      planes.push([me[3] + me[2], me[7] + me[6], me[11] + me[10], me[15] + me[14]]);
-      planes.push([me[3] - me[2], me[7] - me[6], me[11] - me[10], me[15] - me[14]]);
-      for (let i = 0; i < planes.length; i++) {
-        const p = planes[i];
-        const l = Math.hypot(p[0], p[1], p[2]) || 1.0;
-        planes[i] = [p[0]/l, p[1]/l, p[2]/l, p[3]/l];
-      }
-      camera.___frustumPlanes = planes;
-    }
-    const planes = camera.___frustumPlanes;
-    for (let i = 0; i < planes.length; i++) {
-      const p = planes[i];
-      const d = p[0]*centerWorld.x + p[1]*centerWorld.y + p[2]*centerWorld.z + p[3];
-      if (d < -radius) return false;
-    }
-    return true;
-  }
-
-  // Get directional-ish light from scene (hemisphere/fallback)
-  function sampleSceneLight(scene) {
-    let dir = new THREE.Vector3(0.5, 0.7, 0.2).normalize();
-    let ambient = 0.2;
-    let diffuse = 0.8;
-    scene.traverse(obj => {
-      if (obj.isHemisphereLight) {
-        dir = new THREE.Vector3(0, 1, 0);
-        ambient = obj.intensity * 0.25;
-        diffuse = obj.intensity * 0.75;
-      } else if (obj.isDirectionalLight) {
-        dir = obj.position.clone().normalize();
-        ambient = Math.min(0.2, obj.intensity * 0.1);
-        diffuse = Math.min(1.0, obj.intensity);
-      }
-    });
-    return { dir, ambient, diffuse };
-  }
-
-  // Simple painter fill of a triangle with ctx (interpolates shade per-triangle)
-  function drawTrianglePainter(a, b, c, color) {
-    ctx.beginPath();
-    ctx.moveTo(a[0], a[1]);
-    ctx.lineTo(b[0], b[1]);
-    ctx.lineTo(c[0], c[1]);
-    ctx.closePath();
-    ctx.fillStyle = color;
-    ctx.fill();
-  }
-
-  // -------------------------
-  // CULLING & TINY-TRI HELPERS
-  // -------------------------
-  function ensureBoundingSphere(geom) {
-    if (!geom.boundingSphere) geom.computeBoundingSphere();
-  }
-
-  // returns approximate projected pixel radius (in pixels) of the mesh bounding sphere
-  function projectedSphereRadiusPixels(mesh, camera, w, h) {
-    const geom = mesh.geometry;
-    if (!geom) return 0;
-    ensureBoundingSphere(geom);
-    const bs = geom.boundingSphere.clone(); // center in local space
-    // world center
-    const worldCenter = bs.center.clone().applyMatrix4(mesh.matrixWorld);
-
-    // surface point local in +X direction to estimate radius projection
-    const r = bs.radius * (mesh.matrixWorld.getMaxScaleOnAxis ? mesh.matrixWorld.getMaxScaleOnAxis() : 1);
-    const surfaceLocal = bs.center.clone().add(new THREE.Vector3(r, 0, 0));
-    const surfaceWorld = surfaceLocal.applyMatrix4(mesh.matrixWorld);
-
-    const projCenter = worldCenter.clone().project(camera);
-    const projSurface = surfaceWorld.clone().project(camera);
-
-    // if behind camera or out of clip, return 0
-    if (projCenter.z < -1 || projCenter.z > 1) return 0;
-
-    const cx = (projCenter.x * 0.5 + 0.5) * w;
-    const cy = (1 - (projCenter.y * 0.5 + 0.5)) * h;
-    const sx = (projSurface.x * 0.5 + 0.5) * w;
-    const sy = (1 - (projSurface.y * 0.5 + 0.5)) * h;
-
-    return Math.hypot(sx - cx, sy - cy);
-  }
-
-  function shouldRenderMesh(mesh, camera, w, h, options = {}) {
-    const minPixels = options.minPixels ?? 0.9;
-    const maxDistance = options.maxDistance ?? Infinity;
-
-    if (!mesh.visible) return false;
-    const geom = mesh.geometry;
-    if (!geom) return false;
-
-    // quick frustum via bounding sphere if present
-    if (geom.boundingSphere) {
-      const bs = geom.boundingSphere.clone().applyMatrix4(mesh.matrixWorld);
-      if (!sphereInFrustum(bs.center, bs.radius, camera)) return false;
-    } else {
-      // fallback: center projection
-      const c = new THREE.Vector3();
-      mesh.getWorldPosition(c);
-      const proj = c.clone().project(camera);
-      if (proj.z < -1 || proj.z > 1) return false;
-    }
-
-    // distance cull
-    const camPos = new THREE.Vector3(); camera.getWorldPosition(camPos);
-    const worldCenter = geom.boundingSphere ? geom.boundingSphere.center.clone().applyMatrix4(mesh.matrixWorld) : new THREE.Vector3().setFromMatrixPosition(mesh.matrixWorld);
-    const dist = camPos.distanceTo(worldCenter);
-    if (dist > maxDistance) return false;
-
-    // projected size cull
-    const pixelRadius = projectedSphereRadiusPixels(mesh, camera, w, h);
-    if (pixelRadius < minPixels) return false;
-
-    return true;
-  }
-
-  // screen-space triangle area (px^2)
-  function screenTriangleArea(A, B, C) {
-    const ax = B.sx - A.sx, ay = B.sy - A.sy;
-    const bx = C.sx - A.sx, by = C.sy - A.sy;
-    return Math.abs(ax * by - ay * bx) * 0.5;
-  }
-
-  // ---------------------------------------
-  // New: perspective-correct, single-imageData rasterizer
-  // ---------------------------------------
-  function rasterizeTriangleZ_fast(tri, pixelData, depthBufferLocal, w, h, shadeVerts) {
-    const A = tri.A, B = tri.B, C = tri.C;
-    const x0 = A.sx, y0 = A.sy;
-    const x1 = B.sx, y1 = B.sy;
-    const x2 = C.sx, y2 = C.sy;
-
-    const invW0 = 1 / (A.clipW || 1e-6);
-    const invW1 = 1 / (B.clipW || 1e-6);
-    const invW2 = 1 / (C.clipW || 1e-6);
-
-    const z0_w = (A.z) * invW0;
-    const z1_w = (B.z) * invW1;
-    const z2_w = (C.z) * invW2;
-
-    const nx0_w = (A.nx || 0) * invW0, ny0_w = (A.ny || 0) * invW0, nz0_w = (A.nz || 1) * invW0;
-    const nx1_w = (B.nx || 0) * invW1, ny1_w = (B.ny || 0) * invW1, nz1_w = (B.nz || 1) * invW1;
-    const nx2_w = (C.nx || 0) * invW2, ny2_w = (C.ny || 0) * invW2, nz2_w = (C.nz || 1) * invW2;
-
-    const minX = Math.max(0, Math.floor(Math.min(x0, x1, x2)));
-    const maxX = Math.min(w - 1, Math.ceil(Math.max(x0, x1, x2)));
-    const minY = Math.max(0, Math.floor(Math.min(y0, y1, y2)));
-    const maxY = Math.min(h - 1, Math.ceil(Math.max(y0, y1, y2)));
-
-    const edge = (x0,y0,x1,y1, x,y) => (x - x0)*(y1 - y0) - (y - y0)*(x1 - x0);
-    const area = edge(x0,y0,x1,y1, x2,y2) || 1e-6;
-
-    for (let py = minY; py <= maxY; py++) {
-      for (let px = minX; px <= maxX; px++) {
-        const cx = px + 0.5, cy = py + 0.5;
-        const w0 = edge(x1,y1,x2,y2, cx,cy);
-        const w1 = edge(x2,y2,x0,y0, cx,cy);
-        const w2 = edge(x0,y0,x1,y1, cx,cy);
-        const inside = (w0 >= 0 && w1 >= 0 && w2 >= 0) || (w0 <= 0 && w1 <= 0 && w2 <= 0);
-        if (!inside) continue;
-        const u = w0 / area, v = w1 / area, t = w2 / area;
-
-        const invW_interp = u*invW0 + v*invW1 + t*invW2;
-        if (invW_interp <= 0) continue;
-
-        const ndcZ_interp = (u*z0_w + v*z1_w + t*z2_w) / invW_interp;
-        const depth = ndcZ_interp * 0.5 + 0.5; // NDC (-1..1) -> depth 0..1
-
-        const idx = py * w + px;
-        if (depth >= depthBufferLocal[idx]) continue; // fail depth test
-
-        // pass depth
-        depthBufferLocal[idx] = depth;
-
-        // interpolate normals perspective-correct
-        const nx = (u*nx0_w + v*nx1_w + t*nx2_w) / invW_interp;
-        const ny = (u*ny0_w + v*ny1_w + t*ny2_w) / invW_interp;
-        const nz = (u*nz0_w + v*nz1_w + t*nz2_w) / invW_interp;
-        const len = Math.hypot(nx, ny, nz) || 1;
-        const nnx = nx / len, nny = ny / len, nnz = nz / len;
-
-        // lighting
-        let intensity = 1.0;
-        if (shadeVerts) {
-          const L = shadeVerts.lightDir;
-          const dot = Math.max(0, nnx*L.x + nny*L.y + nnz*L.z);
-          intensity = shadeVerts.ambient + shadeVerts.diffuse * dot;
-        }
-
-        const r = Math.max(0, Math.min(255, Math.floor(tri.color.r * intensity)));
-        const g = Math.max(0, Math.min(255, Math.floor(tri.color.g * intensity)));
-        const b = Math.max(0, Math.min(255, Math.floor(tri.color.b * intensity)));
-
-        const base = idx * 4;
-        pixelData[base + 0] = r;
-        pixelData[base + 1] = g;
-        pixelData[base + 2] = b;
-        pixelData[base + 3] = 255;
-      }
-    }
-  }
-
-  // helper: sample a set of world points to approximate object silhouette (bbox corners, sphere, or subset of positions)
-  function sampleWorldPointsFor(obj, geom) {
-    const worldPoints = [];
-    const tmpVec = new THREE.Vector3();
-    if (geom && geom.boundingBox) {
-      const bb = geom.boundingBox;
-      const min = bb.min;
-      const max = bb.max;
-      const corners = [
-        [min.x, min.y, min.z],
-        [min.x, min.y, max.z],
-        [min.x, max.y, min.z],
-        [min.x, max.y, max.z],
-        [max.x, min.y, min.z],
-        [max.x, min.y, max.z],
-        [max.x, max.y, min.z],
-        [max.x, max.y, max.z],
-      ];
-      for (let c of corners) {
-        tmpVec.set(c[0], c[1], c[2]).applyMatrix4(obj.matrixWorld);
-        worldPoints.push(tmpVec.clone());
-      }
-    } else if (geom && geom.boundingSphere) {
-      const bs = geom.boundingSphere;
-      const center = bs.center.clone().applyMatrix4(obj.matrixWorld);
-      const r = bs.radius * (obj.matrixWorld.getMaxScaleOnAxis ? obj.matrixWorld.getMaxScaleOnAxis() : 1);
-      worldPoints.push(center.clone());
-      worldPoints.push(center.clone().add(new THREE.Vector3(r, 0, 0)));
-      worldPoints.push(center.clone().add(new THREE.Vector3(-r, 0, 0)));
-      worldPoints.push(center.clone().add(new THREE.Vector3(0, r, 0)));
-      worldPoints.push(center.clone().add(new THREE.Vector3(0, -r, 0)));
-      worldPoints.push(center.clone().add(new THREE.Vector3(0, 0, r)));
-      worldPoints.push(center.clone().add(new THREE.Vector3(0, 0, -r)));
-    } else if (geom && geom.attributes && geom.attributes.position && geom.attributes.position.count > 0) {
-      const posAttr = geom.attributes.position;
-      // sample at most 12 points; caller can change sample density by modifying posAttr.count / step
-      const step = Math.max(1, Math.floor(posAttr.count / 12));
-      for (let i = 0; i < posAttr.count && worldPoints.length < 12; i += step) {
-        tmpVec.set(
-          posAttr.getX(i),
-          posAttr.getY(i),
-          posAttr.getZ(i)
-        ).applyMatrix4(obj.matrixWorld);
-        worldPoints.push(tmpVec.clone());
-      }
-    } else {
-      const c = new THREE.Vector3();
-      obj.getWorldPosition(c);
-      worldPoints.push(c);
-    }
-    return worldPoints;
-  }
-
-  // convex hull (Andrew)
-  function convexHull(points) {
-    if (points.length <= 1) return points.slice();
-    const pts = points.slice().sort((a, b) => (a.x === b.x ? a.y - b.y : a.x - b.x));
-    const cross = (o, a, b) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
-    const lower = [];
-    for (let p of pts) {
-      while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop();
-      lower.push(p);
-    }
-    const upper = [];
-    for (let i = pts.length - 1; i >= 0; i--) {
-      const p = pts[i];
-      while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop();
-      upper.push(p);
-    }
-    lower.pop();
-    upper.pop();
-    return lower.concat(upper);
-  }
-
-  // Main render function
-  function render(scene, camera) {
-    if (!scene || !camera) return;
-    if (camera.___frustumPlanes) delete camera.___frustumPlanes;
-
-    clearBuffers();
-
-    scene.updateMatrixWorld(true);
-    camera.updateMatrixWorld(true);
-    camera.updateProjectionMatrix();
-
-    const sceneLight = sampleSceneLight(scene);
-
-    const viewProj = new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
-    const viewProjE = viewProj.elements;
-    const viewE = camera.matrixWorldInverse.elements;
-
-    // triList will hold triangles for both modes; for zbuffer we rasterize them all after traverse
-    const triList = [];
-
-    scene.traverse(object => {
-      if (!object.isMesh || !object.visible) return;
-
-      const mesh = object;
-
-      // ----- NEW: cheap per-mesh skip (frustum + projected size + distance) -----
-      if (!shouldRenderMesh(mesh, camera, internalW, internalH, { minPixels: 0.9, maxDistance: 2500 })) return;
-      // ------------------------------------------------------------------------
-
-      const geom = mesh.geometry;
-      if (!geom) return;
-
-      const posAttr = geom.attributes.position;
-      if (!posAttr) return;
-      const idxAttr = geom.index;
-      const normalAttr = geom.attributes.normal;
-
-      if (geom.boundingSphere) {
-        const bs = geom.boundingSphere.clone();
-        bs.applyMatrix4(mesh.matrixWorld);
-        if (!sphereInFrustum(bs.center, bs.radius, camera)) return;
-      }
-
-      // --- CORRECT color extraction (avoid falsy-zero bug) ---
-      let matColor = { r: 200, g: 200, b: 200 };
-      if (mesh.material) {
-        try {
-          if (mesh.material.color) {
-            const cr = (mesh.material.color.r != null) ? mesh.material.color.r : 1;
-            const cg = (mesh.material.color.g != null) ? mesh.material.color.g : 1;
-            const cb = (mesh.material.color.b != null) ? mesh.material.color.b : 1;
-            matColor = {
-              r: Math.floor(cr * 255),
-              g: Math.floor(cg * 255),
-              b: Math.floor(cb * 255)
-            };
-          } else if (mesh.userData && mesh.userData.color) {
-            const c = mesh.userData.color;
-            matColor = { r: (c >> 16) & 255, g: (c >> 8) & 255, b: c & 255 };
-          }
-        } catch (e) {
-          // fallback kept
-        }
-      }
-
-      const posArray = posAttr.array;
-      const normalArray = normalAttr ? normalAttr.array : null;
-      const indexArray = idxAttr ? idxAttr.array : null;
-
-      const modelMat = mesh.matrixWorld.elements;
-      const vcount = posAttr.count;
-      const projected = new Array(vcount);
-
-      for (let i = 0; i < vcount; i++) {
-        const px = posArray[i*3 + 0];
-        const py = posArray[i*3 + 1];
-        const pz = posArray[i*3 + 2];
-        const world = transformVec4(modelMat, [px, py, pz, 1]);
-        // compute view-space Z as well (camera-space)
-        const view = transformVec4(viewE, world);
-        const clip = transformVec4(viewProjE, world);
-        const w = clip[3] || 1e-6;
-        const ndcX = clip[0] / w;
-        const ndcY = clip[1] / w;
-        const ndcZ = clip[2] / w;
-        const [sx, sy] = toScreen(ndcX, ndcY);
-        let nx = 0, ny = 0, nz = 1;
-        if (normalArray) {
-          nx = normalArray[i*3 + 0];
-          ny = normalArray[i*3 + 1];
-          nz = normalArray[i*3 + 2];
-          const nmx = modelMat[0]*nx + modelMat[4]*ny + modelMat[8]*nz;
-          const nmy = modelMat[1]*nx + modelMat[5]*ny + modelMat[9]*nz;
-          const nmz = modelMat[2]*nx + modelMat[6]*ny + modelMat[10]*nz;
-          const len = Math.hypot(nmx, nmy, nmz) || 1;
-          nx = nmx / len; ny = nmy / len; nz = nmz / len;
-        }
-        // store viewZ for painter sorting (camera-space z)
-        projected[i] = { sx, sy, z: ndcZ, ndcZclip: clip[2] / w, nx, ny, nz, clipW: clip[3], viewZ: view[2], world: new THREE.Vector3(world[0], world[1], world[2]) };
-      }
-
-      // push triangles (with conservative near-plane check)
-      let meshTriAdded = 0;
-
-      // detect flip culling (negative determinant)
-      let flipCulling = false;
-      try {
-        const m3 = new THREE.Matrix3().setFromMatrix4(mesh.matrixWorld);
-        const det = (m3.determinant) ? m3.determinant() : (
-          m3.elements[0]*m3.elements[4]*m3.elements[8] -
-          m3.elements[0]*m3.elements[5]*m3.elements[7] -
-          m3.elements[1]*m3.elements[3]*m3.elements[8] +
-          m3.elements[1]*m3.elements[5]*m3.elements[6] +
-          m3.elements[2]*m3.elements[3]*m3.elements[7] -
-          m3.elements[2]*m3.elements[4]*m3.elements[6]
-        );
-        flipCulling = (det < 0);
-      } catch (e) {
-        flipCulling = false;
-      }
-
-      function computeTriangleNormals(ia, ib, ic) {
-        const A = projected[ia], B = projected[ib], C = projected[ic];
-        const vA = new THREE.Vector3().copy(A.world);
-        const vB = new THREE.Vector3().copy(B.world);
-        const vC = new THREE.Vector3().copy(C.world);
-        const e1 = vB.clone().sub(vA);
-        const e2 = vC.clone().sub(vA);
-        const triNormal = e1.cross(e2).normalize();
-        A.nx = triNormal.x; A.ny = triNormal.y; A.nz = triNormal.z;
-        B.nx = triNormal.x; B.ny = triNormal.y; B.nz = triNormal.z;
-        C.nx = triNormal.x; C.ny = triNormal.y; C.nz = triNormal.z;
-      }
-
-      // shade params computed once per mesh using current sceneLight
-      const shadeParamsMesh = { lightDir: sceneLight.dir, ambient: sceneLight.ambient, diffuse: sceneLight.diffuse };
-
-      const pushTriangle = (i0, i1, i2) => {
-        const A = projected[i0], B = projected[i1], C = projected[i2];
-
-        // conservative near-plane safety:
-        if (A.clipW <= 0 && B.clipW <= 0 && C.clipW <= 0) return;
-        if (A.clipW <= 0 || B.clipW <= 0 || C.clipW <= 0) return;
-
-        // backface cull (account for mirrored scale)
-        const cross = (B.sx - A.sx)*(C.sy - A.sy) - (B.sy - A.sy)*(C.sx - A.sx);
-        const cull = (flipCulling ? (cross <= 0) : (cross >= 0));
-        if (cull) return;
-
-        if (A.nx == null || B.nx == null || C.nx == null) {
-          computeTriangleNormals(i0, i1, i2);
-        }
-
-        // ----- NEW: tiny-triangle rejection (screen-space area) -----
-        const areaPx = screenTriangleArea(A, B, C);
-        if (areaPx < 0.5) return; // tweak threshold (0.5px) as needed
-        // ------------------------------------------------------------
-
-        // Determine a painter-friendly depth metric: use the nearest vertex camera-space z (min viewZ)
-        const viewDepth = Math.min(A.viewZ, B.viewZ, C.viewZ);
-
-        if (mode === "painter") {
-          // push tri with viewDepth for sorting
-          triList.push({ A, B, C, viewDepth, color: matColor, mesh });
-        } else {
-          // For zbuffer mode: collect tri for rasterization later
-          triList.push({ A, B, C, viewDepth, color: matColor, mesh, shadeParams: shadeParamsMesh });
-        }
-
-        meshTriAdded++;
-      };
-
-      if (indexArray) {
-        for (let t = 0; t < indexArray.length; t += 3) {
-          pushTriangle(indexArray[t], indexArray[t+1], indexArray[t+2]);
-        }
-      } else {
-        for (let t = 0; t < vcount; t += 3) {
-          pushTriangle(t, t+1, t+2);
-        }
-      }
-
-      // FALLBACK silhouette (if mesh produced zero triangles via conservative checks)
-      if (meshTriAdded === 0) {
-        try {
-          const worldPoints = sampleWorldPointsFor(mesh, geom);
-          if (worldPoints.length > 0) {
-            const camSpace = worldPoints.map(wp => {
-              const wsp = [wp.x, wp.y, wp.z, 1];
-              const v = transformVec4(viewE, wsp);
-              return v[2];
-            });
-
-            const nearZ = - (camera.near !== undefined ? camera.near : 0.1);
-            const farZ = - (camera.far !== undefined ? camera.far : 1e12);
-
-            const pts2d = [];
-            for (let i = 0; i < worldPoints.length; i++) {
-              const cz = camSpace[i];
-              const wp = worldPoints[i];
-              if (cz <= nearZ && cz >= farZ) {
-                const proj = wp.clone().project(camera);
-                const px = (proj.x * 0.5 + 0.5) * internalW;
-                const py = (-proj.y * 0.5 + 0.5) * internalH;
-                pts2d.push({ x: px, y: py, ndcZ: proj.z, world: wp.clone(), viewZ: cz });
-              }
-            }
-
-            // add intersections for edges that cross near plane
-            for (let i = 0; i < worldPoints.length; i++) {
-              for (let j = i + 1; j < worldPoints.length; j++) {
-                const z1 = camSpace[i], z2 = camSpace[j];
-                if ((z1 <= nearZ && z2 > nearZ) || (z2 <= nearZ && z1 > nearZ)) {
-                  const denom = (z2 - z1);
-                  if (Math.abs(denom) < 1e-9) continue;
-                  const t = (nearZ - z1) / denom;
-                  if (t < 0 || t > 1) continue;
-                  const ip = worldPoints[i].clone().lerp(worldPoints[j], t);
-                  const proj = ip.clone().project(camera);
-                  const px = (proj.x * 0.5 + 0.5) * internalW;
-                  const py = (-proj.y * 0.5 + 0.5) * internalH;
-                  // compute viewZ for intersection point
-                  const v = transformVec4(viewE, [ip.x, ip.y, ip.z, 1]);
-                  pts2d.push({ x: px, y: py, ndcZ: proj.z, world: ip.clone(), viewZ: v[2] });
-                }
-              }
-            }
-
-            if (pts2d.length === 0 && !window.voidEngineOptions?.strictNearClip) {
-              const c = new THREE.Vector3();
-              mesh.getWorldPosition(c);
-              const proj = c.clone().project(camera);
-              const px = (proj.x * 0.5 + 0.5) * internalW;
-              const py = (-proj.y * 0.5 + 0.5) * internalH;
-              const v = transformVec4(viewE, [c.x, c.y, c.z, 1]);
-              pts2d.push({ x: px, y: py, ndcZ: proj.z, world: c.clone(), viewZ: v[2] });
-            }
-
-            if (pts2d.length > 0) {
-              const hull = convexHull(pts2d);
-              if (hull.length >= 3) {
-                for (let k = 0; k < hull.length; k++) {
-                  const p0 = hull[k];
-                  const p1 = hull[(k + 1) % hull.length];
-                  const cxw = ( (p0.world?.x||0) + (p1.world?.x||0) ) / 2;
-                  const cyw = ( (p0.world?.y||0) + (p1.world?.y||0) ) / 2;
-                  const czw = ( (p0.world?.z||0) + (p1.world?.z||0) ) / 2;
-                  const A_view = transformVec4(viewE, [cxw, cyw, czw, 1]);
-                  const viewDepth = A_view[2];
-                  const camDir = new THREE.Vector3(); camera.getWorldDirection(camDir);
-                  const A = { sx: cxw, sy: cyw, z: p0.ndcZ || 0, nx: camDir.x, ny: camDir.y, nz: camDir.z, viewZ: viewDepth };
-                  const B = { sx: p0.x, sy: p0.y, z: p0.ndcZ || viewDepth, nx: camDir.x, ny: camDir.y, nz: camDir.z, viewZ: p0.viewZ || viewDepth };
-                  const C = { sx: p1.x, sy: p1.y, z: p1.ndcZ || viewDepth, nx: camDir.x, ny: camDir.y, nz: camDir.z, viewZ: p1.viewZ || viewDepth };
-                  if (mode === "painter") {
-                    triList.push({ A, B, C, viewDepth, color: matColor, mesh });
-                  } else {
-                    triList.push({ A, B, C, viewDepth, color: matColor, mesh, shadeParams: shadeParamsMesh });
-                  }
-                }
-              } else if (hull.length === 2) {
-                const p0 = hull[0], p1 = hull[1];
-                const cx = (p0.x + p1.x) / 2; const cy = (p0.y + p1.y) / 2;
-                const cz = ((p0.ndcZ||0) + (p1.ndcZ||0)) / 2;
-                const v0 = p0.viewZ ?? transformVec4(viewE, [p0.world?.x||0, p0.world?.y||0, p0.world?.z||0, 1])[2];
-                const v1 = p1.viewZ ?? transformVec4(viewE, [p1.world?.x||0, p1.world?.y||0, p1.world?.z||0, 1])[2];
-                const viewDepth = Math.min(v0, v1);
-                const camDir = new THREE.Vector3(); camera.getWorldDirection(camDir);
-                const A = { sx: cx, sy: cy, z: cz, nx: camDir.x, ny: camDir.y, nz: camDir.z, viewZ: viewDepth };
-                const B = { sx: p0.x, sy: p0.y, z: p0.ndcZ || cz, nx: camDir.x, ny: camDir.y, nz: camDir.z, viewZ: v0 };
-                const C = { sx: p1.x, sy: p1.y, z: p1.ndcZ || cz, nx: camDir.x, ny: camDir.y, nz: camDir.z, viewZ: v1 };
-                if (mode === "painter") {
-                  triList.push({ A, B, C, viewDepth, color: matColor, mesh });
-                } else {
-                  triList.push({ A, B, C, viewDepth, color: matColor, mesh, shadeParams: shadeParamsMesh });
-                }
-              } else {
-                const p = pts2d[0];
-                const s = 4;
-                const v = p.viewZ ?? transformVec4(viewE, [p.world?.x||0, p.world?.y||0, p.world?.z||0, 1])[2];
-                const camDir = new THREE.Vector3(); camera.getWorldDirection(camDir);
-                const A = { sx: p.x - s, sy: p.y - s, z: p.ndcZ || 0, nx: camDir.x, ny: camDir.y, nz: camDir.z, viewZ: v };
-                const B = { sx: p.x + s, sy: p.y - s, z: p.ndcZ || 0, nx: camDir.x, ny: camDir.y, nz: camDir.z, viewZ: v };
-                const C = { sx: p.x + s, sy: p.y + s, z: p.ndcZ || 0, nx: camDir.x, ny: camDir.y, nz: camDir.z, viewZ: v };
-                if (mode === "painter") {
-                  triList.push({ A, B, C, viewDepth: v, color: matColor, mesh });
-                } else {
-                  triList.push({ A, B, C, viewDepth: v, color: matColor, mesh, shadeParams: shadeParamsMesh });
-                }
-              }
-            }
-          }
-        } catch (e) {
-          // ignore fallback errors
-        }
-      } // end fallback
-    }); // end traverse
-
-    // painter-mode draw sorted back-to-front using viewDepth (min vertex viewZ) — furthest (more negative) first
-    if (mode === "painter") {
-      triList.sort((a,b) => {
-        return a.viewDepth - b.viewDepth;
-      });
-      for (let i = 0; i < triList.length; i++) {
-        const tri = triList[i];
-        let nx = (tri.A.nx + tri.B.nx + tri.C.nx) / 3;
-        let ny = (tri.A.ny + tri.B.ny + tri.C.ny) / 3;
-        let nz = (tri.A.nz + tri.B.nz + tri.C.nz) / 3;
-        const L = sceneLight.dir;
-        const dot = Math.max(0, nx*L.x + ny*L.y + nz*L.z);
-        const intensity = sceneLight.ambient + sceneLight.diffuse * dot;
-        const r = Math.max(0, Math.min(255, Math.floor(tri.color.r * intensity)));
-        const g = Math.max(0, Math.min(255, Math.floor(tri.color.g * intensity)));
-        const b = Math.max(0, Math.min(255, Math.floor(tri.color.b * intensity)));
-        drawTrianglePainter([tri.A.sx, tri.A.sy], [tri.B.sx, tri.B.sy], [tri.C.sx, tri.C.sy], `rgb(${r},${g},${b})`);
-      }
-    } else {
-      // zbuffer-mode: rasterize all collected triangles using single imageData write
-      if (triList.length > 0) {
-        const imageData = ctx.getImageData(0, 0, internalW, internalH);
-        const pixelData = imageData.data; // Uint8ClampedArray
-
-        // initialize depth buffer to far (1.0) — already done in clearBuffers but be explicit
-        for (let i = 0, n = depthBuffer.length; i < n; i++) depthBuffer[i] = 1.0;
-
-        // Rasterize each triangle with perspective-correct interpolation
-        for (let t = 0; t < triList.length; t++) {
-          const tri = triList[t];
-          rasterizeTriangleZ_fast(tri, pixelData, depthBuffer, internalW, internalH, tri.shadeParams || { lightDir: sceneLight.dir, ambient: sceneLight.ambient, diffuse: sceneLight.diffuse });
-        }
-
-        // commit once
-        ctx.putImageData(imageData, 0, 0);
-      }
-    }
-
-    // done
-  }
-
-  return {
+  // API object returned
+  const api = {
     domElement: canvas,
-    setSize,
-    setClearColor,
-    render,
-    setMode(newMode) {
-      if (newMode === "painter" || newMode === "zbuffer") mode = newMode;
-    }
+    // setSize(w,h,updateStyle=true)
+    setSize(w, h, updateStyle = true) {
+      // internal canvas resolution
+      canvas.width = w;
+      canvas.height = h;
+      if (updateStyle) {
+        canvas.style.width = `${w}px`;
+        canvas.style.height = `${h}px`;
+      }
+    },
+    // setClearColor(hex, alpha)
+    setClearColor(hex = 0x000000, alpha = 1) {
+      clearColor = hexToRgba(hex, alpha);
+    },
+    // main render call: simple painter algorithm
+    render(scene, camera) {
+      if (!scene || !camera) return;
+
+      // ensure matrices up-to-date
+      scene.updateMatrixWorld(true);
+      camera.updateMatrixWorld(true);
+
+      // clear
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      if (clearColor.a > 0) {
+        ctx.fillStyle = rgbaToCss(clearColor);
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+      }
+
+      // collect triangles (each triangle: {pts: [{x,y,z},...], color: css, avgZ})
+      const triangles = [];
+      const sprites = [];
+
+      // traverse scene and find renderable objects
+      scene.traverseVisible((object) => {
+        // Mesh handling: BufferGeometry (indexed or not)
+        if (object.isMesh && object.visible && object.geometry) {
+          const geometry = object.geometry;
+          // require position attribute
+          const posAttr = geometry.attributes && geometry.attributes.position;
+          if (!posAttr) return;
+
+          // Ensure world matrix is updated for the mesh
+          object.updateMatrixWorld(true);
+
+          // material color fallback
+          let matColor = { r: 255, g: 255, b: 255, a: 1 };
+          let opacity = 1;
+          if (object.material) {
+            const m = object.material;
+            if (m.color && m.color.isColor) {
+              matColor = { r: m.color.r * 255, g: m.color.g * 255, b: m.color.b * 255, a: 1 };
+            }
+            opacity = m.opacity !== undefined ? m.opacity : 1;
+          }
+
+          const colorCss = `rgba(${Math.round(matColor.r)},${Math.round(matColor.g)},${Math.round(matColor.b)},${opacity})`;
+
+          const index = geometry.index ? geometry.index.array : null;
+          const posArray = posAttr.array;
+          const itemSize = posAttr.itemSize; // usually 3
+          const count = index ? index.length : posArray.length / itemSize;
+
+          // iterate triangles (assume non-triangle strips — use every 3 indices)
+          for (let i = 0; i < count; i += 3) {
+            const ai = index ? index[i] : i;
+            const bi = index ? index[i + 1] : i + 1;
+            const ci = index ? index[i + 2] : i + 2;
+
+            // read vertex positions (local space)
+            vA.fromArray(posArray, ai * itemSize);
+            vB.fromArray(posArray, bi * itemSize);
+            vC.fromArray(posArray, ci * itemSize);
+
+            // transform to world
+            vA.applyMatrix4(object.matrixWorld);
+            vB.applyMatrix4(object.matrixWorld);
+            vC.applyMatrix4(object.matrixWorld);
+
+            // project to NDC (using camera)
+            vA.project(camera);
+            vB.project(camera);
+            vC.project(camera);
+
+            // cull triangles outside clip space ×/z if completely off-screen (simple)
+            // check if all three are outside the clip volume on same side
+            if (
+              (vA.x < -1 && vB.x < -1 && vC.x < -1) ||
+              (vA.x > 1 && vB.x > 1 && vC.x > 1) ||
+              (vA.y < -1 && vB.y < -1 && vC.y < -1) ||
+              (vA.y > 1 && vB.y > 1 && vC.y > 1) ||
+              (vA.z < -1 && vB.z < -1 && vC.z < -1) ||
+              (vA.z > 1 && vB.z > 1 && vC.z > 1)
+            ) {
+              continue;
+            }
+
+            // convert to screen coords
+            const sxA = (vA.x * 0.5 + 0.5) * canvas.width;
+            const syA = (-vA.y * 0.5 + 0.5) * canvas.height;
+            const sxB = (vB.x * 0.5 + 0.5) * canvas.width;
+            const syB = (-vB.y * 0.5 + 0.5) * canvas.height;
+            const sxC = (vC.x * 0.5 + 0.5) * canvas.width;
+            const syC = (-vC.y * 0.5 + 0.5) * canvas.height;
+
+            const avgZ = (vA.z + vB.z + vC.z) / 3; // NDC z (-1..1), larger -> farther
+
+            triangles.push({
+              pts: [
+                { x: sxA, y: syA, z: vA.z },
+                { x: sxB, y: syB, z: vB.z },
+                { x: sxC, y: syC, z: vC.z },
+              ],
+              color: colorCss,
+              avgZ,
+            });
+          }
+        }
+
+        // Sprite handling (basic)
+        if (object.isSprite && object.visible) {
+          object.updateMatrixWorld(true);
+          const wp = new THREE.Vector3();
+          object.getWorldPosition(wp);
+          wp.project(camera);
+
+          // skip if outside clip
+          if (wp.x < -1 || wp.x > 1 || wp.y < -1 || wp.y > 1 || wp.z < -1 || wp.z > 1) return;
+
+          const sx = (wp.x * 0.5 + 0.5) * canvas.width;
+          const sy = (-wp.y * 0.5 + 0.5) * canvas.height;
+
+          // estimate size from scale and camera distance (approx)
+          // sprite.scale is Vector2/Vector3 depending on usage
+          const scale = object.scale ? (object.scale.x || 1) : 1;
+          let sizePx = 32 * scale;
+          // adjust by perspective depth
+          if (camera.isPerspectiveCamera) {
+            const dist = object.getWorldPosition(new THREE.Vector3()).distanceTo(camera.getWorldPosition(new THREE.Vector3()));
+            sizePx = Math.max(4, sizePx / Math.max(0.001, dist * 0.1));
+          }
+
+          sprites.push({
+            x: sx,
+            y: sy,
+            size: sizePx,
+            material: object.material,
+            depth: wp.z,
+          });
+        }
+      }); // traverseVisible
+
+      // sort triangles by avgZ descending (far -> near) for painter algorithm
+      triangles.sort((a, b) => b.avgZ - a.avgZ);
+
+      // draw triangles
+      for (let t = 0; t < triangles.length; t++) {
+        const tri = triangles[t];
+        const p0 = tri.pts[0];
+        const p1 = tri.pts[1];
+        const p2 = tri.pts[2];
+
+        ctx.beginPath();
+        ctx.moveTo(p0.x, p0.y);
+        ctx.lineTo(p1.x, p1.y);
+        ctx.lineTo(p2.x, p2.y);
+        ctx.closePath();
+        ctx.fillStyle = tri.color;
+        ctx.fill();
+      }
+
+      // draw sprites (sorted far->near as well)
+      sprites.sort((a, b) => b.depth - a.depth);
+      for (let s = 0; s < sprites.length; s++) {
+        const sp = sprites[s];
+        const mat = sp.material;
+        const half = sp.size * 0.5;
+
+        if (mat && mat.map && mat.map.image) {
+          // draw image (if available)
+          try {
+            const img = mat.map.image;
+            // draw centered
+            ctx.drawImage(img, sp.x - half, sp.y - half, sp.size, sp.size);
+          } catch (err) {
+            // fallback to simple square
+            ctx.fillStyle = (mat.color && mat.color.isColor)
+              ? `rgba(${Math.round(mat.color.r * 255)},${Math.round(mat.color.g * 255)},${Math.round(mat.color.b * 255)},${mat.opacity !== undefined ? mat.opacity : 1})`
+              : "#fff";
+            ctx.fillRect(sp.x - half, sp.y - half, sp.size, sp.size);
+          }
+        } else {
+          // fallback: draw a filled circle using material color or white
+          let colorCss = "#ffffff";
+          if (mat && mat.color && mat.color.isColor) {
+            colorCss = `rgba(${Math.round(mat.color.r * 255)},${Math.round(mat.color.g * 255)},${Math.round(mat.color.b * 255)},${mat.opacity !== undefined ? mat.opacity : 1})`;
+          }
+          ctx.beginPath();
+          ctx.fillStyle = colorCss;
+          ctx.arc(sp.x, sp.y, Math.max(1, half), 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+    },
+
+    // tiny utility
+    dispose() {
+      // nothing heavy to dispose; if you later add textures, clean up here
+    },
   };
+
+  // initial size and clear color default
+  api.setSize(width, height, false);
+  api.setClearColor(0x000000, 1);
+
+  return api;
 }
 
 
@@ -3621,6 +3174,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
