@@ -827,6 +827,9 @@ export function voidEngine({ width = 640, height = 360, mode = "painter" } = {})
   const vA = new THREE.Vector3();
   const vB = new THREE.Vector3();
   const vC = new THREE.Vector3();
+  const camV0 = new THREE.Vector3();
+  const camV1 = new THREE.Vector3();
+  const camV2 = new THREE.Vector3();
 
   function hexToRgba(hex, alpha = 1) {
     const r = (hex >> 16) & 255;
@@ -993,19 +996,29 @@ export function voidEngine({ width = 640, height = 360, mode = "painter" } = {})
             const cB = wB.clone().applyMatrix4(camInv);
             const cC = wC.clone().applyMatrix4(camInv);
 
-            // quick reject: if all three are far beyond far plane or all outside same XY side, skip
             const near = camera.near || 0.001;
             const far = camera.far || 1e9;
 
-            // Clip triangle against near plane properly (produces 0..n triangles)
+            // Clip triangle against near plane properly
             const clippedTris = clipPolygonAgainstNear([wA, wB, wC], [cA, cB, cC], near);
             if (!clippedTris || clippedTris.length === 0) continue;
 
             // for each resulting triangle, project and add to list with safety checks
             for (let ct = 0; ct < clippedTris.length; ct++) {
               const triW = clippedTris[ct];
+              
+              // 1. Compute camera-space z for sorting
+              const camV0 = triW[0].clone().applyMatrix4(camInv);
+              const camV1 = triW[1].clone().applyMatrix4(camInv);
+              const camV2 = triW[2].clone().applyMatrix4(camInv);
 
-              // project each vertex via world->NDC (use temporary clones to avoid mutating originals)
+              // compute "farthest" depth as positive distance
+              const depth0 = -camV0.z;
+              const depth1 = -camV1.z;
+              const depth2 = -camV2.z;
+              const farthestDepth = Math.max(depth0, depth1, depth2);
+
+              // 2. Project to NDC / screen as before
               const pv0 = triW[0].clone().project(camera);
               const pv1 = triW[1].clone().project(camera);
               const pv2 = triW[2].clone().project(camera);
@@ -1057,16 +1070,15 @@ export function voidEngine({ width = 640, height = 360, mode = "painter" } = {})
               const screenArea = cross * 0.5;
               if (screenArea < 0.25) continue;
 
-              const avgZ = (pv0.z + pv1.z + pv2.z) / 3;
-
+              // 3. Push using the farthestDepth as the sort key
               triangles.push({
                 pts: [
                   { x: sxA, y: syA, z: pv0.z },
                   { x: sxB, y: syB, z: pv1.z },
-                  { x: sxC, y: syC, z: pv2.z },
+                  { x: sxC, y: syC, z: pv2.z }
                 ],
                 color: colorCss,
-                avgZ,
+                depth: farthestDepth
               });
             } // clipped tris loop
           } // triangle iteration
@@ -1095,8 +1107,8 @@ export function voidEngine({ width = 640, height = 360, mode = "painter" } = {})
         }
       }); // traverseVisible
 
-      // painter sort
-      triangles.sort((a, b) => b.avgZ - a.avgZ);
+      // 4. Sort triangles by depth (farthest to nearest)
+      triangles.sort((a, b) => b.depth - a.depth);
 
       // draw triangles
       for (let t = 0; t < triangles.length; t++) {
@@ -1149,7 +1161,6 @@ export function voidEngine({ width = 640, height = 360, mode = "painter" } = {})
   api.setClearColor(0x000000, 1);
   return api;
 }
-
 
 
 
