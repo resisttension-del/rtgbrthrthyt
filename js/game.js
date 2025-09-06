@@ -1137,6 +1137,8 @@ export function voidEngine({
         const py = posArray[i*3 + 1];
         const pz = posArray[i*3 + 2];
         const world = transformVec4(modelMat, [px, py, pz, 1]);
+        // compute view-space Z as well (camera-space)
+        const view = transformVec4(viewE, world);
         const clip = transformVec4(viewProjE, world);
         const w = clip[3] || 1e-6;
         const ndcX = clip[0] / w;
@@ -1154,7 +1156,8 @@ export function voidEngine({
           const len = Math.hypot(nmx, nmy, nmz) || 1;
           nx = nmx / len; ny = nmy / len; nz = nmz / len;
         }
-        projected[i] = { sx, sy, z: ndcZ, ndcZclip: clip[2] / w, nx, ny, nz, clipW: clip[3], world: new THREE.Vector3(world[0], world[1], world[2]) };
+        // store viewZ for painter sorting (camera-space z)
+        projected[i] = { sx, sy, z: ndcZ, ndcZclip: clip[2] / w, nx, ny, nz, clipW: clip[3], viewZ: view[2], world: new THREE.Vector3(world[0], world[1], world[2]) };
       }
 
       // push triangles (with conservative near-plane check)
@@ -1194,9 +1197,7 @@ export function voidEngine({
         const A = projected[i0], B = projected[i1], C = projected[i2];
 
         // conservative near-plane safety:
-        // if all clipW <= 0 => fully behind camera -> skip
         if (A.clipW <= 0 && B.clipW <= 0 && C.clipW <= 0) return;
-        // if any clipW <= 0 => triangle crosses near plane -> skip (conservative). Fallback silhouette handles visibility.
         if (A.clipW <= 0 || B.clipW <= 0 || C.clipW <= 0) return;
 
         // backface cull (account for mirrored scale)
@@ -1208,9 +1209,12 @@ export function voidEngine({
           computeTriangleNormals(i0, i1, i2);
         }
 
+        // Determine a painter-friendly depth metric: use the nearest vertex camera-space z (min viewZ)
+        const viewDepth = Math.min(A.viewZ, B.viewZ, C.viewZ);
+
         if (mode === "painter") {
-          const avgDepth = (A.z + B.z + C.z) / 3.0;
-          triList.push({ A, B, C, avgDepth, color: matColor, mesh });
+          // push tri with viewDepth for sorting
+          triList.push({ A, B, C, viewDepth, color: matColor, mesh });
         } else {
           const shadeParams = { lightDir: sceneLight.dir, ambient: sceneLight.ambient, diffuse: sceneLight.diffuse };
           const a = { x: A.sx, y: A.sy, z: A.z, nx: A.nx, ny: A.ny, nz: A.nz };
@@ -1254,7 +1258,7 @@ export function voidEngine({
                 const proj = wp.clone().project(camera);
                 const px = (proj.x * 0.5 + 0.5) * internalW;
                 const py = (-proj.y * 0.5 + 0.5) * internalH;
-                pts2d.push({ x: px, y: py, ndcZ: proj.z, world: wp.clone() });
+                pts2d.push({ x: px, y: py, ndcZ: proj.z, world: wp.clone(), viewZ: cz });
               }
             }
 
@@ -1271,7 +1275,9 @@ export function voidEngine({
                   const proj = ip.clone().project(camera);
                   const px = (proj.x * 0.5 + 0.5) * internalW;
                   const py = (-proj.y * 0.5 + 0.5) * internalH;
-                  pts2d.push({ x: px, y: py, ndcZ: proj.z, world: ip.clone() });
+                  // compute viewZ for intersection point
+                  const v = transformVec4(viewE, [ip.x, ip.y, ip.z, 1]);
+                  pts2d.push({ x: px, y: py, ndcZ: proj.z, world: ip.clone(), viewZ: v[2] });
                 }
               }
             }
@@ -1282,43 +1288,53 @@ export function voidEngine({
               const proj = c.clone().project(camera);
               const px = (proj.x * 0.5 + 0.5) * internalW;
               const py = (-proj.y * 0.5 + 0.5) * internalH;
-              pts2d.push({ x: px, y: py, ndcZ: proj.z, world: c.clone() });
+              const v = transformVec4(viewE, [c.x, c.y, c.z, 1]);
+              pts2d.push({ x: px, y: py, ndcZ: proj.z, world: c.clone(), viewZ: v[2] });
             }
 
             if (pts2d.length > 0) {
               const hull = convexHull(pts2d);
               if (hull.length >= 3) {
-                let cx = 0, cy = 0, cz = 0;
-                for (const p of hull) { cx += p.x; cy += p.y; cz += p.ndcZ || 0; }
-                cx /= hull.length; cy /= hull.length; cz /= hull.length;
-                const camDir = new THREE.Vector3();
-                camera.getWorldDirection(camDir);
                 for (let k = 0; k < hull.length; k++) {
                   const p0 = hull[k];
                   const p1 = hull[(k + 1) % hull.length];
-                  const A = { sx: cx, sy: cy, z: cz, nx: camDir.x, ny: camDir.y, nz: camDir.z };
-                  const B = { sx: p0.x, sy: p0.y, z: p0.ndcZ || cz, nx: camDir.x, ny: camDir.y, nz: camDir.z };
-                  const C = { sx: p1.x, sy: p1.y, z: p1.ndcZ || cz, nx: camDir.x, ny: camDir.y, nz: camDir.z };
-                  const avgDepth = (A.z + B.z + C.z) / 3.0;
-                  triList.push({ A, B, C, avgDepth, color: matColor, mesh });
+                  // compute viewDepth for this triangle using min of vertex viewZ (keeps large floors behind)
+                  const A_world = p0.world || new THREE.Vector3(); // should exist
+                  const B_world = p1.world || new THREE.Vector3();
+                  // centroid world (approx)
+                  const cxw = ( (p0.world?.x||0) + (p1.world?.x||0) ) / 2;
+                  const cyw = ( (p0.world?.y||0) + (p1.world?.y||0) ) / 2;
+                  const czw = ( (p0.world?.z||0) + (p1.world?.z||0) ) / 2;
+                  const A_view = transformVec4(viewE, [cxw, cyw, czw, 1]);
+                  const viewDepth = A_view[2];
+                  const camDir = new THREE.Vector3(); camera.getWorldDirection(camDir);
+                  const A = { sx: cxw, sy: cyw, z: p0.ndcZ || 0, nx: camDir.x, ny: camDir.y, nz: camDir.z, viewZ: viewDepth };
+                  const B = { sx: p0.x, sy: p0.y, z: p0.ndcZ || viewDepth, nx: camDir.x, ny: camDir.y, nz: camDir.z, viewZ: p0.viewZ || viewDepth };
+                  const C = { sx: p1.x, sy: p1.y, z: p1.ndcZ || viewDepth, nx: camDir.x, ny: camDir.y, nz: camDir.z, viewZ: p1.viewZ || viewDepth };
+                  triList.push({ A, B, C, viewDepth, color: matColor, mesh });
                 }
               } else if (hull.length === 2) {
                 const p0 = hull[0], p1 = hull[1];
-                const cx = (p0.x + p1.x) / 2; const cy = (p0.y + p1.y) / 2; const cz = ((p0.ndcZ||0) + (p1.ndcZ||0)) / 2;
+                const cx = (p0.x + p1.x) / 2; const cy = (p0.y + p1.y) / 2;
+                const cz = ((p0.ndcZ||0) + (p1.ndcZ||0)) / 2;
+                const v0 = p0.viewZ ?? transformVec4(viewE, [p0.world?.x||0, p0.world?.y||0, p0.world?.z||0, 1])[2];
+                const v1 = p1.viewZ ?? transformVec4(viewE, [p1.world?.x||0, p1.world?.y||0, p1.world?.z||0, 1])[2];
+                const viewDepth = Math.min(v0, v1);
                 const camDir = new THREE.Vector3(); camera.getWorldDirection(camDir);
-                const A = { sx: cx, sy: cy, z: cz, nx: camDir.x, ny: camDir.y, nz: camDir.z };
-                const B = { sx: p0.x, sy: p0.y, z: p0.ndcZ || cz, nx: camDir.x, ny: camDir.y, nz: camDir.z };
-                const C = { sx: p1.x, sy: p1.y, z: p1.ndcZ || cz, nx: camDir.x, ny: camDir.y, nz: camDir.z };
-                const avgDepth = (A.z + B.z + C.z) / 3.0;
-                triList.push({ A, B, C, avgDepth, color: matColor, mesh });
+                const A = { sx: cx, sy: cy, z: cz, nx: camDir.x, ny: camDir.y, nz: camDir.z, viewZ: viewDepth };
+                const B = { sx: p0.x, sy: p0.y, z: p0.ndcZ || cz, nx: camDir.x, ny: camDir.y, nz: camDir.z, viewZ: v0 };
+                const C = { sx: p1.x, sy: p1.y, z: p1.ndcZ || cz, nx: camDir.x, ny: camDir.y, nz: camDir.z, viewZ: v1 };
+                triList.push({ A, B, C, viewDepth, color: matColor, mesh });
               } else {
                 const p = pts2d[0];
                 const s = 4;
+                const v = p.viewZ ?? transformVec4(viewE, [p.world?.x||0, p.world?.y||0, p.world?.z||0, 1])[2];
                 const camDir = new THREE.Vector3(); camera.getWorldDirection(camDir);
-                const A = { sx: p.x - s, sy: p.y - s, z: p.ndcZ || 0, nx: camDir.x, ny: camDir.y, nz: camDir.z };
-                const B = { sx: p.x + s, sy: p.y - s, z: p.ndcZ || 0, nx: camDir.x, ny: camDir.y, nz: camDir.z };
-                const C = { sx: p.x + s, sy: p.y + s, z: p.ndcZ || 0, nx: camDir.x, ny: camDir.y, nz: camDir.z };
-                triList.push({ A, B, C, avgDepth: (A.z+B.z+C.z)/3, color: matColor, mesh });
+                const A = { sx: p.x - s, sy: p.y - s, z: p.ndcZ || 0, nx: camDir.x, ny: camDir.y, nz: camDir.z, viewZ: v };
+                const B = { sx: p.x + s, sy: p.y - s, z: p.ndcZ || 0, nx: camDir.x, ny: camDir.y, nz: camDir.z, viewZ: v };
+                const C = { sx: p.x + s, sy: p.y + s, z: p.ndcZ || 0, nx: camDir.x, ny: camDir.y, nz: camDir.z, viewZ: v };
+                const viewDepth = v;
+                triList.push({ A, B, C, viewDepth, color: matColor, mesh });
               }
             }
           }
@@ -1328,11 +1344,16 @@ export function voidEngine({
       } // end fallback
     }); // end traverse
 
-    // painter-mode draw sorted back-to-front
+    // painter-mode draw sorted back-to-front using viewDepth (min vertex viewZ) — furthest (more negative) first
     if (mode === "painter") {
-      triList.sort((a,b) => b.avgDepth - a.avgDepth);
+      triList.sort((a,b) => {
+        // a.viewDepth and b.viewDepth are camera-space Z (more negative is further)
+        // sort ascending so more negative (further) come first
+        return a.viewDepth - b.viewDepth;
+      });
       for (let i = 0; i < triList.length; i++) {
         const tri = triList[i];
+        // compute per-triangle normal average for simple lambert shading (keep existing behavior)
         let nx = (tri.A.nx + tri.B.nx + tri.C.nx) / 3;
         let ny = (tri.A.ny + tri.B.ny + tri.C.ny) / 3;
         let nz = (tri.A.nz + tri.B.nz + tri.C.nz) / 3;
@@ -3462,6 +3483,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
