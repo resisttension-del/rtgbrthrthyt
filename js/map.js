@@ -135,7 +135,6 @@ export async function createCrocodilosConstruction(scene, physicsController) {
 
     // URL of the GLB model for the map
   //  const GLB_MODEL_URL = 'https://raw.githubusercontent.com/thearthd/3d-models/main/Map/voidffa_temp_map.glb';
-const GLB_MODEL_URL = 'https://raw.githubusercontent.com/thearthd/3d-models/main/croccodilosconstruction.glb';
     // 1) Load the GLB model into the scene and process it for collision detection
     let gltfGroup = null;
     let onGLBProgress = () => {};
