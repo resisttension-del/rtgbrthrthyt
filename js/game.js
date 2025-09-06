@@ -1015,13 +1015,6 @@ export function voidEngine({
     ctx.putImageData(imageData, 0, 0);
   }
 
-  // Main render function
-i meant this version, send the fully updated function.
-
-// voidEngine.js
-// CPU software renderer compatible with a THREE.Scene + THREE.Camera
-// Usage: const r = voidEngine({ width:640, height:360, mode: 'zbuffer'|'painter' });
-// r.setClearColor(0x000000, 1); r.setSize(w,h); r.render(scene, camera);
 
 export function voidEngine({
   width = 640,
@@ -3512,6 +3505,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
