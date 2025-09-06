@@ -106,7 +106,7 @@ export async function createCrocodilosConstruction(scene, physicsController) {
     // Define scaling and initial spawn points for the map
     const SCALE = 2;
     const rawSpawnPoints = [
-        new THREE.Vector3(0, 20, 0),
+        new THREE.Vector3(0, 50, 0),
      //  new THREE.Vector3(-14, 7, -36), // 1
       //  new THREE.Vector3(-2, 2, 37), // 2
      //  new THREE.Vector3(0, 2, 0), // 3
