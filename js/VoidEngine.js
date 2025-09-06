@@ -12,9 +12,12 @@ export function voidEngine({ width = 640, height = 360, mode = "painter" } = {})
   let clearColor = { r: 0, g: 0, b: 0, a: 1 };
 
   // scratch
-  const tmpV0 = new THREE.Vector3();
-  const tmpV1 = new THREE.Vector3();
-  const tmpV2 = new THREE.Vector3();
+  const vA = new THREE.Vector3();
+  const vB = new THREE.Vector3();
+  const vC = new THREE.Vector3();
+  const camV0 = new THREE.Vector3();
+  const camV1 = new THREE.Vector3();
+  const camV2 = new THREE.Vector3();
 
   function hexToRgba(hex, alpha = 1) {
     const r = (hex >> 16) & 255;
@@ -34,16 +37,77 @@ export function voidEngine({ width = 640, height = 360, mode = "painter" } = {})
     return out;
   }
 
-  // Predefined box-edge index pairs for a 8-corner AABB
-  const BOX_EDGES = [
-    [0,1],[0,2],[0,4],
-    [1,3],[1,5],
-    [2,3],[2,6],
-    [3,7],
-    [4,5],[4,6],
-    [5,7],
-    [6,7]
-  ];
+  // clip polygon (in camera space) against near-plane z = -near.
+  // inputs:
+  //  inWorld: array of world-space THREE.Vector3 objects (corresponding to inCam)
+  //  inCam:  array of camera-space THREE.Vector3 objects (same length)
+  // returns array of clipped triangles as arrays of world-space vertices (triangles)
+  function clipPolygonAgainstNear(inWorld, inCam, near) {
+    if (inWorld.length !== inCam.length) return [];
+
+    // Sutherland–Hodgman for single plane. We'll produce polygon (world & cam) clipped.
+    let outWorld = [];
+    let outCam = [];
+
+    function isInside(camV) {
+      // camera-space: points in front of camera have negative z (three.js convention).
+      // near plane at z = -near. Inside = z <= -near
+      return camV.z <= -near;
+    }
+
+    const n = inWorld.length;
+    for (let i = 0; i < n; i++) {
+      const aW = inWorld[i];
+      const aC = inCam[i];
+      const j = (i + 1) % n;
+      const bW = inWorld[j];
+      const bC = inCam[j];
+
+      const aIn = isInside(aC);
+      const bIn = isInside(bC);
+
+      if (aIn && bIn) {
+        // both inside -> push b
+        outWorld.push(bW.clone());
+        outCam.push(bC.clone());
+      } else if (aIn && !bIn) {
+        // leaving -> push intersection
+        const t = ( -near - aC.z ) / (bC.z - aC.z);
+        // clamp t for safety
+        const tt = Math.max(0, Math.min(1, t));
+        const iW = new THREE.Vector3();
+        const iC = new THREE.Vector3();
+        lerpVec(iW, aW, bW, tt);
+        lerpVec(iC, aC, bC, tt);
+        outWorld.push(iW);
+        outCam.push(iC);
+      } else if (!aIn && bIn) {
+        // entering -> push intersection then b
+        const t = ( -near - aC.z ) / (bC.z - aC.z);
+        const tt = Math.max(0, Math.min(1, t));
+        const iW = new THREE.Vector3();
+        const iC = new THREE.Vector3();
+        lerpVec(iW, aW, bW, tt);
+        lerpVec(iC, aC, bC, tt);
+        outWorld.push(iW);
+        outCam.push(iC);
+        outWorld.push(bW.clone());
+        outCam.push(bC.clone());
+      } else {
+        // both outside -> push nothing
+      }
+    }
+
+    // now outWorld/outCam represent the clipped polygon (0..4 verts)
+    // triangulate fan if >=3 verts
+    const tris = [];
+    if (outWorld.length >= 3) {
+      for (let i = 1; i < outWorld.length - 1; i++) {
+        tris.push([ outWorld[0].clone(), outWorld[i].clone(), outWorld[i+1].clone() ]);
+      }
+    }
+    return tris;
+  }
 
   const api = {
     domElement: canvas,
@@ -76,160 +140,144 @@ export function voidEngine({ width = 640, height = 360, mode = "painter" } = {})
         ctx.fillRect(0, 0, canvas.width, canvas.height);
       }
 
-      const boxes = [];
+      const triangles = [];
       const sprites = [];
 
       scene.traverseVisible((object) => {
-        // --- Meshes -> compute screen-space AABB (axis aligned) ---
         if (object.isMesh && object.visible && object.geometry) {
           const geometry = object.geometry;
+          const posAttr = geometry.attributes && geometry.attributes.position;
+          if (!posAttr) return;
 
-          // ensure bbox exists
-          if (!geometry.boundingBox) {
-            if (geometry.computeBoundingBox) geometry.computeBoundingBox();
-            else return; //can't proceed without bbox
-          }
-          const bb = geometry.boundingBox;
-          const min = bb.min;
-          const max = bb.max;
+          object.updateMatrixWorld(true);
 
-          // corner order:
-          // 0: min x, min y, min z
-          // 1: max x, min y, min z
-          // 2: min x, max y, min z
-          // 3: max x, max y, min z
-          // 4: min x, min y, max z
-          // 5: max x, min y, max z
-          // 6: min x, max y, max z
-          // 7: max x, max y, max z
-          const localCorners = [
-            new THREE.Vector3(min.x, min.y, min.z),
-            new THREE.Vector3(max.x, min.y, min.z),
-            new THREE.Vector3(min.x, max.y, min.z),
-            new THREE.Vector3(max.x, max.y, min.z),
-            new THREE.Vector3(min.x, min.y, max.z),
-            new THREE.Vector3(max.x, min.y, max.z),
-            new THREE.Vector3(min.x, max.y, max.z),
-            new THREE.Vector3(max.x, max.y, max.z),
-          ];
-
-          // world-space corners
-          const worldCorners = localCorners.map(c => c.clone().applyMatrix4(object.matrixWorld));
-          // camera-space corners
-          const camSpace = worldCorners.map(wc => wc.clone().applyMatrix4(camInv));
-
-          const near = camera.near || 0.001;
-          const nearZ = -near;
-          const ptsScreen = [];
-          const depths = [];
-
-          // include any corner that is in front of near plane
-          for (let i = 0; i < worldCorners.length; i++) {
-            const cCam = camSpace[i];
-            if (cCam.z <= nearZ) {
-              // project world corner
-              const proj = worldCorners[i].clone().project(camera);
-              // drop non-finite results
-              if (!Number.isFinite(proj.x) || !Number.isFinite(proj.y) || !Number.isFinite(proj.z)) continue;
-              const sx = (proj.x * 0.5 + 0.5) * canvas.width;
-              const sy = (-proj.y * 0.5 + 0.5) * canvas.height;
-              ptsScreen.push({ x: sx, y: sy });
-              depths.push(-cCam.z);
+          // material color fallback
+          let matColor = { r: 255, g: 255, b: 255, a: 1 };
+          let opacity = 1;
+          if (object.material) {
+            const m = object.material;
+            if (m.color && m.color.isColor) {
+              matColor = { r: m.color.r * 255, g: m.color.g * 255, b: m.color.b * 255, a: 1 };
             }
+            opacity = m.opacity !== undefined ? m.opacity : 1;
           }
+          const colorCss = `rgba(${Math.round(matColor.r)},${Math.round(matColor.g)},${Math.round(matColor.b)},${opacity})`;
 
-          // handle edges crossing the near plane: add intersection points
-          for (const edge of BOX_EDGES) {
-            const i = edge[0], j = edge[1];
-            const aCam = camSpace[i];
-            const bCam = camSpace[j];
-            const aW = worldCorners[i];
-            const bW = worldCorners[j];
+          const index = geometry.index ? geometry.index.array : null;
+          const posArray = posAttr.array;
+          const itemSize = posAttr.itemSize || 3;
+          const count = index ? index.length : posArray.length / itemSize;
 
-            const aIn = aCam.z <= nearZ;
-            const bIn = bCam.z <= nearZ;
-            if (aIn && bIn) continue; // edge fully inside -> corners already added
-            if (aIn === bIn) continue; // both out or both in handled; when both out, skip; both in handled above
+          // iterate triangles
+          for (let i = 0; i < count; i += 3) {
+            const ai = index ? index[i] : i;
+            const bi = index ? index[i+1] : i+1;
+            const ci = index ? index[i+2] : i+2;
 
-            // one in, one out -> compute intersection along camera-space z
-            const denom = (bCam.z - aCam.z);
-            if (Math.abs(denom) < 1e-9) continue;
-            const t = (nearZ - aCam.z) / denom;
-            if (t < 0 || t > 1) continue;
+            // get world positions for triangle vertices
+            const wA = new THREE.Vector3().fromArray(posArray, ai * itemSize).applyMatrix4(object.matrixWorld);
+            const wB = new THREE.Vector3().fromArray(posArray, bi * itemSize).applyMatrix4(object.matrixWorld);
+            const wC = new THREE.Vector3().fromArray(posArray, ci * itemSize).applyMatrix4(object.matrixWorld);
 
-            // interpolate world-space intersection (for projection)
-            const iW = new THREE.Vector3();
-            lerpVec(iW, aW, bW, t);
-            const proj = iW.clone().project(camera);
-            if (!Number.isFinite(proj.x) || !Number.isFinite(proj.y) || !Number.isFinite(proj.z)) continue;
-            const sx = (proj.x * 0.5 + 0.5) * canvas.width;
-            const sy = (-proj.y * 0.5 + 0.5) * canvas.height;
-            ptsScreen.push({ x: sx, y: sy });
+            // compute camera-space positions
+            const cA = wA.clone().applyMatrix4(camInv);
+            const cB = wB.clone().applyMatrix4(camInv);
+            const cC = wC.clone().applyMatrix4(camInv);
 
-            // depth: interpolate camera-space z to compute a reasonable depth
-            const interpCamZ = aCam.z + (bCam.z - aCam.z) * t;
-            depths.push(-interpCamZ);
-          }
+            const near = camera.near || 0.001;
+            const far = camera.far || 1e9;
 
-          // If nothing is inside/visible after clipping, optionally fallback to center marker
-          if (ptsScreen.length === 0) {
-            // fallback: project center of object bounding box
-            const centerLocal = new THREE.Vector3().addVectors(min, max).multiplyScalar(0.5);
-            const centerWorld = centerLocal.applyMatrix4(object.matrixWorld);
-            const centerCam = centerWorld.clone().applyMatrix4(camInv);
-            if (centerCam.z <= nearZ) {
-              const p = centerWorld.clone().project(camera);
-              if (Number.isFinite(p.x) && Number.isFinite(p.y)) {
-                const sx = (p.x * 0.5 + 0.5) * canvas.width;
-                const sy = (-p.y * 0.5 + 0.5) * canvas.height;
-                ptsScreen.push({ x: sx, y: sy });
-                depths.push(-centerCam.z);
+            // Clip triangle against near plane properly
+            const clippedTris = clipPolygonAgainstNear([wA, wB, wC], [cA, cB, cC], near);
+            if (!clippedTris || clippedTris.length === 0) continue;
+
+            // for each resulting triangle, project and add to list with safety checks
+            for (let ct = 0; ct < clippedTris.length; ct++) {
+              const triW = clippedTris[ct];
+              
+              // 1. Compute camera-space z for sorting
+              const camV0 = triW[0].clone().applyMatrix4(camInv);
+              const camV1 = triW[1].clone().applyMatrix4(camInv);
+              const camV2 = triW[2].clone().applyMatrix4(camInv);
+
+              // compute "farthest" depth as positive distance
+              const depth0 = -camV0.z;
+              const depth1 = -camV1.z;
+              const depth2 = -camV2.z;
+              const farthestDepth = Math.max(depth0, depth1, depth2);
+
+              // 2. Project to NDC / screen as before
+              const pv0 = triW[0].clone().project(camera);
+              const pv1 = triW[1].clone().project(camera);
+              const pv2 = triW[2].clone().project(camera);
+
+              // drop if any non-finite
+              if (
+                !Number.isFinite(pv0.x) || !Number.isFinite(pv0.y) || !Number.isFinite(pv0.z) ||
+                !Number.isFinite(pv1.x) || !Number.isFinite(pv1.y) || !Number.isFinite(pv1.z) ||
+                !Number.isFinite(pv2.x) || !Number.isFinite(pv2.y) || !Number.isFinite(pv2.z)
+              ) continue;
+
+              // trivial off-screen test (all verts same side)
+              if (
+                (pv0.x < -1 && pv1.x < -1 && pv2.x < -1) ||
+                (pv0.x > 1 && pv1.x > 1 && pv2.x > 1) ||
+                (pv0.y < -1 && pv1.y < -1 && pv2.y < -1) ||
+                (pv0.y > 1 && pv1.y > 1 && pv2.y > 1) ||
+                (pv0.z < -1 && pv1.z < -1 && pv2.z < -1) ||
+                (pv0.z > 1 && pv1.z > 1 && pv2.z > 1)
+              ) {
+                continue;
               }
-            } else {
-              // nothing visible; skip this object
-            }
-          }
 
-          if (ptsScreen.length > 0) {
-            // compute axis-aligned bbox in screen space
-            let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-            for (const p of ptsScreen) {
-              if (p.x < minX) minX = p.x;
-              if (p.y < minY) minY = p.y;
-              if (p.x > maxX) maxX = p.x;
-              if (p.y > maxY) maxY = p.y;
-            }
+              // convert to screen coords
+              const sxA = (pv0.x * 0.5 + 0.5) * canvas.width;
+              const syA = (-pv0.y * 0.5 + 0.5) * canvas.height;
+              const sxB = (pv1.x * 0.5 + 0.5) * canvas.width;
+              const syB = (-pv1.y * 0.5 + 0.5) * canvas.height;
+              const sxC = (pv2.x * 0.5 + 0.5) * canvas.width;
+              const syC = (-pv2.y * 0.5 + 0.5) * canvas.height;
 
-            // clamp to some sane range (optional)
-            const clampVal = 1e8;
-            if (!isFinite(minX) || Math.abs(minX) > clampVal) minX = 0;
-            if (!isFinite(minY) || Math.abs(minY) > clampVal) minY = 0;
-            if (!isFinite(maxX) || Math.abs(maxX) > clampVal) maxX = canvas.width;
-            if (!isFinite(maxY) || Math.abs(maxY) > clampVal) maxY = canvas.height;
-
-            // choose color from material or userData
-            let matColor = { r: 255, g: 255, b: 255, a: 1 };
-            let opacity = 1;
-            if (object.material) {
-              const m = object.material;
-              if (m.color && m.color.isColor) {
-                matColor = { r: m.color.r * 255, g: m.color.g * 255, b: m.color.b * 255, a: 1 };
+              // sanity check coords
+              const MAX_SCREEN_COORD = 1e7;
+              if (
+                !Number.isFinite(sxA) || !Number.isFinite(syA) ||
+                !Number.isFinite(sxB) || !Number.isFinite(syB) ||
+                !Number.isFinite(sxC) || !Number.isFinite(syC) ||
+                Math.abs(sxA) > MAX_SCREEN_COORD || Math.abs(syA) > MAX_SCREEN_COORD ||
+                Math.abs(sxB) > MAX_SCREEN_COORD || Math.abs(syB) > MAX_SCREEN_COORD ||
+                Math.abs(sxC) > MAX_SCREEN_COORD || Math.abs(syC) > MAX_SCREEN_COORD
+              ) {
+                continue;
               }
-              opacity = m.opacity !== undefined ? m.opacity : 1;
-            }
-            const colorCss = `rgba(${Math.round(matColor.r)},${Math.round(matColor.g)},${Math.round(matColor.b)},${opacity})`;
 
-            // depth for sorting: use farthest (max) depth from depths[]
-            const depth = depths.length ? Math.max(...depths) : 0;
+              // skip degenerate / tiny triangles (keep threshold small since we're using boxes)
+              const ax = sxB - sxA, ay = syB - syA;
+              const bx = sxC - sxA, by = syC - syA;
+              const cross = Math.abs(ax * by - ay * bx);
+              const screenArea = cross * 0.5;
+              if (screenArea < 0.05) continue;
 
-            // push box
-            boxes.push({
-              minX, minY, maxX, maxY, color: colorCss, depth, obj: object
-            });
-          }
-        } // end mesh handling
+              // 3. Instead of storing triangle verts for fill, compute bounding box in screen-space
+              const minX = Math.min(sxA, sxB, sxC);
+              const minY = Math.min(syA, syB, syC);
+              const maxX = Math.max(sxA, sxB, sxC);
+              const maxY = Math.max(syA, syB, syC);
 
-        // --- sprites (unchanged) ---
+              triangles.push({
+                // store box in screen coords
+                box: { x: minX, y: minY, w: Math.max(1, maxX - minX), h: Math.max(1, maxY - minY) },
+                // keep color and original material color/opacity for nicer fills
+                color: colorCss,
+                matColor: matColor,
+                opacity: opacity,
+                depth: farthestDepth
+              });
+            } // clipped tris loop
+          } // triangle iteration
+        } // mesh handling
+
+        // sprites (unchanged)
         if (object.isSprite && object.visible) {
           object.updateMatrixWorld(true);
           const wp = new THREE.Vector3();
@@ -252,31 +300,30 @@ export function voidEngine({ width = 640, height = 360, mode = "painter" } = {})
         }
       }); // traverseVisible
 
-      // Sort boxes (farthest first)
-      boxes.sort((a, b) => b.depth - a.depth);
+      // 4. Sort boxes by depth (farthest to nearest)
+      triangles.sort((a, b) => b.depth - a.depth);
 
-      // draw boxes
-      for (let i = 0; i < boxes.length; i++) {
-        const b = boxes[i];
-        const w = Math.max(1, b.maxX - b.minX);
-        const h = Math.max(1, b.maxY - b.minY);
+      // draw bounding boxes (far -> near)
+      for (let t = 0; t < triangles.length; t++) {
+        const tri = triangles[t];
+        const bx = tri.box.x;
+        const by = tri.box.y;
+        const bw = tri.box.w;
+        const bh = tri.box.h;
 
-        // visual falloff based on depth (optional tuning)
-        const avgDepth = b.depth || 0;
-        const fillAlpha = Math.max(0.08, Math.min(0.85, 1 - (avgDepth * 0.002)));
-        const strokeAlpha = Math.max(0.5, Math.min(1, 1 - (avgDepth * 0.002)));
-        const lineWidth = Math.max(1, 2 - (avgDepth * 0.001));
+        // small guard: skip extremely tiny boxes
+        if (bw < 0.5 || bh < 0.5) continue;
 
-        ctx.save();
-        ctx.globalAlpha = fillAlpha;
-        ctx.fillStyle = b.color;
-        ctx.fillRect(b.minX, b.minY, w, h);
+        // stroked outline using exact material color & alpha
+        ctx.lineWidth = 1;
+        ctx.strokeStyle = tri.color;
+        ctx.strokeRect(bx, by, bw, bh);
 
-        ctx.globalAlpha = strokeAlpha;
-        ctx.strokeStyle = "rgba(0,0,0,0.85)";
-        ctx.lineWidth = lineWidth;
-        ctx.strokeRect(b.minX, b.minY, w, h);
-        ctx.restore();
+        // light fill to indicate the area (very low alpha, scaled by object opacity)
+        const fillAlpha = Math.max(0.02, Math.min(0.25, tri.opacity * 0.08));
+        const fillCss = rgbaToCss({ r: tri.matColor.r, g: tri.matColor.g, b: tri.matColor.b, a: fillAlpha });
+        ctx.fillStyle = fillCss;
+        ctx.fillRect(bx, by, bw, bh);
       }
 
       // sprites (far->near)
