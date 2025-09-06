@@ -811,23 +811,82 @@ function setupDetailToggle() {
 }
 
 
-/// Updated voidEngine: fixed colors + near-plane clipping + off-screen silhouette fallback
-function voidEngine({ width = 1280, height = 720 } = {}) {
-  const canvas = document.createElement('canvas');
-  canvas.style.position = 'relative';
-  canvas.style.zIndex = '0';
-  canvas.width = width;
-  canvas.height = height;
-  const ctx = canvas.getContext('2d');
+// Fully updated render(scene, camera) — fixes: correct color extraction + off-screen silhouette fallback
+function render(scene, camera) {
+  if (!scene || !camera) return;
 
-  // Scratch vars for projections & temp math
-  const proj = new THREE.Vector3();
-  const tmpPos = new THREE.Vector3();
-  const tmpVec = new THREE.Vector3();
-  const tmpVec2 = new THREE.Vector3();
-  const tmpMat = new THREE.Matrix4();
+  // Clear cached frustum planes so they re-generate per-frame (keeps frustum tests correct)
+  if (camera.___frustumPlanes) delete camera.___frustumPlanes;
 
-  // helper: build convex hull (Andrew monotone chain) of 2D points
+  // Clear buffers
+  clearBuffers();
+
+  // Update matrices on Three objects
+  scene.updateMatrixWorld(true);
+  camera.updateMatrixWorld(true);
+  camera.updateProjectionMatrix();
+
+  // sample lighting
+  const sceneLight = sampleSceneLight(scene);
+
+  // viewProj matrix and elements reused
+  const viewProj = new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+  const viewProjE = viewProj.elements;
+  const viewE = camera.matrixWorldInverse.elements;
+
+  // helper: sample a set of world points to approximate object silhouette (bbox corners, sphere, or subset of positions)
+  function sampleWorldPointsFor(obj, geom) {
+    const worldPoints = [];
+    if (geom && geom.boundingBox) {
+      const bb = geom.boundingBox;
+      const min = bb.min;
+      const max = bb.max;
+      const corners = [
+        [min.x, min.y, min.z],
+        [min.x, min.y, max.z],
+        [min.x, max.y, min.z],
+        [min.x, max.y, max.z],
+        [max.x, min.y, min.z],
+        [max.x, min.y, max.z],
+        [max.x, max.y, min.z],
+        [max.x, max.y, max.z],
+      ];
+      for (let c of corners) {
+        tmpVec.set(c[0], c[1], c[2]).applyMatrix4(obj.matrixWorld);
+        worldPoints.push(tmpVec.clone());
+      }
+    } else if (geom && geom.boundingSphere) {
+      const bs = geom.boundingSphere;
+      const center = bs.center.clone().applyMatrix4(obj.matrixWorld);
+      const r = bs.radius * (obj.matrixWorld.getMaxScaleOnAxis ? obj.matrixWorld.getMaxScaleOnAxis() : 1);
+      worldPoints.push(center.clone());
+      worldPoints.push(center.clone().add(new THREE.Vector3(r, 0, 0)));
+      worldPoints.push(center.clone().add(new THREE.Vector3(-r, 0, 0)));
+      worldPoints.push(center.clone().add(new THREE.Vector3(0, r, 0)));
+      worldPoints.push(center.clone().add(new THREE.Vector3(0, -r, 0)));
+      worldPoints.push(center.clone().add(new THREE.Vector3(0, 0, r)));
+      worldPoints.push(center.clone().add(new THREE.Vector3(0, 0, -r)));
+    } else if (geom && geom.attributes && geom.attributes.position && geom.attributes.position.count > 0) {
+      const posAttr = geom.attributes.position;
+      const step = Math.max(1, Math.floor(posAttr.count / 12));
+      for (let i = 0; i < posAttr.count && worldPoints.length < 12; i += step) {
+        tmpVec.set(
+          posAttr.getX(i),
+          posAttr.getY(i),
+          posAttr.getZ(i)
+        ).applyMatrix4(obj.matrixWorld);
+        worldPoints.push(tmpVec.clone());
+      }
+    } else {
+      // fallback to center
+      const c = new THREE.Vector3();
+      obj.getWorldPosition(c);
+      worldPoints.push(c);
+    }
+    return worldPoints;
+  }
+
+  // helper: convex hull (Andrew monotone chain) for fallback silhouette
   function convexHull(points) {
     if (points.length <= 1) return points.slice();
     const pts = points.slice().sort((a, b) => (a.x === b.x ? a.y - b.y : a.x - b.x));
@@ -848,516 +907,317 @@ function voidEngine({ width = 1280, height = 720 } = {}) {
     return lower.concat(upper);
   }
 
-  // small helper: safely get material color as {r,g,b,a}
-  function readMaterialColor(mat) {
-    let r = 255, g = 255, b = 255, a = 1;
+  // collector for painter-mode triangles
+  const triList = [];
+
+  // traverse meshes in the scene
+  scene.traverse(object => {
+    if (!object.isMesh || !object.visible) return;
+
+    const mesh = object;
+    const geom = mesh.geometry;
+    if (!geom) return;
+
+    const posAttr = geom.attributes.position;
+    if (!posAttr) return;
+    const idxAttr = geom.index;
+    const normalAttr = geom.attributes.normal;
+
+    // bounding sphere frustum culling (if present)
+    if (geom.boundingSphere) {
+      const bs = geom.boundingSphere.clone();
+      bs.applyMatrix4(mesh.matrixWorld);
+      if (!sphereInFrustum(bs.center, bs.radius, camera)) return;
+    }
+
+    // material color fallback (fixed: check for != null instead of `||`)
+    let matColor = { r: 200, g: 200, b: 200 };
+    if (mesh.material) {
+      try {
+        if (mesh.material.color) {
+          const cr = (mesh.material.color.r != null) ? mesh.material.color.r : 1;
+          const cg = (mesh.material.color.g != null) ? mesh.material.color.g : 1;
+          const cb = (mesh.material.color.b != null) ? mesh.material.color.b : 1;
+          matColor = {
+            r: Math.floor(cr * 255),
+            g: Math.floor(cg * 255),
+            b: Math.floor(cb * 255)
+          };
+        } else if (mesh.userData && mesh.userData.color) {
+          const c = mesh.userData.color;
+          matColor = { r: (c >> 16) & 255, g: (c >> 8) & 255, b: c & 255 };
+        }
+      } catch (e) {
+        // keep fallback
+      }
+    }
+
+    // prepare arrays
+    const posArray = posAttr.array;
+    const normalArray = normalAttr ? normalAttr.array : null;
+    const indexArray = idxAttr ? idxAttr.array : null;
+    const vcount = posAttr.count;
+
+    // precompute model matrix elements and normal transform areas
+    const modelMat = mesh.matrixWorld.elements;
+
+    // project vertices and store clip.w and camera-space z
+    const projected = new Array(vcount);
+    for (let i = 0; i < vcount; i++) {
+      const px = posArray[i*3 + 0];
+      const py = posArray[i*3 + 1];
+      const pz = posArray[i*3 + 2];
+
+      // world coordinates
+      const world = transformVec4(modelMat, [px, py, pz, 1]); // [wx,wy,wz,ww]
+
+      // camera-space (view) coordinates: view = V * world
+      const view = transformVec4(viewE, world);
+
+      // clip coordinates: clip = P * view * world
+      const clip = transformVec4(viewProjE, world);
+      const w = clip[3] || 1e-9;
+      const clipW = clip[3];
+
+      const ndcX = clip[0] / w;
+      const ndcY = clip[1] / w;
+      const ndcZ = clip[2] / w; // NDC z in [-1..1]
+
+      const [sx, sy] = toScreen(ndcX, ndcY);
+
+      // normals: transform if present, else mark null so we compute per-triangle later
+      let nx = null, ny = null, nz = null;
+      if (normalArray) {
+        nx = normalArray[i*3 + 0];
+        ny = normalArray[i*3 + 1];
+        nz = normalArray[i*3 + 2];
+        // transform normal by model upper-left 3x3 (approx)
+        const nmx = modelMat[0]*nx + modelMat[4]*ny + modelMat[8]*nz;
+        const nmy = modelMat[1]*nx + modelMat[5]*ny + modelMat[9]*nz;
+        const nmz = modelMat[2]*nx + modelMat[6]*ny + modelMat[10]*nz;
+        const len = Math.hypot(nmx, nmy, nmz) || 1;
+        nx = nmx / len; ny = nmy / len; nz = nmz / len;
+      }
+
+      projected[i] = {
+        sx, sy,
+        ndcZ,
+        z: ndcZ,
+        clipW,
+        viewZ: view[2],
+        nx, ny, nz,
+        world: new THREE.Vector3(world[0], world[1], world[2])
+      };
+    }
+
+    // determine if model world transform flips winding (negative determinant)
+    let flipCulling = false;
     try {
-      if (!mat) return { r, g, b, a };
-      if (mat.color) {
-        // THREE.Color
-        r = Math.round((mat.color.r ?? 1) * 255);
-        g = Math.round((mat.color.g ?? 1) * 255);
-        b = Math.round((mat.color.b ?? 1) * 255);
-      } else if (mat.emissive) {
-        r = Math.round((mat.emissive.r ?? 0) * 255);
-        g = Math.round((mat.emissive.g ?? 0) * 255);
-        b = Math.round((mat.emissive.b ?? 0) * 255);
-      } else if (mat.userData && mat.userData.color) {
-        const c = mat.userData.color;
-        r = (c >> 16) & 255; g = (c >> 8) & 255; b = c & 255;
-      } else if (typeof mat === 'string') {
-        // rare: a user supplied string
-        // try to parse hex #RRGGBB
-        if (mat[0] === '#') {
-          const hex = parseInt(mat.slice(1), 16);
-          r = (hex >> 16) & 255; g = (hex >> 8) & 255; b = hex & 255;
-        }
-      }
-      if (mat.opacity != null) a = mat.opacity;
-      if (mat.transparent === true && (mat.opacity == null)) a = 0.999;
+      const m3 = new THREE.Matrix3().setFromMatrix4(mesh.matrixWorld);
+      // try THREE determinant if available, else fallback manual
+      const det = (m3.determinant) ? m3.determinant() : (
+        m3.elements[0]*m3.elements[4]*m3.elements[8] -
+        m3.elements[0]*m3.elements[5]*m3.elements[7] -
+        m3.elements[1]*m3.elements[3]*m3.elements[8] +
+        m3.elements[1]*m3.elements[5]*m3.elements[6] +
+        m3.elements[2]*m3.elements[3]*m3.elements[7] -
+        m3.elements[2]*m3.elements[4]*m3.elements[6]
+      );
+      flipCulling = (det < 0);
     } catch (e) {
-      // keep defaults
-    }
-    return { r, g, b, a };
-  }
-
-  // clip a segment (in world space) against camera near plane using camera-space z values.
-  // returns intersection point (world) when segment crosses near plane.
-  function intersectSegmentNearPlane(worldA, worldB, viewZA, viewZB, nearZ) {
-    const denom = (viewZB - viewZA);
-    if (Math.abs(denom) < 1e-9) return null;
-    const t = (nearZ - viewZA) / denom;
-    if (!(t >= 0 && t <= 1)) return null;
-    return worldA.clone().lerp(worldB, t);
-  }
-
-  // Tri clipping against near plane in camera-space: returns array of 1-2 triangles (each triangle is array of world vertices)
-  function clipTriangleAgainstNearPlane(worldVerts, viewZs, nearZ) {
-    // worldVerts: [v0_worldVec, v1_worldVec, v2_worldVec]
-    // viewZs: [z0, z1, z2] camera-space z
-    const inside = [];
-    const outside = [];
-    for (let i = 0; i < 3; i++) {
-      if (viewZs[i] <= nearZ) inside.push(i); else outside.push(i);
-    }
-    // all outside -> nothing
-    if (inside.length === 0) return [];
-    // all inside -> original triangle
-    if (inside.length === 3) return [[worldVerts[0], worldVerts[1], worldVerts[2]]];
-
-    // one inside, two outside -> produce one smaller triangle
-    if (inside.length === 1 && outside.length === 2) {
-      const i0 = inside[0];
-      const i1 = outside[0];
-      const i2 = outside[1];
-      const p0 = worldVerts[i0];
-      const p1 = worldVerts[i1];
-      const p2 = worldVerts[i2];
-      const z0 = viewZs[i0], z1 = viewZs[i1], z2 = viewZs[i2];
-      const ip1 = intersectSegmentNearPlane(p0, p1, z0, z1, nearZ);
-      const ip2 = intersectSegmentNearPlane(p0, p2, z0, z2, nearZ);
-      if (!ip1 || !ip2) return [];
-      return [[p0.clone(), ip1.clone(), ip2.clone()]];
+      flipCulling = false;
     }
 
-    // two inside, one outside -> produce two triangles (quad triangulation)
-    if (inside.length === 2 && outside.length === 1) {
-      const i0 = inside[0], i1 = inside[1], i2 = outside[0];
-      const p0 = worldVerts[i0];
-      const p1 = worldVerts[i1];
-      const p2 = worldVerts[i2];
-      const z0 = viewZs[i0], z1 = viewZs[i1], z2 = viewZs[i2];
-      const ip0 = intersectSegmentNearPlane(p0, p2, z0, z2, nearZ);
-      const ip1 = intersectSegmentNearPlane(p1, p2, z1, z2, nearZ);
-      if (!ip0 || !ip1) return [];
-      // form two triangles: (p0, p1, ip0) and (ip0, p1, ip1)
-      return [[p0.clone(), p1.clone(), ip0.clone()], [ip0.clone(), p1.clone(), ip1.clone()]];
+    // helper to compute triangle normals (world-space) if normals missing
+    function computeTriangleNormals(ia, ib, ic) {
+      const A = projected[ia], B = projected[ib], C = projected[ic];
+      const vA = new THREE.Vector3().copy(A.world);
+      const vB = new THREE.Vector3().copy(B.world);
+      const vC = new THREE.Vector3().copy(C.world);
+      const e1 = vB.clone().sub(vA);
+      const e2 = vC.clone().sub(vA);
+      const triNormal = e1.cross(e2).normalize();
+      A.nx = triNormal.x; A.ny = triNormal.y; A.nz = triNormal.z;
+      B.nx = triNormal.x; B.ny = triNormal.y; B.nz = triNormal.z;
+      C.nx = triNormal.x; C.ny = triNormal.y; C.nz = triNormal.z;
     }
 
-    return [];
-  }
+    // triangle push with safety checks
+    let meshTriAdded = 0;
+    const pushTriangle = (i0, i1, i2) => {
+      const A = projected[i0], B = projected[i1], C = projected[i2];
 
-  const api = {
-    domElement: canvas,
-    options: {
-      // if you ever want to toggle strict near-plane clipping:
-      strictNearClip: true
-    },
-    setSize(w, h, updateStyle = true) {
-      canvas.width = w;
-      canvas.height = h;
-      if (updateStyle) {
-        canvas.style.width = `${w}px`;
-        canvas.style.height = `${h}px`;
+      // 1) If ALL three clipW <= 0 then triangle is fully behind camera -> skip
+      if (A.clipW <= 0 && B.clipW <= 0 && C.clipW <= 0) return;
+
+      // 2) Conservative fallback: if ANY clipW <= 0 then triangle crosses near plane -> skip (prevents exploding verts)
+      // If you want perfect rendering, replace this with clip-to-near-plane logic.
+      if (A.clipW <= 0 || B.clipW <= 0 || C.clipW <= 0) {
+        return;
       }
-    },
-    // Minimal clear color support
-    setClearColor(hex, alpha = 1) {
-      api._clearColor = { hex, alpha };
-    },
-    _clearColor: { hex: 0x000000, alpha: 1 },
 
-    // Basic render: draw sprites (material.map.image) and approximated shapes for meshes
-    render(scene, camera) {
-      // Clear with the clear color (converted to CSS)
-      const c = api._clearColor;
-      const rC = (c.hex >> 16) & 0xff;
-      const gC = (c.hex >> 8) & 0xff;
-      const bC = c.hex & 0xff;
-      ctx.save();
-      ctx.setTransform(1, 0, 0, 1, 0, 0);
-      ctx.fillStyle = `rgba(${rC},${gC},${bC},${c.alpha})`;
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-      ctx.restore();
+      // 3) Backface culling in screen space
+      const cross = (B.sx - A.sx)*(C.sy - A.sy) - (B.sy - A.sy)*(C.sx - A.sx);
+      const cull = (flipCulling ? (cross <= 0) : (cross >= 0));
+      if (cull) return;
 
-      // update camera matrices once
-      camera.updateMatrixWorld();
-      if (camera.updateProjectionMatrix) camera.updateProjectionMatrix();
+      // 4) Ensure normals exist (compute per-triangle if missing)
+      if (A.nx === null || B.nx === null || C.nx === null) {
+        computeTriangleNormals(i0, i1, i2);
+      }
 
-      // camera world->camera matrix (inverse of matrixWorld)
-      const camInv = tmpMat.copy(camera.matrixWorld).invert();
+      if (mode === "painter") {
+        const avgDepth = (A.z + B.z + C.z) / 3.0;
+        triList.push({ A, B, C, avgDepth, color: matColor, mesh });
+      } else {
+        const shadeParams = { lightDir: sceneLight.dir, ambient: sceneLight.ambient, diffuse: sceneLight.diffuse };
+        const a = { x: A.sx, y: A.sy, z: A.z, nx: A.nx, ny: A.ny, nz: A.nz };
+        const b = { x: B.sx, y: B.sy, z: B.z, nx: B.nx, ny: B.ny, nz: B.nz };
+        const c = { x: C.sx, y: C.sy, z: C.z, nx: C.nx, ny: C.ny, nz: C.nz };
+        rasterizeTriangleZ(a, b, c, matColor, shadeParams);
+      }
 
-      // collect drawables (so we can sort by depth)
-      const drawables = [];
-      scene.traverse((obj) => {
-        if (!obj.visible) return;
-        if (obj.isCamera || obj.isLight) return;
+      meshTriAdded++;
+    };
 
-        // World position (center)
-        obj.getWorldPosition(tmpPos);
-        proj.copy(tmpPos).project(camera); // NDC -1..1 (center)
+    // iterate triangles (indexed or sequential)
+    if (indexArray) {
+      for (let t = 0; t < indexArray.length; t += 3) {
+        pushTriangle(indexArray[t], indexArray[t+1], indexArray[t+2]);
+      }
+    } else {
+      for (let t = 0; t < vcount; t += 3) {
+        pushTriangle(t, t+1, t+2);
+      }
+    }
 
-        // screen coords of center (used as fallback)
-        const sx = (proj.x * 0.5 + 0.5) * canvas.width;
-        const sy = (-proj.y * 0.5 + 0.5) * canvas.height;
+    // === FALLBACK: if mesh added no triangles (e.g., all verts clipped or off-screen), produce silhouette via convex hull of sample points ===
+    if (meshTriAdded === 0) {
+      try {
+        // sample world points (bbox corners / sphere / subset)
+        const worldPoints = sampleWorldPointsFor(mesh, geom);
+        if (worldPoints.length > 0) {
+          // camera-space Zs using viewE
+          const camSpaceZs = worldPoints.map(wp => {
+            const w = transformVec4(viewE, [wp.x, wp.y, wp.z, 1]);
+            return w[2];
+          });
 
-        // center distance for fallback (still useful)
-        const centerDist = camera.position.distanceTo(tmpPos);
+          const nearZ = - (camera.near !== undefined ? camera.near : 0.1);
+          const farZ = - (camera.far !== undefined ? camera.far : 1e12);
 
-        // check for texture (sprites)
-        const mapImage = obj.material && obj.material.map && obj.material.map.image ? obj.material.map.image : null;
-
-        // If user explicitly wants to always render, skip strict culling checks later
-        const alwaysRender = !!obj.userData?.alwaysRender;
-
-        // Helper: assemble sample world points for an object (bbox corners / sphere / subset of positions)
-        function sampleWorldPointsFor(obj, geom) {
-          const worldPoints = [];
-          if (geom && geom.boundingBox) {
-            const bb = geom.boundingBox;
-            const min = bb.min;
-            const max = bb.max;
-            const corners = [
-              [min.x, min.y, min.z],
-              [min.x, min.y, max.z],
-              [min.x, max.y, min.z],
-              [min.x, max.y, max.z],
-              [max.x, min.y, min.z],
-              [max.x, min.y, max.z],
-              [max.x, max.y, min.z],
-              [max.x, max.y, max.z],
-            ];
-            for (let c of corners) {
-              tmpVec.set(c[0], c[1], c[2]).applyMatrix4(obj.matrixWorld);
-              worldPoints.push(tmpVec.clone());
-            }
-          } else if (geom && geom.boundingSphere) {
-            const bs = geom.boundingSphere;
-            const center = bs.center.clone().applyMatrix4(obj.matrixWorld);
-            const r = bs.radius * (obj.matrixWorld.getMaxScaleOnAxis ? obj.matrixWorld.getMaxScaleOnAxis() : 1);
-            worldPoints.push(center.clone());
-            worldPoints.push(center.clone().add(new THREE.Vector3(r, 0, 0)));
-            worldPoints.push(center.clone().add(new THREE.Vector3(-r, 0, 0)));
-            worldPoints.push(center.clone().add(new THREE.Vector3(0, r, 0)));
-            worldPoints.push(center.clone().add(new THREE.Vector3(0, -r, 0)));
-            worldPoints.push(center.clone().add(new THREE.Vector3(0, 0, r)));
-            worldPoints.push(center.clone().add(new THREE.Vector3(0, 0, -r)));
-          } else if (geom && geom.attributes && geom.attributes.position && geom.attributes.position.count > 0) {
-            const posAttr = geom.attributes.position;
-            for (let i = 0; i < Math.min(12, posAttr.count); i += Math.max(1, Math.floor(posAttr.count / 12))) {
-              tmpVec.set(
-                posAttr.getX(i),
-                posAttr.getY(i),
-                posAttr.getZ(i)
-              ).applyMatrix4(obj.matrixWorld);
-              worldPoints.push(tmpVec.clone());
-            }
-          } else {
-            // fallback to center
-            worldPoints.push(tmpPos.clone());
-          }
-          return worldPoints;
-        }
-
-        // If sprite/image
-        if (mapImage) {
-          // try to create sample points to compute near/far distances
-          let worldPoints = [];
-          if (obj.geometry) {
-            worldPoints = sampleWorldPointsFor(obj, obj.geometry);
-          } else {
-            worldPoints = [tmpPos.clone()];
-          }
-          // compute distances to camera for these samples
-          const dists = worldPoints.map(wp => camera.position.distanceTo(wp));
-          const distNear = Math.min(...dists);
-          const distFar = Math.max(...dists);
-
-          drawables.push({ type: 'image', obj, sx, sy, distNear, distFar, projZ: proj.z, mapImage });
-          return;
-        } else if (obj.isMesh && obj.geometry) {
-          const geom = obj.geometry;
-          if (!geom.boundingBox) geom.computeBoundingBox && geom.computeBoundingBox();
-          if (!geom.boundingSphere) geom.computeBoundingSphere && geom.computeBoundingSphere();
-
-          // Build sample points in world space (bbox corners, sphere points, or subset of positions)
-          const worldPoints = sampleWorldPointsFor(obj, geom);
-
-          // If no world points, fallback to center marker (rare)
-          if (worldPoints.length === 0) {
-            if (obj.userData?.forceMarker) {
-              drawables.push({ type: 'rect', obj, sx, sy, distNear: centerDist, distFar: centerDist, sizePx: obj.userData?.markerSizePx ?? 6 });
-            }
-            return;
-          }
-
-          // compute distances to camera for the sample points (this is the key change)
-          const dists = worldPoints.map(wp => camera.position.distanceTo(wp));
-          const distNear = Math.min(...dists);
-          const distFar = Math.max(...dists);
-
-          // === TRIANGLE-LEVEL PROJECT + NEAR-PLANE CLIPPING (preferred) ===
-          // We'll try to render actual polygons via projecting geometry if available.
-          let successfullyAddedTri = false;
-          if (geom.attributes && geom.attributes.position) {
-            try {
-              const posAttr = geom.attributes.position;
-              const idxAttr = geom.index;
-              const normalAttr = geom.attributes.normal;
-              // we'll need world() & camera-space z for each vertex to clip triangles correctly
-              // Precompute world positions & camera-space z for all vertices
-              const vcount = posAttr.count;
-              const worldVerts = new Array(vcount);
-              const viewZs = new Array(vcount);
-              for (let vi = 0; vi < vcount; vi++) {
-                tmpVec.set(posAttr.getX(vi), posAttr.getY(vi), posAttr.getZ(vi)).applyMatrix4(obj.matrixWorld);
-                worldVerts[vi] = tmpVec.clone();
-                // camera-space coords
-                const camPt = worldVerts[vi].clone().applyMatrix4(camInv); // camera-space
-                viewZs[vi] = camPt.z;
-              }
-
-              const nearZ = - (camera.near !== undefined ? camera.near : 0.1);
-              // helper: push polygon via convex hull of projected clipped polygon points
-              function pushProjectedPolygonFromPoints(pointsWorld) {
-                const pts2d = [];
-                for (const pw of pointsWorld) {
-                  proj.copy(pw).project(camera);
-                  const px = (proj.x * 0.5 + 0.5) * canvas.width;
-                  const py = (-proj.y * 0.5 + 0.5) * canvas.height;
-                  pts2d.push({ x: px, y: py, ndcZ: proj.z });
-                }
-                if (pts2d.length === 0) return;
-                if (pts2d.length >= 3) {
-                  const hull = convexHull(pts2d);
-                  if (hull.length >= 3) {
-                    drawables.push({ type: 'poly', obj, pts: hull, distNear, distFar, projZ: pts2d[0].ndcZ });
-                  } else if (hull.length === 2) {
-                    drawables.push({ type: 'line', obj, pts: hull, distNear, distFar });
-                  } else {
-                    drawables.push({ type: 'rect', obj, sx: pts2d[0].x, sy: pts2d[0].y, distNear, distFar });
-                  }
-                } else if (pts2d.length === 2) {
-                  drawables.push({ type: 'line', obj, pts: pts2d, distNear, distFar });
-                } else if (pts2d.length === 1) {
-                  drawables.push({ type: 'rect', obj, sx: pts2d[0].x, sy: pts2d[0].y, distNear, distFar });
-                }
-              }
-
-              // iterate triangles; clip each triangle against near plane (camera-space z)
-              const indices = idxAttr ? Array.from(idxAttr.array) : null;
-              if (indices) {
-                for (let t = 0; t < indices.length; t += 3) {
-                  const i0 = indices[t], i1 = indices[t+1], i2 = indices[t+2];
-                  const triWorld = [worldVerts[i0], worldVerts[i1], worldVerts[i2]];
-                  const triView = [viewZs[i0], viewZs[i1], viewZs[i2]];
-                  const clipped = clipTriangleAgainstNearPlane(triWorld, triView, nearZ);
-                  if (clipped.length > 0) {
-                    // each clipped entry is a triangle in world space; add it as small polygon for painter rendering
-                    for (const tri of clipped) pushProjectedPolygonFromPoints(tri);
-                    successfullyAddedTri = true;
-                  }
-                }
-              } else {
-                // non-indexed triangles
-                for (let t = 0; t < vcount; t += 3) {
-                  const triWorld = [worldVerts[t+0], worldVerts[t+1], worldVerts[t+2]];
-                  const triView = [viewZs[t+0], viewZs[t+1], viewZs[t+2]];
-                  const clipped = clipTriangleAgainstNearPlane(triWorld, triView, nearZ);
-                  if (clipped.length > 0) {
-                    for (const tri of clipped) pushProjectedPolygonFromPoints(tri);
-                    successfullyAddedTri = true;
-                  }
-                }
-              }
-            } catch (e) {
-              // if anything goes wrong we fall back to hull method below
-              successfullyAddedTri = false;
-            }
-          }
-
-          // If triangle-level approach failed to produce anything (e.g., all verts behind near OR geometry missing),
-          // fall back to the sample-points + edge-intersection silhouette approach (your old engine logic).
-          if (!successfullyAddedTri) {
-            // Convert sample points to camera space
-            const camSpacePts = worldPoints.map(wp => wp.clone().applyMatrix4(camInv));
-            const nearZ = - (camera.near !== undefined ? camera.near : 0.1);
-            const farZ = - (camera.far !== undefined ? camera.far : 1e12);
-
-            // Collect projected points for those in front of near and within far
-            const pts2d = [];
-            for (let i = 0; i < worldPoints.length; i++) {
-              const camPt = camSpacePts[i];
-              const wp = worldPoints[i];
-              if (camPt.z <= nearZ && camPt.z >= farZ) {
-                proj.copy(wp).project(camera);
-                const px = (proj.x * 0.5 + 0.5) * canvas.width;
-                const py = (-proj.y * 0.5 + 0.5) * canvas.height;
-                pts2d.push({ x: px, y: py, ndcZ: proj.z });
-              }
-            }
-
-            // For edges that cross the near plane, compute intersection point and include it
-            for (let i = 0; i < worldPoints.length; i++) {
-              for (let j = i + 1; j < worldPoints.length; j++) {
-                const z1 = camSpacePts[i].z;
-                const z2 = camSpacePts[j].z;
-                // If one side is in front (<= nearZ) and the other is behind (> nearZ), there's a crossing
-                if ((z1 <= nearZ && z2 > nearZ) || (z2 <= nearZ && z1 > nearZ)) {
-                  const denom = (z2 - z1);
-                  if (Math.abs(denom) < 1e-9) continue;
-                  const t = (nearZ - z1) / denom;
-                  if (t < 0 || t > 1) continue;
-                  const ip = worldPoints[i].clone().lerp(worldPoints[j], t);
-                  proj.copy(ip).project(camera);
-                  const px = (proj.x * 0.5 + 0.5) * canvas.width;
-                  const py = (-proj.y * 0.5 + 0.5) * canvas.height;
-                  pts2d.push({ x: px, y: py, ndcZ: proj.z });
-                }
-              }
-            }
-
-            // If strict near clipping is disabled, include center projection as a loose fallback
-            if (!api.options.strictNearClip && pts2d.length === 0) {
-              proj.copy(tmpPos).project(camera);
+          // collect projected points for those in front of near and within far
+          const pts2d = [];
+          for (let i = 0; i < worldPoints.length; i++) {
+            const camZ = camSpaceZs[i];
+            const wp = worldPoints[i];
+            if (camZ <= nearZ && camZ >= farZ) {
+              proj.copy(wp).project(camera);
               const px = (proj.x * 0.5 + 0.5) * canvas.width;
               const py = (-proj.y * 0.5 + 0.5) * canvas.height;
-              pts2d.push({ x: px, y: py, ndcZ: proj.z });
+              pts2d.push({ x: px, y: py, ndcZ: proj.z, world: wp.clone() });
             }
+          }
 
-            // If after near-plane clipping we have zero pts, we may still want a fallback marker,
-            // but only if user asked or object is forced to render.
-            if (pts2d.length === 0) {
-              if (alwaysRender || obj.userData?.forceMarker) {
-                // clamp center to screen bounds so we get a marker on-screen
-                const cx = Math.max(0, Math.min(canvas.width, sx));
-                const cy = Math.max(0, Math.min(canvas.height, sy));
-                drawables.push({ type: 'rect', obj, sx: cx, sy: cy, distNear, distFar, sizePx: obj.userData?.markerSizePx ?? 6 });
+          // edges crossing near plane: add intersection points
+          for (let i = 0; i < worldPoints.length; i++) {
+            for (let j = i + 1; j < worldPoints.length; j++) {
+              const z1 = camSpaceZs[i], z2 = camSpaceZs[j];
+              if ((z1 <= nearZ && z2 > nearZ) || (z2 <= nearZ && z1 > nearZ)) {
+                const denom = (z2 - z1);
+                if (Math.abs(denom) < 1e-9) continue;
+                const t = (nearZ - z1) / denom;
+                if (t < 0 || t > 1) continue;
+                const ip = worldPoints[i].clone().lerp(worldPoints[j], t);
+                proj.copy(ip).project(camera);
+                const px = (proj.x * 0.5 + 0.5) * canvas.width;
+                const py = (-proj.y * 0.5 + 0.5) * canvas.height;
+                pts2d.push({ x: px, y: py, ndcZ: proj.z, world: ip.clone() });
               }
-              return;
             }
+          }
 
-            // Build convex hull from the collected projected points
+          // If no points and strictNearClip disabled, include object center as fallback
+          if (pts2d.length === 0 && !window.voidEngineOptions?.strictNearClip) {
+            const c = new THREE.Vector3();
+            mesh.getWorldPosition(c);
+            proj.copy(c).project(camera);
+            const px = (proj.x * 0.5 + 0.5) * canvas.width;
+            const py = (-proj.y * 0.5 + 0.5) * canvas.height;
+            pts2d.push({ x: px, y: py, ndcZ: proj.z, world: c.clone() });
+          }
+
+          if (pts2d.length > 0) {
+            // Build convex hull and triangulate as fan about centroid
             const hull = convexHull(pts2d);
-
-            // If hull is trivial (1 or 2 points), but user forced rendering, make fallback shapes
             if (hull.length >= 3) {
-              drawables.push({ type: 'poly', obj, pts: hull, distNear, distFar, projZ: hull[0].ndcZ });
-            } else if (hull.length === 2) {
-              drawables.push({ type: 'line', obj, pts: hull, distNear, distFar });
-            } else {
-              // single point fallback
-              const p = hull[0] || pts2d[0];
-              if (alwaysRender || obj.userData?.forceMarker) {
-                drawables.push({ type: 'rect', obj, sx: p.x, sy: p.y, distNear, distFar, sizePx: obj.userData?.markerSizePx ?? 6 });
+              // compute centroid in screen space for triangulation
+              let cx = 0, cy = 0, cz = 0;
+              for (const p of hull) { cx += p.x; cy += p.y; cz += p.ndcZ || 0; }
+              cx /= hull.length; cy /= hull.length; cz /= hull.length;
+              // fake normal facing camera for shading (use camera forward)
+              const camDir = new THREE.Vector3();
+              camera.getWorldDirection(camDir); // points forward; use as a normal proxy
+              // build projected-vertex-like objects and push triangles
+              for (let k = 0; k < hull.length; k++) {
+                const p0 = hull[k];
+                const p1 = hull[(k + 1) % hull.length];
+                const A = { sx: cx, sy: cy, z: cz, nx: camDir.x, ny: camDir.y, nz: camDir.z };
+                const B = { sx: p0.x, sy: p0.y, z: p0.ndcZ || cz, nx: camDir.x, ny: camDir.y, nz: camDir.z };
+                const C = { sx: p1.x, sy: p1.y, z: p1.ndcZ || cz, nx: camDir.x, ny: camDir.y, nz: camDir.z };
+                const avgDepth = (A.z + B.z + C.z) / 3.0;
+                triList.push({ A, B, C, avgDepth, color: matColor, mesh });
               }
+            } else if (hull.length === 2) {
+              // thin line -> make a thin triangle to approximate
+              const p0 = hull[0], p1 = hull[1];
+              const cx = (p0.x + p1.x) / 2; const cy = (p0.y + p1.y) / 2; const cz = ((p0.ndcZ||0) + (p1.ndcZ||0)) / 2;
+              const camDir = new THREE.Vector3(); camera.getWorldDirection(camDir);
+              const A = { sx: cx, sy: cy, z: cz, nx: camDir.x, ny: camDir.y, nz: camDir.z };
+              const B = { sx: p0.x, sy: p0.y, z: p0.ndcZ || cz, nx: camDir.x, ny: camDir.y, nz: camDir.z };
+              const C = { sx: p1.x, sy: p1.y, z: p1.ndcZ || cz, nx: camDir.x, ny: camDir.y, nz: camDir.z };
+              const avgDepth = (A.z + B.z + C.z) / 3.0;
+              triList.push({ A, B, C, avgDepth, color: matColor, mesh });
+            } else {
+              // single point -> tiny rectangle / marker as tiny triangles
+              const p = pts2d[0];
+              const s = 4;
+              const camDir = new THREE.Vector3(); camera.getWorldDirection(camDir);
+              const A = { sx: p.x - s, sy: p.y - s, z: p.ndcZ || 0, nx: camDir.x, ny: camDir.y, nz: camDir.z };
+              const B = { sx: p.x + s, sy: p.y - s, z: p.ndcZ || 0, nx: camDir.x, ny: camDir.y, nz: camDir.z };
+              const C = { sx: p.x + s, sy: p.y + s, z: p.ndcZ || 0, nx: camDir.x, ny: camDir.y, nz: camDir.z };
+              triList.push({ A, B, C, avgDepth: (A.z+B.z+C.z)/3, color: matColor, mesh });
             }
           }
-
-          return;
-        } else {
-          // unknown / fallback: only draw marker if explicitly requested
-          if (obj.userData?.forceMarker) {
-            drawables.push({ type: 'rect', obj, sx, sy, distNear: centerDist, distFar: centerDist, sizePx: obj.userData?.markerSizePx ?? 6 });
-          }
         }
-      });
-
-      // Painter's order: sort by farthest sampled point first (so large objects that *span* far will be drawn behind)
-      drawables.sort((a, b) => {
-        const aFar = (a.distFar !== undefined) ? a.distFar : (a.dist !== undefined ? a.dist : 0);
-        const bFar = (b.distFar !== undefined) ? b.distFar : (b.dist !== undefined ? b.dist : 0);
-        if (aFar === bFar) {
-          const aNear = (a.distNear !== undefined) ? a.distNear : (a.dist !== undefined ? a.dist : 0);
-          const bNear = (b.distNear !== undefined) ? b.distNear : (b.dist !== undefined ? b.dist : 0);
-          return bNear - aNear; // tie-breaker: draw object with larger near distance first
-        }
-        return bFar - aFar; // farthest first
-      });
-
-      // draw
-      for (let i = 0; i < drawables.length; i++) {
-        const d = drawables[i];
-        const { obj } = d;
-
-        // compute an average distance for alpha/linewidth falloffs (keeps visuals smooth)
-        const avgDist = ((d.distNear ?? d.dist ?? 0) + (d.distFar ?? d.dist ?? 0)) * 0.5;
-
-        // common color selection (fixed: proper numeric extraction)
-        let colorStyle = 'rgba(255,255,255,1)';
-        let matCol = null;
-        if (obj.material) matCol = readMaterialColor(obj.material);
-        if (!matCol && obj.userData?.color) {
-          const c = obj.userData.color;
-          matCol = { r: (c >> 16) & 255, g: (c >> 8) & 255, b: c & 255, a: 1 };
-        }
-        matCol = matCol || { r: 255, g: 255, b: 255, a: 1 };
-        // combine user alpha override if present
-        const alpha = (obj.userData?.opacity != null) ? obj.userData.opacity : (matCol.a != null ? matCol.a : 1);
-        colorStyle = `rgba(${matCol.r},${matCol.g},${matCol.b},${alpha})`;
-
-        if (d.type === 'image' && d.mapImage && d.mapImage.width) {
-          let size;
-          if (obj.geometry && obj.geometry.boundingBox) {
-            const bb = obj.geometry.boundingBox;
-            const corners = [
-              [bb.min.x, bb.min.y, bb.min.z],
-              [bb.max.x, bb.max.y, bb.max.z]
-            ];
-            const screenPts = [];
-            for (let c of corners) {
-              tmpVec.set(c[0], c[1], c[2]).applyMatrix4(obj.matrixWorld);
-              const p = tmpVec.project(camera);
-              screenPts.push({ x: (p.x * 0.5 + 0.5) * canvas.width, y: (-p.y * 0.5 + 0.5) * canvas.height });
-            }
-            const wPx = Math.abs(screenPts[0].x - screenPts[1].x);
-            const hPx = Math.abs(screenPts[0].y - screenPts[1].y);
-            size = Math.max(8, obj.userData?.sizePx ?? Math.max(wPx, hPx, 32));
-          } else {
-            const baseSize = obj.userData?.sizePx ?? 300;
-            size = Math.max(8, baseSize * (1 / Math.max(0.1, avgDist * 0.05)));
-          }
-          ctx.save();
-          ctx.translate(d.sx, d.sy);
-          const rot = obj.userData?.rotation ?? (obj.rotation?.z ?? 0);
-          if (rot) ctx.rotate(rot);
-          ctx.globalAlpha = obj.userData?.opacity ?? (obj.material?.opacity ?? 1);
-          ctx.drawImage(d.mapImage, -size / 2, -size / 2, size, size);
-          ctx.restore();
-        } else if (d.type === 'poly' && d.pts) {
-          ctx.save();
-          ctx.beginPath();
-          ctx.moveTo(d.pts[0].x, d.pts[0].y);
-          for (let j = 1; j < d.pts.length; j++) ctx.lineTo(d.pts[j].x, d.pts[j].y);
-          ctx.closePath();
-          ctx.globalAlpha = Math.max(0.2, Math.min(1, 1 - (avgDist * 0.002)));
-          ctx.fillStyle = colorStyle;
-          ctx.fill();
-          ctx.globalAlpha = 0.6;
-          ctx.lineWidth = Math.max(1, 2 - (avgDist * 0.001));
-          ctx.strokeStyle = 'rgba(0,0,0,0.6)';
-          ctx.stroke();
-          ctx.restore();
-        } else if (d.type === 'line' && d.pts && d.pts.length === 2) {
-          ctx.save();
-          ctx.beginPath();
-          ctx.moveTo(d.pts[0].x, d.pts[0].y);
-          ctx.lineTo(d.pts[1].x, d.pts[1].y);
-          ctx.strokeStyle = colorStyle;
-          ctx.lineWidth = obj.userData?.lineWidth ?? 3;
-          ctx.globalAlpha = 1 - Math.min(0.9, avgDist * 0.002);
-          ctx.stroke();
-          ctx.restore();
-        } else if (d.type === 'rect') {
-          // small centered rectangle marker (replaces prior circle/sphere)
-          const size = d.sizePx ?? Math.max(2, Math.round(12 * (1 / Math.max(0.1, avgDist * 0.05))));
-          const x = (d.sx || d.sx === 0) ? d.sx : 0;
-          const y = (d.sy || d.sy === 0) ? d.sy : 0;
-          ctx.save();
-          ctx.globalAlpha = Math.max(0.5, Math.min(1, 1 - (avgDist * 0.002)));
-          ctx.fillStyle = colorStyle;
-          ctx.fillRect(x - size / 2, y - size / 2, size, size);
-          ctx.restore();
-        } else {
-          // nothing
-        }
+      } catch (e) {
+        // ignore fallback errors - don't break frame
       }
     }
-  };
 
-  return api;
+  }); // end scene.traverse
+
+  // painter-mode: sort back-to-front and draw
+  if (mode === "painter") {
+    triList.sort((a,b) => b.avgDepth - a.avgDepth);
+    for (let i = 0; i < triList.length; i++) {
+      const tri = triList[i];
+      // per-triangle normal average for simple lambert shading
+      let nx = (tri.A.nx + tri.B.nx + tri.C.nx) / 3;
+      let ny = (tri.A.ny + tri.B.ny + tri.C.ny) / 3;
+      let nz = (tri.A.nz + tri.B.nz + tri.C.nz) / 3;
+      const L = sceneLight.dir;
+      const dot = Math.max(0, nx*L.x + ny*L.y + nz*L.z);
+      const intensity = sceneLight.ambient + sceneLight.diffuse * dot;
+      const r = Math.max(0, Math.min(255, Math.floor(tri.color.r * intensity)));
+      const g = Math.max(0, Math.min(255, Math.floor(tri.color.g * intensity)));
+      const b = Math.max(0, Math.min(255, Math.floor(tri.color.b * intensity)));
+      drawTrianglePainter([tri.A.sx, tri.A.sy], [tri.B.sx, tri.B.sy], [tri.C.sx, tri.C.sy], `rgb(${r},${g},${b})`);
+    }
+  }
+
+  // finished frame render
 }
-
 
 
 
@@ -3463,6 +3323,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
