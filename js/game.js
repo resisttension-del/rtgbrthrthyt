@@ -1183,22 +1183,6 @@ export function voidEngine({
 }
 
 
-  // Exposed API
-  return {
-    domElement: canvas,
-    setSize,
-    setClearColor,
-    render,
-    // convenience: change mode at runtime
-    setMode(newMode) {
-      if (newMode === "painter" || newMode === "zbuffer") mode = newMode;
-    }
-  };
-}
-
-
-
-
 
 
 /* ---------- Updated scene initializers (CPU renderer) ---------- */
@@ -3301,6 +3285,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
