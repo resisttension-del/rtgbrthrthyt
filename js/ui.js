@@ -665,61 +665,62 @@ export function removeTracer(key) {
 
 // Exported function to add a bullet hole (logic moved from initBulletHoles's event listener)
 export function addBulletHole(holeData, firebaseKey) {
-    // Rely on window.scene existing
-    if (!window.scene) {
-        console.warn("UI: window.scene not set, cannot add bullet hole.");
-        return;
-    }
-    // Prevent adding duplicates if somehow triggered multiple times for the same key
-    if (bulletHoles[firebaseKey]) return;
+    // Rely on window.scene existing
+    if (!window.scene) {
+        console.warn("UI: window.scene not set, cannot add bullet hole.");
+        return;
+    }
+    // Prevent adding duplicates if somehow triggered multiple times for the same key
+    if (bulletHoles[firebaseKey]) return;
 
-    const { x, y, z, nx, ny, nz, timeCreated } = holeData;
+    const { x, y, z, nx, ny, nz, timeCreated } = holeData;
 
-    const holeGeom = new THREE.CircleGeometry(0.15, 16);
-    const holeMat = new THREE.MeshBasicMaterial({
-        color: 0x111111,
-        side: THREE.DoubleSide,
-        transparent: true,
-        opacity: 0.8,
-    });
-    const hole = new THREE.Mesh(holeGeom, holeMat);
-    hole.position.set(x, y, z); // Set position directly from data
+    // Change the geometry from Circle to Plane
+    const holeGeom = new THREE.PlaneGeometry(0.3, 0.3); // A square plane with a size of 0.3x0.3
+    const holeMat = new THREE.MeshBasicMaterial({
+        color: 0x111111,
+        side: THREE.DoubleSide,
+        transparent: true,
+        opacity: 0.8,
+    });
+    const hole = new THREE.Mesh(holeGeom, holeMat);
+    hole.position.set(x, y, z); // Set position directly from data
 
-    // Orient the bullet hole to face along its normal
-    const normal = new THREE.Vector3(nx, ny, nz);
-    hole.lookAt(new THREE.Vector3().addVectors(hole.position, normal));
+    // Orient the bullet hole to face along its normal
+    const normal = new THREE.Vector3(nx, ny, nz);
+    hole.lookAt(new THREE.Vector3().addVectors(hole.position, normal));
 
-    // Offset slightly along the normal to prevent Z-fighting with map geometry
-    hole.position.addScaledVector(normal, 0.001);
+    // Offset slightly along the normal to prevent Z-fighting with map geometry
+    hole.position.addScaledVector(normal, 0.001);
 
-    window.scene.add(hole);
-    bulletHoles[firebaseKey] = hole;
+    window.scene.add(hole);
+    bulletHoles[firebaseKey] = hole;
 
-    // Local visual fade out for bullet holes
-    const fadeDuration = 5; // seconds
-    // Calculate how much time has already passed since creation (for existing holes fetched on join)
-    const age = (Date.now() - timeCreated) / 1000;
-    const startTime = performance.now() / 1000 - age; // Adjust start time based on age
+    // Local visual fade out for bullet holes
+    const fadeDuration = 5; // seconds
+    // Calculate how much time has already passed since creation (for existing holes fetched on join)
+    const age = (Date.now() - timeCreated) / 1000;
+    const startTime = performance.now() / 1000 - age; // Adjust start time based on age
 
-    const animateFade = () => {
-        // Only proceed if the hole still exists in our local tracking and scene
-        if (!bulletHoles[firebaseKey] || !hole.parent) return;
+    const animateFade = () => {
+        // Only proceed if the hole still exists in our local tracking and scene
+        if (!bulletHoles[firebaseKey] || !hole.parent) return;
 
-        const now = performance.now() / 1000;
-        const elapsed = now - startTime;
-        if (elapsed >= fadeDuration) {
-            // Ensure removal and cleanup if fade is complete
-            if (hole.parent) window.scene.remove(hole);
-            hole.geometry.dispose();
-            hole.material.dispose();
-            delete bulletHoles[firebaseKey];
-        } else {
-            // Apply opacity based on elapsed time
-            hole.material.opacity = THREE.MathUtils.lerp(0.8, 0, elapsed / fadeDuration);
-            requestAnimationFrame(animateFade);
-        }
-    };
-    requestAnimationFrame(animateFade);
+        const now = performance.now() / 1000;
+        const elapsed = now - startTime;
+        if (elapsed >= fadeDuration) {
+            // Ensure removal and cleanup if fade is complete
+            if (hole.parent) window.scene.remove(hole);
+            hole.geometry.dispose();
+            hole.material.dispose();
+            delete bulletHoles[firebaseKey];
+        } else {
+            // Apply opacity based on elapsed time
+            hole.material.opacity = THREE.MathUtils.lerp(0.8, 0, elapsed / fadeDuration);
+            requestAnimationFrame(animateFade);
+        }
+    };
+    requestAnimationFrame(animateFade);
 }
 
 // Exported function to remove a bullet hole (logic moved from initBulletHoles's event listener)
