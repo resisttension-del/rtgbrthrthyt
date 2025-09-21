@@ -241,15 +241,29 @@ export function voidEngine({ width = 640, height = 360, mode = "painter" } = {})
   const api = {
     domElement: canvas,
 
-    setSize(wid, hei, updateStyle = true) {
-      canvas.width = wid;
-      canvas.height = hei;
-      if (updateStyle) {
-        canvas.style.width = wid + 'px';
-        canvas.style.height = hei + 'px';
-      }
-      if (usingWorker) worker.postMessage({ type: 'setSize', width: wid, height: hei });
-    },
+setSize(wid, hei, updateStyle = true) {
+  // Always set CSS size on the HTML element (safe after transfer).
+  if (updateStyle) {
+    canvas.style.width = `${wid}px`;
+    canvas.style.height = `${hei}px`;
+  }
+
+  // If we still own the HTML canvas buffer (no worker), update the backing buffer.
+  // Otherwise, ask the worker to resize its OffscreenCanvas.
+  if (!usingWorker) {
+    // only touch the actual canvas width/height when no offscreen transfer happened
+    canvas.width = wid;
+    canvas.height = hei;
+  } else {
+    // send resize command to worker which will set offscreen.width/height there
+    try {
+      worker.postMessage({ type: 'setSize', width: wid, height: hei });
+    } catch (err) {
+      // if posting fails, silently ignore (worker might be terminating)
+      console.warn('voidEngine: failed to post setSize to worker', err);
+    }
+  }
+},
 
     setClearColor(hex = 0x000000, alpha = 1) {
       const r = (hex >> 16) & 255;
