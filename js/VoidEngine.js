@@ -25,6 +25,10 @@ export function voidEngine({ width = 640, height = 360, antialias = true, alpha 
   // GPU scene and orthographic camera (we'll render with user's camera)
   const gpuScene = new THREE.Scene();
 
+  // right after creating gpuScene:
+gpuScene.add(new THREE.AmbientLight(0xffffff, 0.8));
+
+
   // Pools to mirror original scene objects in gpuScene without reallocation
   const meshPool = new Map();      // originalObject.uuid -> {mesh, lastSeenFrame}
   const spritePool = new Map();    // originalObject.uuid -> {sprite, lastSeenFrame}
