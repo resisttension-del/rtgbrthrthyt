@@ -136,7 +136,7 @@ export async function createCrocodilosConstruction(scene, physicsController) {
 
   //  const GLB_MODEL_URL = 'https://raw.githubusercontent.com/thearthd/3d-models/main/Map/voidffa_temp_map.glb';
 
-    const GLB_MODEL_URL = 'https://raw.githubusercontent.com/resisttension-del/idk/main/subway_surfers.glb';
+    const GLB_MODEL_URL = 'https://raw.githubusercontent.com/thearthd/3d-models/main/newmaptest.glb';
 
     
 
