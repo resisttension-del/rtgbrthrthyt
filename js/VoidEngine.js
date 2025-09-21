@@ -1,6 +1,6 @@
 import * as THREE from "https://cdnjs.cloudflare.com/ajax/libs/three.js/0.152.0/three.module.js";
 
-export function voidEngineGPU({ width = 640, height = 360, options = {} } = {}) {
+export function voidEngine({ width = 640, height = 360, options = {} } = {}) {
   // options: { antialias, alpha, powerPreference, preserveDrawingBuffer, webgl2 }
   const opt = Object.assign({
     antialias: false,
