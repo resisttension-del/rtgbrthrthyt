@@ -1,6 +1,6 @@
 import * as THREE from "https://cdnjs.cloudflare.com/ajax/libs/three.js/0.152.0/three.module.js";
 
-export function voidEngineCPU({ width = 640, height = 360, mode = "painter" } = {}) {
+export function voidEngine({ width = 640, height = 360, mode = "painter" } = {}) {
   const canvas = document.createElement("canvas");
   canvas.width = width;
   canvas.height = height;
