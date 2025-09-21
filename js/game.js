@@ -10,6 +10,7 @@ import { CopyShader } from "https://cdn.jsdelivr.net/npm/three@0.152.0/examples/
 import Stats from 'stats.js';
 import { dbRefs, disposeGame, fullCleanup, activeGameId, setupDamageListener } from "./network.js";
 import * as BufferGeometryUtils from 'three/examples/jsm/utils/BufferGeometryUtils.js';
+import { voidEngine } from './VoidEngine.js';
 import {
     computeBoundsTree,
     disposeBoundsTree,
@@ -811,352 +812,323 @@ function setupDetailToggle() {
 }
 
 
-export async function initSceneCrocodilosConstruction() { // Make initSceneCrocodilosConstruction async
-sceneNum = 1;
-console.log("Initializing CrocodilosConstruction scene...");
 
 
 
 
+/* ---------- Updated scene initializers (CPU renderer) ---------- */
 
-// 1. Scene
-scene = new THREE.Scene();
-const skyGeo = new THREE.SphereGeometry(200, 32, 32).scale(-1, 1, 1);
-const skyMat = new THREE.MeshBasicMaterial({
-color: 0x000022,
-side: THREE.BackSide,
-fog: false
-});
-const skyColor = new THREE.Color(0x111122);
-scene.background = skyColor;
-skyMesh = new THREE.Mesh(skyGeo, skyMat);
-scene.add(skyMesh);
-window.scene = scene;
+export async function initSceneCrocodilosConstruction() {
+  sceneNum = 1;
+  console.log("Initializing CrocodilosConstruction scene...");
 
+  // 1. Scene
+  scene = new THREE.Scene();
+  const skyGeo = new THREE.SphereGeometry(200, 32, 32).scale(-1, 1, 1);
+  const skyMat = new THREE.MeshBasicMaterial({
+    color: 0x000022,
+    side: THREE.BackSide,
+    fog: false
+  });
+  window.scene = scene;
 
-window.camera.rotation.order = "YXZ";
-scene.add( window.camera );
+  window.camera.rotation.order = "YXZ";
+  scene.add(window.camera);
 
+  // 3. Renderer (CPU canvas)
+  const cpuRenderer = voidEngine({ width: FIXED_WIDTH, height: FIXED_HEIGHT });
+  cpuRenderer.setClearColor(0x000000, 1);
+  renderer = cpuRenderer;
+  window.renderer = renderer;
 
-// 3. Renderer
-window.renderer = new THREE.WebGLRenderer({ antialias: false }); // Antialias might reduce the "pixelated" effect of lower resolution
-renderer = window.renderer;
-renderer.domElement.style.position = "relative";
-renderer.domElement.style.zIndex = "0";
-renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-renderer.setClearColor(0x000000, 1);
-document.getElementById("game-container").appendChild(renderer.domElement);
-window.renderer = renderer;
+  const container = document.getElementById("game-container");
+  // remove any previous renderer DOM element if present
+  if (container) {
+    // clear existing children with canvas or WebGLRenderer
+    // (be careful not to remove other unrelated DOM nodes)
+    const prev = container.querySelector('canvas');
+    if (prev) container.removeChild(prev);
+    container.appendChild(renderer.domElement);
+  }
 
-// 4. Hemisphere Light
-hemi = new THREE.HemisphereLight(0xffffff, 0x444444, 0.05);
-scene.add(hemi);
-window.hemi = hemi;
+  // 4. Hemisphere Light (kept for scene lighting math / potential use)
+  hemi = new THREE.HemisphereLight(0xffffff, 0x444444, 0.05);
+  scene.add(hemi);
+  window.hemi = hemi;
 
-// 5. Post-processing Composer
-// Note: EffectComposer also needs to know the renderer's *display* size
-composer = new EffectComposer(renderer);
-renderPass = new RenderPass(scene, window.camera);
-composer.addPass(renderPass);
-window.composer = composer;
-window.renderPass = renderPass;
+  // 5. Post-processing composer: not available for CPU canvas — null out
+  composer = null;
+  renderPass = null;
+  window.composer = composer;
+  window.renderPass = renderPass;
 
-// --- Initial Detail Setup for CrocodilosConstruction ---
-toggleSceneDetails(detailsEnabled);
+  // --- Initial Detail Setup for CrocodilosConstruction ---
+  toggleSceneDetails(detailsEnabled);
 
-// --- Map and Physics Initialization ---
-// AWAIT the creation of the map and spawn points
-spawnPoints = await createCrocodilosConstruction(scene, physicsController);
-window.spawnPoints = spawnPoints; // Now window.spawnPoints will be the actual array
+  // --- Map and Physics Initialization ---
+  spawnPoints = await createCrocodilosConstruction(scene, physicsController);
+  window.spawnPoints = spawnPoints;
 
-const initialSpawnPoint = findFurthestSpawn(); // Call your function to get a spawn point
-physicsController.setPlayerPosition(initialSpawnPoint);
+  const initialSpawnPoint = findFurthestSpawn();
+  physicsController.setPlayerPosition(initialSpawnPoint);
 
-// --- Audio Initialization ---
-if (typeof windSound !== 'undefined') {
-windSound.play().catch(err => console.warn("Failed to play wind sound:", err));
-window.windSound = windSound;
-} else {
-console.warn("windSound is not defined. Audio might not play for CrocodilosConstruction.");
+  // --- Audio Initialization ---
+  if (typeof windSound !== 'undefined') {
+    windSound.play().catch(err => console.warn("Failed to play wind sound:", err));
+    window.windSound = windSound;
+  } else {
+    console.warn("windSound is not defined. Audio might not play for CrocodilosConstruction.");
+  }
+
+  // --- Window Resize Handling ---
+  function onWindowResize() {
+    const displayWidth = container.clientWidth;
+    const displayHeight = container.clientHeight;
+
+    // 1) Render at fixed internal resolution
+    renderer.setSize(FIXED_WIDTH, FIXED_HEIGHT, false);
+
+    // 2) Stretch the canvas via CSS to fill the container
+    renderer.domElement.style.width = `${displayWidth}px`;
+    renderer.domElement.style.height = `${displayHeight}px`;
+
+    // 3) Update camera aspect ratio
+    window.camera.aspect = displayWidth / displayHeight;
+    window.camera.updateProjectionMatrix();
+
+    // 4) Re-attach weapon to local player (if needed)
+    if (window.weaponController && window.localPlayer && typeof getWeaponModel === 'function' && typeof attachWeaponToPlayer === 'function') {
+      const key = window.localPlayer.weapon.replace(/-/g, "").toLowerCase();
+      const proto = getWeaponModel(key);
+      if (proto) attachWeaponToPlayer(window.localPlayer.id, key);
+    }
+
+    // 5) Re-attach weapons for remote players
+    if (window.remotePlayers) {
+      Object.values(window.remotePlayers).forEach(({ currentWeapon, weaponRoot }) => {
+        if (currentWeapon && weaponRoot && typeof attachWeaponToPlayer === 'function') {
+          attachWeaponToPlayer(weaponRoot.userData.playerId, currentWeapon);
+        }
+      });
+    }
+
+    // 6) Resize HUD overlay
+    const hud = document.getElementById("hud");
+    if (hud) {
+      hud.style.width = `${displayWidth}px`;
+      hud.style.height = `${displayHeight}px`;
+    }
+  }
+
+  window.addEventListener("resize", onWindowResize, false);
+  onWindowResize();
 }
 
-// --- Window Resize Handling ---
-function onWindowResize() {
-const container = document.getElementById("game-container");
-const displayWidth  = container.clientWidth;
-const displayHeight = container.clientHeight;
+export async function initSceneSigmaCity() {
+  sceneNum = 2;
+  console.log("Initializing SigmaCity scene...");
 
-// 1) Render & post‑process at fixed 1280×720
-renderer.setSize(FIXED_WIDTH, FIXED_HEIGHT, false);
-if (composer) composer.setSize(FIXED_WIDTH, FIXED_HEIGHT);
+  scene = new THREE.Scene();
+  const skyColor = new THREE.Color(0x87CEEB);
+  scene.background = skyColor;
+  window.scene = scene;
 
-// 2) Stretch the canvas via CSS to fill the container
-renderer.domElement.style.width  = `${displayWidth}px`;
-renderer.domElement.style.height = `${displayHeight}px`;
+  const skyGeo = new THREE.SphereGeometry(200, 32, 32).scale(-1, 1, 1);
+  const skyMat = new THREE.MeshBasicMaterial({
+    color: 0x000022,
+    side: THREE.BackSide,
+    fog: false
+  });
+  skyMesh = new THREE.Mesh(skyGeo, skyMat);
+  scene.add(skyMesh);
+  window.scene = scene;
 
-// 3) Update camera to match the display aspect ratio
-window.camera.aspect = displayWidth / displayHeight;
-window.camera.updateProjectionMatrix();
+  window.camera.rotation.order = "YXZ";
+  scene.add(window.camera);
 
-// 4) Re‑attach weapon to local player (if needed)
-if (window.weaponController && window.localPlayer && typeof getWeaponModel === 'function' && typeof attachWeaponToPlayer === 'function') {
-const key = window.localPlayer.weapon.replace(/-/g, "").toLowerCase();
-const proto = getWeaponModel(key);
-if (proto) attachWeaponToPlayer(window.localPlayer.id, key);
+  // 3. Renderer (CPU canvas)
+  const cpuRenderer = createCanvasRenderer({ width: FIXED_WIDTH, height: FIXED_HEIGHT });
+  cpuRenderer.setClearColor(0x000000, 1);
+  renderer = cpuRenderer;
+  window.renderer = renderer;
+
+  const container = document.getElementById("game-container");
+  if (container) {
+    const prev = container.querySelector('canvas');
+    if (prev) container.removeChild(prev);
+    container.appendChild(renderer.domElement);
+  }
+
+  // 4. Hemisphere Light
+  hemi = new THREE.HemisphereLight(0xffffff, 0x444444, 0.05);
+  scene.add(hemi);
+  window.hemi = hemi;
+
+  // 5. Composer - not used in CPU mode
+  composer = null;
+  renderPass = null;
+  window.composer = composer;
+  window.renderPass = renderPass;
+
+  // --- Initial Detail Setup for SigmaCity ---
+  toggleSceneDetails(detailsEnabled);
+
+  // --- Map and Physics Initialization ---
+  spawnPoints = await createSigmaCity(scene, physicsController);
+  window.spawnPoints = spawnPoints;
+
+  const initialSpawnPoint = findFurthestSpawn();
+  physicsController.setPlayerPosition(initialSpawnPoint);
+
+  // --- Audio Initialization ---
+  if (typeof forestNoise !== 'undefined') {
+    forestNoise.volume = 0.05;
+    forestNoise.play().catch(err => console.warn("Failed to play forest noise:", err));
+    window.windSound = forestNoise;
+  } else {
+    console.warn("forestNoise is not defined. Audio might not play for SigmaCity.");
+  }
+
+  // --- Window Resize Handling ---
+  function onWindowResize() {
+    const displayWidth = container.clientWidth;
+    const displayHeight = container.clientHeight;
+
+    renderer.setSize(FIXED_WIDTH, FIXED_HEIGHT, false);
+
+    renderer.domElement.style.width = `${displayWidth}px`;
+    renderer.domElement.style.height = `${displayHeight}px`;
+
+    window.camera.aspect = displayWidth / displayHeight;
+    window.camera.updateProjectionMatrix();
+
+    if (window.weaponController && window.localPlayer && typeof getWeaponModel === 'function' && typeof attachWeaponToPlayer === 'function') {
+      const key = window.localPlayer.weapon.replace(/-/g, "").toLowerCase();
+      const proto = getWeaponModel(key);
+      if (proto) attachWeaponToPlayer(window.localPlayer.id, key);
+    }
+
+    if (window.remotePlayers) {
+      Object.values(window.remotePlayers).forEach(({ currentWeapon, weaponRoot }) => {
+        if (currentWeapon && weaponRoot && typeof attachWeaponToPlayer === 'function') {
+          attachWeaponToPlayer(weaponRoot.userData.playerId, currentWeapon);
+        }
+      });
+    }
+
+    const hud = document.getElementById("hud");
+    if (hud) {
+      hud.style.width = `${displayWidth}px`;
+      hud.style.height = `${displayHeight}px`;
+    }
+  }
+
+  window.addEventListener("resize", onWindowResize, false);
+  onWindowResize();
 }
 
-// 5) Re‑attach weapons for remote players
-if (window.remotePlayers) {
-Object.values(window.remotePlayers).forEach(({ currentWeapon, weaponRoot }) => {
-if (currentWeapon && weaponRoot && typeof attachWeaponToPlayer === 'function') {
-attachWeaponToPlayer(weaponRoot.userData.playerId, currentWeapon);
+export async function initSceneDiddyDunes() {
+  sceneNum = 3;
+  console.log("Initializing DiddyDunes scene...");
+
+  scene = new THREE.Scene();
+  const skyColor = new THREE.Color(0x87CEEB);
+  scene.background = skyColor;
+  window.scene = scene;
+
+  const skyGeo = new THREE.SphereGeometry(200, 32, 32).scale(-1, 1, 1);
+  const skyMat = new THREE.MeshBasicMaterial({
+    color: 0x000022,
+    side: THREE.BackSide,
+    fog: false
+  });
+  skyMesh = new THREE.Mesh(skyGeo, skyMat);
+  scene.add(skyMesh);
+  window.scene = scene;
+
+  window.camera.rotation.order = "YXZ";
+  scene.add(window.camera);
+
+  // 3. Renderer (CPU canvas)
+  const cpuRenderer = createCanvasRenderer({ width: FIXED_WIDTH, height: FIXED_HEIGHT });
+  cpuRenderer.setClearColor(0x000000, 1);
+  renderer = cpuRenderer;
+  window.renderer = renderer;
+
+  const container = document.getElementById("game-container");
+  if (container) {
+    const prev = container.querySelector('canvas');
+    if (prev) container.removeChild(prev);
+    container.appendChild(renderer.domElement);
+  }
+
+  // 4. Hemisphere Light
+  hemi = new THREE.HemisphereLight(0xffffff, 0x444444, 0.05);
+  scene.add(hemi);
+  window.hemi = hemi;
+
+  // 5. Composer - not used in CPU mode
+  composer = null;
+  renderPass = null;
+  window.composer = composer;
+  window.renderPass = renderPass;
+
+  // --- Initial Detail Setup for DiddyDunes ---
+  toggleSceneDetails(detailsEnabled);
+
+  // --- Map and Physics Initialization ---
+  spawnPoints = await createDiddyDunes(scene, physicsController);
+  window.spawnPoints = spawnPoints;
+
+  const initialSpawnPoint = findFurthestSpawn();
+  physicsController.setPlayerPosition(initialSpawnPoint);
+
+  // --- Audio Initialization ---
+  if (typeof dessertWindSound !== 'undefined') {
+    dessertWindSound.volume = 0.25;
+    dessertWindSound.play().catch(err => console.warn("Failed to play dessert wind sound:", err));
+    window.windSound = dessertWindSound;
+  } else {
+    console.warn("dessertWindSound is not defined. Audio might not play for DiddyDunes.");
+  }
+
+  // --- Window Resize Handling ---
+  function onWindowResize() {
+    const displayWidth = container.clientWidth;
+    const displayHeight = container.clientHeight;
+
+    renderer.setSize(FIXED_WIDTH, FIXED_HEIGHT, false);
+
+    renderer.domElement.style.width = `${displayWidth}px`;
+    renderer.domElement.style.height = `${displayHeight}px`;
+
+    window.camera.aspect = displayWidth / displayHeight;
+    window.camera.updateProjectionMatrix();
+
+    if (window.weaponController && window.localPlayer && typeof getWeaponModel === 'function' && typeof attachWeaponToPlayer === 'function') {
+      const key = window.localPlayer.weapon.replace(/-/g, "").toLowerCase();
+      const proto = getWeaponModel(key);
+      if (proto) attachWeaponToPlayer(window.localPlayer.id, key);
+    }
+
+    if (window.remotePlayers) {
+      Object.values(window.remotePlayers).forEach(({ currentWeapon, weaponRoot }) => {
+        if (currentWeapon && weaponRoot && typeof attachWeaponToPlayer === 'function') {
+          attachWeaponToPlayer(weaponRoot.userData.playerId, currentWeapon);
+        }
+      });
+    }
+
+    const hud = document.getElementById("hud");
+    if (hud) {
+      hud.style.width = `${displayWidth}px`;
+      hud.style.height = `${displayHeight}px`;
+    }
+  }
+
+  window.addEventListener("resize", onWindowResize, false);
+  onWindowResize();
 }
-});
-}
-
-// 6) Resize HUD overlay
-const hud = document.getElementById("hud");
-if (hud) {
-hud.style.width  = `${displayWidth}px`;
-hud.style.height = `${displayHeight}px`;
-}
-}
-
-window.addEventListener("resize", onWindowResize, false);
-onWindowResize(); // Call once initially to set the correct sizes
-}
-
-export async function initSceneSigmaCity() { // Make initSceneCrocodilosConstruction async
-sceneNum = 2;
-console.log("Initializing SigmaCity scene...");
-
-scene = new THREE.Scene();
-const skyColor = new THREE.Color(0x87CEEB);
-scene.background = skyColor;
-window.scene = scene;
-
-
-const skyGeo = new THREE.SphereGeometry(200, 32, 32).scale(-1, 1, 1);
-const skyMat = new THREE.MeshBasicMaterial({
-color: 0x000022,
-side: THREE.BackSide,
-fog: false
-});
-skyMesh = new THREE.Mesh(skyGeo, skyMat);
-scene.add(skyMesh);
-window.scene = scene;
-
-
-window.camera.rotation.order = "YXZ";
-scene.add( window.camera );
-
-
-// 3. Renderer
-window.renderer = new THREE.WebGLRenderer({ antialias: false }); // Antialias might reduce the "pixelated" effect of lower resolution
-renderer = window.renderer;
-renderer.domElement.style.position = "relative";
-renderer.domElement.style.zIndex = "0";
-renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-renderer.setClearColor(0x000000, 1);
-document.getElementById("game-container").appendChild(renderer.domElement);
-window.renderer = renderer;
-
-// 4. Hemisphere Light
-hemi = new THREE.HemisphereLight(0xffffff, 0x444444, 0.05);
-scene.add(hemi);
-window.hemi = hemi;
-
-// 5. Post-processing Composer
-// Note: EffectComposer also needs to know the renderer's *display* size
-composer = new EffectComposer(renderer);
-renderPass = new RenderPass(scene, window.camera);
-composer.addPass(renderPass);
-window.composer = composer;
-window.renderPass = renderPass;
-
-// --- Initial Detail Setup for SigmaCity ---
-toggleSceneDetails(detailsEnabled);
-
-// --- Map and Physics Initialization ---
-// AWAIT the creation of the map and spawn points
-spawnPoints = await createSigmaCity(scene, physicsController);
-window.spawnPoints = spawnPoints; // Now window.spawnPoints will be the actual array
-
-const initialSpawnPoint = findFurthestSpawn(); // Call your function to get a spawn point
-physicsController.setPlayerPosition(initialSpawnPoint);
-
-// --- Audio Initialization ---
-if (typeof forestNoise !== 'undefined') {
-forestNoise.volume = 0.05;
-forestNoise.play().catch(err => console.warn("Failed to play forest noise:", err));
-window.windSound = forestNoise; // Renamed to windSound for consistency if only one wind sound
-} else {
-console.warn("forestNoise is not defined. Audio might not play for SigmaCity.");
-}
-
-// --- Window Resize Handling ---
-function onWindowResize() {
-const container = document.getElementById("game-container");
-const displayWidth  = container.clientWidth;
-const displayHeight = container.clientHeight;
-
-// 1) Render & post‑process at fixed 1280×720
-renderer.setSize(FIXED_WIDTH, FIXED_HEIGHT, false);
-if (composer) composer.setSize(FIXED_WIDTH, FIXED_HEIGHT);
-
-// 2) Stretch the canvas via CSS to fill the container
-renderer.domElement.style.width  = `${displayWidth}px`;
-renderer.domElement.style.height = `${displayHeight}px`;
-
-// 3) Update camera to match the display aspect ratio
-window.camera.aspect = displayWidth / displayHeight;
-window.camera.updateProjectionMatrix();
-
-// 4) Re‑attach weapon to local player (if needed)
-if (window.weaponController && window.localPlayer && typeof getWeaponModel === 'function' && typeof attachWeaponToPlayer === 'function') {
-const key = window.localPlayer.weapon.replace(/-/g, "").toLowerCase();
-const proto = getWeaponModel(key);
-if (proto) attachWeaponToPlayer(window.localPlayer.id, key);
-}
-
-// 5) Re‑attach weapons for remote players
-if (window.remotePlayers) {
-Object.values(window.remotePlayers).forEach(({ currentWeapon, weaponRoot }) => {
-if (currentWeapon && weaponRoot && typeof attachWeaponToPlayer === 'function') {
-attachWeaponToPlayer(weaponRoot.userData.playerId, currentWeapon);
-}
-});
-}
-
-// 6) Resize HUD overlay
-const hud = document.getElementById("hud");
-if (hud) {
-hud.style.width  = `${displayWidth}px`;
-hud.style.height = `${displayHeight}px`;
-}
-}
-
-window.addEventListener("resize", onWindowResize, false);
-onWindowResize(); // Call once initially to set the correct sizes
-}
-
-
-export async function initSceneDiddyDunes() { // Make initSceneCrocodilosConstruction async
-sceneNum = 3;
-console.log("Initializing DiddyDunes scene...");
-
-scene = new THREE.Scene();
-const skyColor = new THREE.Color(0x87CEEB);
-scene.background = skyColor;
-window.scene = scene;
-
-
-const skyGeo = new THREE.SphereGeometry(200, 32, 32).scale(-1, 1, 1);
-const skyMat = new THREE.MeshBasicMaterial({
-color: 0x000022,
-side: THREE.BackSide,
-fog: false
-});
-skyMesh = new THREE.Mesh(skyGeo, skyMat);
-scene.add(skyMesh);
-window.scene = scene;
-
-
-window.camera.rotation.order = "YXZ";
-scene.add( window.camera );
-
-
-// 3. Renderer
-window.renderer = new THREE.WebGLRenderer({ antialias: false }); // Antialias might reduce the "pixelated" effect of lower resolution
-renderer = window.renderer;
-renderer.domElement.style.position = "relative";
-renderer.domElement.style.zIndex = "0";
-renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-renderer.setClearColor(0x000000, 1);
-document.getElementById("game-container").appendChild(renderer.domElement);
-window.renderer = renderer;
-
-// 4. Hemisphere Light
-hemi = new THREE.HemisphereLight(0xffffff, 0x444444, 0.05);
-scene.add(hemi);
-window.hemi = hemi;
-
-// 5. Post-processing Composer
-// Note: EffectComposer also needs to know the renderer's *display* size
-composer = new EffectComposer(renderer);
-renderPass = new RenderPass(scene, window.camera);
-composer.addPass(renderPass);
-window.composer = composer;
-window.renderPass = renderPass;
-
-// --- Initial Detail Setup for DiddyDunes ---
-toggleSceneDetails(detailsEnabled);
-
-// --- Map and Physics Initialization ---
-// AWAIT the creation of the map and spawn points
-spawnPoints = await createDiddyDunes(scene, physicsController);
-window.spawnPoints = spawnPoints; // Now window.spawnPoints will be the actual array
-
-const initialSpawnPoint = findFurthestSpawn(); // Call your function to get a spawn point
-physicsController.setPlayerPosition(initialSpawnPoint);
-
-
-    
-// --- Audio Initialization ---
-if (typeof dessertWindSound !== 'undefined') {
-dessertWindSound.volume = 0.25;
-dessertWindSound.play().catch(err => console.warn("Failed to play forest noise:", err));
-window.windSound = dessertWindSound; // Renamed to windSound for consistency if only one wind sound
-} else {
-console.warn("dessertWindSound is not defined. Audio might not play for DiddyDunes.");
-}
-
-// --- Window Resize Handling ---
-function onWindowResize() {
-const container = document.getElementById("game-container");
-const displayWidth  = container.clientWidth;
-const displayHeight = container.clientHeight;
-
-// 1) Render & post‑process at fixed 1280×720
-renderer.setSize(FIXED_WIDTH, FIXED_HEIGHT, false);
-if (composer) composer.setSize(FIXED_WIDTH, FIXED_HEIGHT);
-
-// 2) Stretch the canvas via CSS to fill the container
-renderer.domElement.style.width  = `${displayWidth}px`;
-renderer.domElement.style.height = `${displayHeight}px`;
-
-// 3) Update camera to match the display aspect ratio
-window.camera.aspect = displayWidth / displayHeight;
-window.camera.updateProjectionMatrix();
-
-// 4) Re‑attach weapon to local player (if needed)
-if (window.weaponController && window.localPlayer && typeof getWeaponModel === 'function' && typeof attachWeaponToPlayer === 'function') {
-const key = window.localPlayer.weapon.replace(/-/g, "").toLowerCase();
-const proto = getWeaponModel(key);
-if (proto) attachWeaponToPlayer(window.localPlayer.id, key);
-}
-
-// 5) Re‑attach weapons for remote players
-if (window.remotePlayers) {
-Object.values(window.remotePlayers).forEach(({ currentWeapon, weaponRoot }) => {
-if (currentWeapon && weaponRoot && typeof attachWeaponToPlayer === 'function') {
-attachWeaponToPlayer(weaponRoot.userData.playerId, currentWeapon);
-}
-});
-}
-
-// 6) Resize HUD overlay
-const hud = document.getElementById("hud");
-if (hud) {
-hud.style.width  = `${displayWidth}px`;
-hud.style.height = `${displayHeight}px`;
-}
-}
-
-window.addEventListener("resize", onWindowResize, false);
-onWindowResize(); // Call once initially to set the correct sizes
-}
-
 
 
 // js/game.js (modify existing initGameNetwork)
@@ -1261,34 +1233,38 @@ group.name = `remotePlayer_${data.id}`; // Set the name here for future getObjec
 group.userData.playerId = data.id; // Store ID on the group
 
 // ─── Body ──────────────────────────────────────────────────────────────────────
-const bodyGeom = new THREE.CapsuleGeometry(0.3, 1.3, 4, 8);
+const bodyWidth = 0.6;   // ~2 * capsule radius (0.3)
+const bodyHeight = 1.9;  // approx. capsule total height (1.3 + 2*0.3)
+const bodyDepth = 0.6;
+
+const bodyGeom = new THREE.BoxGeometry(bodyWidth, bodyHeight, bodyDepth);
 const bodyMat = new THREE.MeshStandardMaterial({ color: initialColor });
 const bodyMesh = new THREE.Mesh(bodyGeom, bodyMat);
 bodyMesh.castShadow = true;
 bodyMesh.position.set(0, 0.0 - 1.1, 0); // Position relative to group center
 bodyMesh.userData.isPlayerBodyPart = true;
 bodyMesh.userData.playerId = data.id;
+
+// ensure index exists (some custom routines expect it)
+if (!bodyMesh.geometry.index) {
+  bodyMesh.geometry.setIndex(
+    generateSequentialIndices(bodyMesh.geometry.attributes.position.count)
+  );
+}
+bodyMesh.geometry.computeBoundsTree();
+
 group.add(bodyMesh);
 
-     if (!bodyMesh.geometry.index) {
-    bodyMesh.geometry.setIndex(
-      generateSequentialIndices(bodyMesh.geometry.attributes.position.count)
-    );
-  }
-  bodyMesh.geometry.computeBoundsTree();
-
-  group.add(bodyMesh);
-
-// ─── Head ──────────────────────────────────────────────────────────────────────
-const headGeom = new THREE.SphereGeometry(0.15, 8, 8);
+// ─── Head (box) ───────────────────────────────────────────────────────────────
+const headSize = 0.3; // ~diameter of original sphere (radius 0.15)
+const headGeom = new THREE.BoxGeometry(headSize, headSize, headSize);
 const headMat = new THREE.MeshStandardMaterial({ color: 0xffffaa });
 const headMesh = new THREE.Mesh(headGeom, headMat);
 headMesh.castShadow = true;
-headMesh.position.set(0, 1.1 - 1.1, 0); // Relative to body/group
+headMesh.position.set(0, 1.1 - 1.1, 0); // same relative offset as before
 headMesh.userData.isPlayerBodyPart = true;
 headMesh.userData.playerId = data.id;
 headMesh.userData.isPlayerHead = true;
-group.add(headMesh);
 
       if (!headMesh.geometry.index) {
     headMesh.geometry.setIndex(
@@ -1344,7 +1320,7 @@ THREE.MathUtils.degToRad(180),
 0
 );
 nameMesh.userData.isPlayerName = true;
-group.add(nameMesh);
+// group.add(nameMesh);
 }, undefined, function(err) {
 console.error('An error happened loading the font:', err);
 });
@@ -2127,262 +2103,231 @@ function round2(n) {
 
 
 export function animate(timestamp) {
-    // Schedule the next frame *first*. This ensures the loop continues
-    // even if an error occurs later in this frame.
-    requestAnimationFrame(animate);
+  // Schedule the next frame first
+  requestAnimationFrame(animate);
 
- 
-    // --- Disconnection/Pause Logic ---
-    // If localPlayerId is null, it means the local player has disconnected.
-    // The game state should already be paused and UI updated by the handler
-    // that sets localPlayerId to null. This function simply stops further animation logic.
-    if (localPlayerId === null || window.isGamePaused) {
-        // console.log("Animation loop paused or stopped due to local player disconnection."); // Only for debugging
-        return;
-    }
+  // --- Disconnection/Pause Logic ---
+  if (localPlayerId === null || window.isGamePaused) {
+    return;
+  }
 
-    // --- Frame Throttling (60fps) ---
-    const FRAME_INTERVAL = 1000 / 60; // ≈16.67ms
-    if (!animate.lastTime) {
-        animate.lastTime = timestamp; // Initialize for the first frame
-    }
-    const deltaMs = timestamp - animate.lastTime;
+  // Frame throttling ~60fps
+  const FRAME_INTERVAL = 1000 / 60;
+  if (!animate.lastTime) animate.lastTime = timestamp;
+  const deltaMs = timestamp - animate.lastTime;
+  if (deltaMs < FRAME_INTERVAL) return;
+  animate.lastTime = timestamp - (deltaMs % FRAME_INTERVAL);
+  const delta = deltaMs / 1000;
 
-    if (deltaMs < FRAME_INTERVAL) {
-        return; // Too early, skip this frame
-    }
-    // Carry over any "extra" time for smoother timing
-    animate.lastTime = timestamp - (deltaMs % FRAME_INTERVAL);
+  // Pre-animation checks
+  if (!physicsController || !weaponController) {
+    console.warn("Skipping animate(): controllers not yet initialized");
+    postFrameCleanup();
+    return;
+  }
+  if (!window.mapReady) {
+    postFrameCleanup();
+    return;
+  }
+  if (!window.localPlayer) {
+    console.warn("Skipping animate(): window.localPlayer is not initialized.");
+    postFrameCleanup();
+    return;
+  }
 
-    // Convert to seconds for game logic
-    const delta = deltaMs / 1000;
+  try {
+    // Death screen handling
+    if (window.localPlayer.isDead) {
+      const cross = document.getElementById("crosshair");
+      if (cross) cross.style.display = "none";
 
-    // --- Pre-animation checks ---
-    if (!physicsController || !weaponController) {
-        console.warn("Skipping animate(): controllers not yet initialized");
-        postFrameCleanup(); // Clean up even if controllers aren't ready
-        return;
-    }
-    if (!window.mapReady) {
-        // console.warn("Skipping animate(): map not ready."); // Can be noisy
-        postFrameCleanup();
-        return;
-    }
-    if (!window.localPlayer) {
-        console.warn("Skipping animate(): window.localPlayer is not initialized.");
-        postFrameCleanup();
-        return;
-    }
+      if (windSound && !windSound.paused) windSound.pause();
+      if (forestNoise && !forestNoise.paused) forestNoise.pause();
+      if (dessertWindSound && !dessertWindSound.paused) dessertWindSound.pause();
+      if (deathTheme && deathTheme.paused) {
+        deathTheme.currentTime = 0;
+        deathTheme.play().catch(e => console.error("Error playing death theme:", e));
+      }
 
-    try {
-        // --- Death Screen Logic ---
-        if (window.localPlayer.isDead) {
-            const cross = document.getElementById("crosshair");
-            if (cross) cross.style.display = "none";
+      if (fadeOverlay) {
+        fadeOverlay.style.pointerEvents = "auto";
+        fadeOverlay.style.opacity = "1";
+      }
+      if (respawnOverlay) respawnOverlay.style.display = "flex";
 
-            // Ensure death-related sounds are playing and others are paused
-            if (windSound && !windSound.paused) windSound.pause();
-            if (forestNoise && !forestNoise.paused) forestNoise.pause();
-            if (dessertWindSound && !dessertWindSound.paused) dessertWindSound.pause();
-            if (deathTheme && deathTheme.paused) {
-                deathTheme.currentTime = 0;
-                deathTheme.play().catch(e => console.error("Error playing death theme:", e));
-            }
-
-            // Show death overlays
-            if (fadeOverlay) {
-                fadeOverlay.style.pointerEvents = "auto";
-                fadeOverlay.style.opacity = "1";
-            }
-            if (respawnOverlay) respawnOverlay.style.display = "flex";
-
-            composer.render();
-            postFrameCleanup();
-            return; // Exit early if player is dead
-        } else {
-
-            if (fadeOverlay && fadeOverlay.style.opacity !== "0") {
-                hideFadeOverlay(); // Assumes this function correctly sets opacity to "0" and pointerEvents to "none"
-            }
-            if (respawnOverlay && respawnOverlay.style.display !== "none") {
-                hideRespawn(); // Assumes this function correctly sets display to "none"
-            }
-
-            // Ensure crosshair is visible if not dead
-            const cross = document.getElementById("crosshair");
-            if (cross) cross.style.display = "block"; // Or "flex" depending on its original display type
-        }
-
-        // --- Normal Game Updates ---
-        checkForDamagePulse(); // Check for visual damage effects
-
-        if (weaponController.stats.speedModifier != null) {
-            physicsController.setSpeedModifier(weaponController.stats.speedModifier);
-        }
-
-        // Remote players falling (simplified gravity application)
-        const GRAVITY = 9.8;
-        Object.values(window.remotePlayers).forEach(rp => {
-            const g = rp.group;
-            if (g?.userData.isFalling) {
-                g.userData.velocityY = (g.userData.velocityY || 0) + GRAVITY * delta;
-                g.position.y -= g.userData.velocityY * delta;
-                if (g.position.y < -20) { // Off-map threshold
-                    g.userData.isFalling = false;
-                    g.userData.velocityY = 0;
-                    g.visible = false; // Hide player once they fall off the map
-                }
-            }
-        });
-
-        // Sky, Fog, and Starfield rotation (time-dependent)
-        // Ensure skyMesh, starField, worldFog are defined or set to null if not used
-        if (skyMesh) skyMesh.rotation.x += 0.0001 * deltaMs; // Use deltaMs for consistent speed, or calculate a rate per second
-        if (starField) starField.rotation.x += 0.00008 * deltaMs;
-
-        if (window.worldFog) { // Use window.worldFog as that's what you assign in createFogDots
-            window.worldFog.rotation.y += delta * 0.005;
-            const nowMs = performance.now();
-            window.worldFog.position.x += Math.sin(nowMs * 0.0001) * delta * 2;
-            window.worldFog.position.z += Math.cos(nowMs * 0.0001) * delta * 2;
-        }
-
-        
-        // Physics & Input Update
-        const physState = physicsController.update(delta, inputState, window.collidables);
-
-        // Weapon Update
-        weaponController.update(
-            inputState,
-            delta, {
-                velocity: physState.velocity,
-                isCrouched: inputState.crouch,
-                physicsController,
-                collidables: window.collidables,
-                stats: weaponController.stats
-            }
-        );
-
-        // Active Tracers Update
-        for (let i = activeTracers.length - 1; i >= 0; i--) {
-            const tracer = activeTracers[i];
-            tracer.update(delta); // Pass the calculated delta (in seconds)
-
-            if (tracer.remove) {
-                tracer.dispose();
-                activeTracers.splice(i, 1);
-            }
-        }
-
-        // Network Sync - Send local player's updated state
-        // dbRefs is now global, so just check it.
-        if (dbRefs && dbRefs.playersRef && localPlayerId) {
-            sendPlayerUpdate({
-                x: physState.x,
-                y: physState.y,
-                z: physState.z,
-                rotY: round2(physState.rotY),
-                rotX: round2(window.camera.rotation.x),
-                rotZ: round2(window.camera.rotation.z),
-                weapon: window.localPlayer.weapon,
-                knifeSwing: window.localPlayer.knifeSwing || false,
-                knifeHeavy: window.localPlayer.knifeHeavy || false
-            });
-            // Reset knife swing flags after sending
-            window.localPlayer.knifeSwing = false;
-            window.localPlayer.knifeHeavy = false;
-        } else {
-            console.warn("Skipping sendPlayerUpdate: dbRefs, dbRefs.playersRef or localPlayerId is null.");
-        }
-
-
-        // Remote avatars update: This loop is for local visual updates/interpolation
-        // based on data already received and processed by network.js.
-        for (const id in window.remotePlayers) {
-            const rp = window.remotePlayers[id];
-            if (rp.data) updateRemotePlayer(rp.data); // Assuming rp.data is the latest received network state
-        }
-        // Removed handleWeaponSwitch() call here as the logic is now inline below
-
-        // Weapon Switching
-        if (inputState.weaponSwitch) {
-            const oldW = window.localPlayer.weapon;
-            weaponAmmo[oldW] = weaponController.getCurrentAmmo();
-            const newW = inputState.weaponSwitch;
-            window.localPlayer.weapon = newW;
-
-            // Update Firebase if dbRefs and localPlayerId are available
-            if (dbRefs && dbRefs.playersRef && localPlayerId) {
-                try {
-                    dbRefs.playersRef.child(localPlayerId).update({
-                        weapon: newW
-                    });
-                } catch (error) {
-                    console.error("Failed to update local player weapon in Firebase:", error);
-                }
-            } else {
-                console.warn("Cannot update local player weapon in Firebase: dbRefs or localPlayerId is null.");
-            }
-
-            weaponController.equipWeapon(newW);
-            weaponController.ammoInMagazine = weaponAmmo[newW] ?? weaponController.stats.magazineSize;
-            // ***************************************************************
-            // FIX: Pass the 'newW' (weapon key) to updateInventory
-            updateInventory(newW);
-            // ***************************************************************
-            updateAmmoDisplay(weaponController.ammoInMagazine, weaponController.stats.magazineSize);
-            inputState.weaponSwitch = null; // Reset input state
-            if (newW === "knife") activeRecoils.length = 0; // Clear recoil for knife
-        }
-
-        // Mouse Look + Recoil
-        const baseSens = parseFloat(localStorage.getItem("sensitivity") || "5.00");
-        const aimMul = inputState.aim ? (window.localPlayer.weapon === "marshal" ? 0.15 : 0.5) : 1;
-        const finalSens = baseSens * aimMul;
-
-        window.camera.rotation.y -= inputState.mouseDX * finalSens * 0.002;
-        let newPitch = window.camera.rotation.x - inputState.mouseDY * finalSens * 0.002;
-        window.camera.rotation.x = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, newPitch));
-
-        // Recoil processing: apply recoil based on active recoil objects
-        {
-            const now = performance.now() / 1000;
-            let totalOffset = 0;
-            for (let i = activeRecoils.length - 1; i >= 0; i--) {
-                const r = activeRecoils[i];
-                const t = (now - r.start) / r.duration; // Normalized time (0 to 1)
-                if (t >= 1) {
-                    activeRecoils.splice(i, 1); // Recoil effect finished
-                    continue;
-                }
-                totalOffset += r.angle * (1 - t); // Linear decay for simplicity
-            }
-            window.camera.rotation.x += totalOffset;
-        }
-
-        // Rebuild collidables: includes environment meshes and visible remote player body parts
-        if (window.mapReady) {
-            window.collidables = [...window.envMeshes]; // Start with environment
-            for (const otherId in window.remotePlayers) {
-                if (otherId === window.localPlayer.id) continue; // Don't collide with self
-                const other = window.remotePlayers[otherId];
-                if (other.group?.visible) {
-                    other.group.traverse(child => {
-                        if (child.isMesh && child.userData?.isPlayerBodyPart) {
-                            window.collidables.push(child);
-                        }
-                    });
-                }
-            }
-        }
-
-        // Render the scene
+      // Render final frame
+      if (composer && typeof composer.render === 'function') {
         composer.render();
-    } catch (err) {
-        console.error("Error in animate:", err);
-    } finally {
-        postFrameCleanup(); // Ensure cleanup runs even if an error occurs
+      } else if (renderer && typeof renderer.render === 'function') {
+        renderer.render(scene, window.camera);
+      }
+
+      postFrameCleanup();
+      return;
+    } else {
+      if (fadeOverlay && fadeOverlay.style.opacity !== "0") hideFadeOverlay();
+      if (respawnOverlay && respawnOverlay.style.display !== "none") hideRespawn();
+      const cross = document.getElementById("crosshair");
+      if (cross) cross.style.display = "block";
     }
+
+    // Normal game updates
+    checkForDamagePulse();
+
+    if (weaponController.stats.speedModifier != null) {
+      physicsController.setSpeedModifier(weaponController.stats.speedModifier);
+    }
+
+    // Remote players falling
+    const GRAVITY = 9.8;
+    Object.values(window.remotePlayers).forEach(rp => {
+      const g = rp.group;
+      if (g?.userData.isFalling) {
+        g.userData.velocityY = (g.userData.velocityY || 0) + GRAVITY * delta;
+        g.position.y -= g.userData.velocityY * delta;
+        if (g.position.y < -20) {
+          g.userData.isFalling = false;
+          g.userData.velocityY = 0;
+          g.visible = false;
+        }
+      }
+    });
+
+    if (skyMesh) skyMesh.rotation.x += 0.0001 * deltaMs;
+    if (starField) starField.rotation.x += 0.00008 * deltaMs;
+
+    if (window.worldFog) {
+      window.worldFog.rotation.y += delta * 0.005;
+      const nowMs = performance.now();
+      window.worldFog.position.x += Math.sin(nowMs * 0.0001) * delta * 2;
+      window.worldFog.position.z += Math.cos(nowMs * 0.0001) * delta * 2;
+    }
+
+    // Physics & Input Update
+    const physState = physicsController.update(delta, inputState, window.collidables);
+
+    // Weapon Update
+    weaponController.update(
+      inputState,
+      delta, {
+        velocity: physState.velocity,
+        isCrouched: inputState.crouch,
+        physicsController,
+        collidables: window.collidables,
+        stats: weaponController.stats
+      }
+    );
+
+    // Active Tracers Update
+    for (let i = activeTracers.length - 1; i >= 0; i--) {
+      const tracer = activeTracers[i];
+      tracer.update(delta);
+      if (tracer.remove) {
+        tracer.dispose();
+        activeTracers.splice(i, 1);
+      }
+    }
+
+    // Network Sync
+    if (dbRefs && dbRefs.playersRef && localPlayerId) {
+      sendPlayerUpdate({
+        x: physState.x,
+        y: physState.y,
+        z: physState.z,
+        rotY: round2(physState.rotY),
+        rotX: round2(window.camera.rotation.x),
+        rotZ: round2(window.camera.rotation.z),
+        weapon: window.localPlayer.weapon,
+        knifeSwing: window.localPlayer.knifeSwing || false,
+        knifeHeavy: window.localPlayer.knifeHeavy || false
+      });
+      window.localPlayer.knifeSwing = false;
+      window.localPlayer.knifeHeavy = false;
+    } else {
+      console.warn("Skipping sendPlayerUpdate: dbRefs, dbRefs.playersRef or localPlayerId is null.");
+    }
+
+    // Remote avatars update
+    for (const id in window.remotePlayers) {
+      const rp = window.remotePlayers[id];
+      if (rp.data) updateRemotePlayer(rp.data);
+    }
+
+    // Weapon switching
+    if (inputState.weaponSwitch) {
+      const oldW = window.localPlayer.weapon;
+      weaponAmmo[oldW] = weaponController.getCurrentAmmo();
+      const newW = inputState.weaponSwitch;
+      window.localPlayer.weapon = newW;
+
+      if (dbRefs && dbRefs.playersRef && localPlayerId) {
+        try {
+          dbRefs.playersRef.child(localPlayerId).update({ weapon: newW });
+        } catch (error) {
+          console.error("Failed to update local player weapon in Firebase:", error);
+        }
+      } else {
+        console.warn("Cannot update local player weapon in Firebase: dbRefs or localPlayerId is null.");
+      }
+
+      weaponController.equipWeapon(newW);
+      weaponController.ammoInMagazine = weaponAmmo[newW] ?? weaponController.stats.magazineSize;
+      updateInventory(newW);
+      updateAmmoDisplay(weaponController.ammoInMagazine, weaponController.stats.magazineSize);
+      inputState.weaponSwitch = null;
+      if (newW === "knife") activeRecoils.length = 0;
+    }
+
+    // Mouse look + recoil
+    const baseSens = parseFloat(localStorage.getItem("sensitivity") || "5.00");
+    const aimMul = inputState.aim ? (window.localPlayer.weapon === "marshal" ? 0.15 : 0.5) : 1;
+    const finalSens = baseSens * aimMul;
+
+    window.camera.rotation.y -= inputState.mouseDX * finalSens * 0.002;
+    let newPitch = window.camera.rotation.x - inputState.mouseDY * finalSens * 0.002;
+    window.camera.rotation.x = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, newPitch));
+
+    // Recoil
+    {
+      const now = performance.now() / 1000;
+      let totalOffset = 0;
+      for (let i = activeRecoils.length - 1; i >= 0; i--) {
+        const r = activeRecoils[i];
+        const t = (now - r.start) / r.duration;
+        if (t >= 1) {
+          activeRecoils.splice(i, 1);
+          continue;
+        }
+        totalOffset += r.angle * (1 - t);
+      }
+      window.camera.rotation.x += totalOffset;
+    }
+
+    // Rebuild collidables
+    if (window.mapReady) {
+      window.collidables = [...window.envMeshes];
+      for (const otherId in window.remotePlayers) {
+        if (otherId === window.localPlayer.id) continue;
+        const other = window.remotePlayers[otherId];
+        if (other.group?.visible) {
+          other.group.traverse(child => {
+            if (child.isMesh && child.userData?.isPlayerBodyPart) window.collidables.push(child);
+          });
+        }
+      }
+    }
+
+    // Render
+    if (composer && typeof composer.render === 'function') {
+      composer.render();
+    } else if (renderer && typeof renderer.render === 'function') {
+      renderer.render(scene, window.camera);
+    }
+  } catch (err) {
+    console.error("Error in animate:", err);
+  } finally {
+    postFrameCleanup();
+  }
 }
 
 
@@ -2971,6 +2916,93 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
