@@ -1,7 +1,7 @@
 import * as THREE from "https://cdnjs.cloudflare.com/ajax/libs/three.js/0.152.0/three.module.js";
 
-export function voidEngine({ width = 640, height = 360, mode = "painter" } = {}) {
-  // --- Canvas setup ---
+export function voidEngine({ width = 640, height = 360, mode = "painter", cpuMode = "rasterize" } = {}) {
+  // --- Canvas setup (user-visible 2D canvas) ---
   const canvas = document.createElement("canvas");
   canvas.width = width;
   canvas.height = height;
@@ -9,9 +9,7 @@ export function voidEngine({ width = 640, height = 360, mode = "painter" } = {})
   canvas.style.imageRendering = "pixelated";
   const ctx = canvas.getContext("2d", { alpha: true });
 
-  let clearColor = { r: 0, g: 0, b: 0, a: 1 };
-
-  // --- GPU renderer (offscreen) ---
+  // --- Offscreen GL for final compositing (GPU just blits the CPU image) ---
   const glCanvas = document.createElement("canvas");
   glCanvas.width = width;
   glCanvas.height = height;
@@ -21,18 +19,25 @@ export function voidEngine({ width = 640, height = 360, mode = "painter" } = {})
     alpha: true,
     preserveDrawingBuffer: false,
   });
-  glRenderer.setClearColor(0x000000, 0); // transparent clear for compositing
+  glRenderer.setClearColor(0x000000, 0); // transparent clear
   glRenderer.setSize(width, height, false);
 
-  const gpuScene = new THREE.Scene();
+  // Fullscreen quad that will receive the CPU-produced texture
+  const orthoCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 10);
+  const quadScene = new THREE.Scene();
+  let quadMesh = null;
+  let cpuTexture = null;
 
-  // scratch
-  const vA = new THREE.Vector3();
-  const vB = new THREE.Vector3();
-  const vC = new THREE.Vector3();
-  const camV0 = new THREE.Vector3();
-  const camV1 = new THREE.Vector3();
-  const camV2 = new THREE.Vector3();
+  // pixel buffers (reused)
+  let pixelBuf = new Uint8ClampedArray(width * height * 4);
+  let zBuf = new Float32Array(width * height);
+
+  let clearColor = { r: 0, g: 0, b: 0, a: 1 };
+
+  // scratch vectors
+  const tmpV0 = new THREE.Vector3();
+  const tmpV1 = new THREE.Vector3();
+  const tmpV2 = new THREE.Vector3();
 
   function hexToRgba(hex, alpha = 1) {
     const r = (hex >> 16) & 255;
@@ -94,12 +99,143 @@ export function voidEngine({ width = 640, height = 360, mode = "painter" } = {})
     return tris;
   }
 
+  // CPU rasterizer: triangles array expects vertices in screen space and camera depths per vertex:
+  // each tri: { sx: [x0,x1,x2], sy: [y0,y1,y2], depth: [d0,d1,d2], color: {r,g,b,a} }
+  function rasterizeToBuffer(tris, w, h, pixels, zbuf, clearCol) {
+    const pxCount = w * h;
+    // reset buffers
+    const clearR = Math.round(clearCol.r), clearG = Math.round(clearCol.g), clearB = Math.round(clearCol.b);
+    const clearA255 = Math.round(Math.max(0, Math.min(1, clearCol.a)) * 255);
+    for (let i = 0; i < pxCount; i++) {
+      const idx = i * 4;
+      pixels[idx] = clearR;
+      pixels[idx + 1] = clearG;
+      pixels[idx + 2] = clearB;
+      pixels[idx + 3] = clearA255;
+      zbuf[i] = Infinity;
+    }
+
+    // Helper: edge function
+    function edge(x0, y0, x1, y1, x2, y2) {
+      return (x2 - x0) * (y1 - y0) - (y2 - y0) * (x1 - x0);
+    }
+
+    for (let t = 0; t < tris.length; t++) {
+      const tri = tris[t];
+      const x0 = tri.sx[0], y0 = tri.sy[0], x1 = tri.sx[1], y1 = tri.sy[1], x2 = tri.sx[2], y2 = tri.sy[2];
+      const d0 = tri.depth[0], d1 = tri.depth[1], d2 = tri.depth[2];
+      const cr = Math.round(tri.color.r), cg = Math.round(tri.color.g), cb = Math.round(tri.color.b);
+      const a = Math.max(0, Math.min(1, tri.color.a !== undefined ? tri.color.a : 1));
+      const a255 = Math.round(a * 255);
+
+      // bbox
+      let minX = Math.floor(Math.min(x0, x1, x2));
+      let maxX = Math.ceil(Math.max(x0, x1, x2));
+      let minY = Math.floor(Math.min(y0, y1, y2));
+      let maxY = Math.ceil(Math.max(y0, y1, y2));
+      if (minX < 0) minX = 0;
+      if (minY < 0) minY = 0;
+      if (maxX >= w) maxX = w - 1;
+      if (maxY >= h) maxY = h - 1;
+      if (maxX < 0 || maxY < 0 || minX >= w || minY >= h) continue;
+
+      const area = edge(x0, y0, x1, y1, x2, y2);
+      if (Math.abs(area) < 1e-3) continue;
+      const invArea = 1.0 / area;
+
+      // iterate pixels in bbox
+      for (let py = minY; py <= maxY; py++) {
+        for (let px = minX; px <= maxX; px++) {
+          // sample at pixel center
+          const sx = px + 0.5, sy = py + 0.5;
+          const w0 = edge(sx, sy, x1, y1, x2, y2) * invArea;
+          const w1 = edge(sx, sy, x2, y2, x0, y0) * invArea;
+          const w2 = edge(sx, sy, x0, y0, x1, y1) * invArea;
+          // inside test (allow small negative epsilon)
+          if (w0 >= -1e-6 && w1 >= -1e-6 && w2 >= -1e-6) {
+            // interpolate depth (depth is positive distance = -camZ)
+            const depth = w0 * d0 + w1 * d1 + w2 * d2;
+            const idx = py * w + px;
+            if (depth < zbuf[idx]) {
+              // simple alpha composite: src over dst
+              const pixIdx = idx * 4;
+              if (a >= 0.999) {
+                // opaque: replace
+                pixels[pixIdx] = cr;
+                pixels[pixIdx + 1] = cg;
+                pixels[pixIdx + 2] = cb;
+                pixels[pixIdx + 3] = 255;
+                zbuf[idx] = depth;
+              } else {
+                // translucent: composite over current pixel
+                const dstR = pixels[pixIdx] / 255;
+                const dstG = pixels[pixIdx + 1] / 255;
+                const dstB = pixels[pixIdx + 2] / 255;
+                const srcR = cr / 255;
+                const srcG = cg / 255;
+                const srcB = cb / 255;
+                const outR = srcR * a + dstR * (1 - a);
+                const outG = srcG * a + dstG * (1 - a);
+                const outB = srcB * a + dstB * (1 - a);
+                pixels[pixIdx] = Math.round(Math.max(0, Math.min(255, outR * 255)));
+                pixels[pixIdx + 1] = Math.round(Math.max(0, Math.min(255, outG * 255)));
+                pixels[pixIdx + 2] = Math.round(Math.max(0, Math.min(255, outB * 255)));
+                // keep alpha 255 for composited buffer
+                pixels[pixIdx + 3] = 255;
+                // update depth to prevent further geometry behind from writing
+                zbuf[idx] = depth;
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // create / update the quad that displays our cpuTexture
+  function ensureQuad(w, h) {
+    if (!cpuTexture) {
+      cpuTexture = new THREE.DataTexture(pixelBuf, w, h, THREE.RGBAFormat);
+      cpuTexture.minFilter = THREE.NearestFilter;
+      cpuTexture.magFilter = THREE.NearestFilter;
+      cpuTexture.flipY = true; // because buffer is top-left origin while GL is bottom-left depending on usage
+      cpuTexture.needsUpdate = true;
+
+      const geom = new THREE.PlaneGeometry(2, 2);
+      const mat = new THREE.MeshBasicMaterial({ map: cpuTexture, transparent: true });
+      quadMesh = new THREE.Mesh(geom, mat);
+      quadScene.add(quadMesh);
+    } else {
+      // if size changed, recreate texture and buffer arrays
+      if (cpuTexture.image.width !== w || cpuTexture.image.height !== h) {
+        cpuTexture.dispose();
+        cpuTexture = new THREE.DataTexture(pixelBuf, w, h, THREE.RGBAFormat);
+        cpuTexture.minFilter = THREE.NearestFilter;
+        cpuTexture.magFilter = THREE.NearestFilter;
+        cpuTexture.flipY = true;
+        cpuTexture.needsUpdate = true;
+        quadMesh.material.map = cpuTexture;
+      }
+    }
+  }
+
   const api = {
     domElement: canvas,
     setSize(w, h, updateStyle = true) {
       canvas.width = w; canvas.height = h;
       glCanvas.width = w; glCanvas.height = h;
       glRenderer.setSize(w, h, false);
+      // rebuild pixel buffers if required
+      if (pixelBuf.length !== w * h * 4) {
+        pixelBuf = new Uint8ClampedArray(w * h * 4);
+        zBuf = new Float32Array(w * h);
+        if (cpuTexture) {
+          cpuTexture.dispose();
+          cpuTexture = null;
+          quadScene.clear();
+          quadMesh = null;
+        }
+      }
       if (updateStyle) {
         canvas.style.width = `${w}px`; canvas.style.height = `${h}px`;
       }
@@ -110,19 +246,20 @@ export function voidEngine({ width = 640, height = 360, mode = "painter" } = {})
 
     render(scene, camera) {
       if (!scene || !camera) return;
-
       scene.updateMatrixWorld(true);
       camera.updateMatrixWorld(true);
+
+      // prepare camera inverse (for clipping / depth)
       const camInv = new THREE.Matrix4().copy(camera.matrixWorld).invert();
 
-      // clear CPU canvas background
+      // clear 2D canvas background
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       if (clearColor.a > 0) {
         ctx.fillStyle = rgbaToCss(clearColor);
         ctx.fillRect(0, 0, canvas.width, canvas.height);
       }
 
-      // collect triangle data (CPU: geometry extraction & near-clipping)
+      // collect triangles (projected) and sprites
       const triangles = [];
       const sprites = [];
 
@@ -131,10 +268,8 @@ export function voidEngine({ width = 640, height = 360, mode = "painter" } = {})
           const geometry = object.geometry;
           const posAttr = geometry.attributes && geometry.attributes.position;
           if (!posAttr) return;
-
           object.updateMatrixWorld(true);
 
-          // material color fallback + opacity
           let matColor = { r: 255, g: 255, b: 255, a: 1 };
           let opacity = 1;
           if (object.material) {
@@ -144,7 +279,6 @@ export function voidEngine({ width = 640, height = 360, mode = "painter" } = {})
             }
             opacity = m.opacity !== undefined ? m.opacity : 1;
           }
-
           const colorObj = { r: matColor.r, g: matColor.g, b: matColor.b, a: opacity };
 
           const index = geometry.index ? geometry.index.array : null;
@@ -154,8 +288,8 @@ export function voidEngine({ width = 640, height = 360, mode = "painter" } = {})
 
           for (let i = 0; i < count; i += 3) {
             const ai = index ? index[i] : i;
-            const bi = index ? index[i+1] : i+1;
-            const ci = index ? index[i+2] : i+2;
+            const bi = index ? index[i + 1] : i + 1;
+            const ci = index ? index[i + 2] : i + 2;
 
             const wA = new THREE.Vector3().fromArray(posArray, ai * itemSize).applyMatrix4(object.matrixWorld);
             const wB = new THREE.Vector3().fromArray(posArray, bi * itemSize).applyMatrix4(object.matrixWorld);
@@ -172,63 +306,58 @@ export function voidEngine({ width = 640, height = 360, mode = "painter" } = {})
             for (let ct = 0; ct < clippedTris.length; ct++) {
               const triW = clippedTris[ct];
 
-              const camV0 = triW[0].clone().applyMatrix4(camInv);
-              const camV1 = triW[1].clone().applyMatrix4(camInv);
-              const camV2 = triW[2].clone().applyMatrix4(camInv);
-              const depth0 = -camV0.z, depth1 = -camV1.z, depth2 = -camV2.z;
-              const farthestDepth = Math.max(depth0, depth1, depth2);
+              // compute camera-space vertices and project them
+              const camV0_ = triW[0].clone().applyMatrix4(camInv);
+              const camV1_ = triW[1].clone().applyMatrix4(camInv);
+              const camV2_ = triW[2].clone().applyMatrix4(camInv);
 
+              const depth0 = -camV0_.z; // positive distance
+              const depth1 = -camV1_.z;
+              const depth2 = -camV2_.z;
+
+              // Project to NDC for offscreen CPU rasterization -> then to screen px coords
               const pv0 = triW[0].clone().project(camera);
               const pv1 = triW[1].clone().project(camera);
               const pv2 = triW[2].clone().project(camera);
 
               if (
-                !Number.isFinite(pv0.x) || !Number.isFinite(pv0.y) || !Number.isFinite(pv0.z) ||
-                !Number.isFinite(pv1.x) || !Number.isFinite(pv1.y) || !Number.isFinite(pv1.z) ||
-                !Number.isFinite(pv2.x) || !Number.isFinite(pv2.y) || !Number.isFinite(pv2.z)
+                !Number.isFinite(pv0.x) || !Number.isFinite(pv0.y) ||
+                !Number.isFinite(pv1.x) || !Number.isFinite(pv1.y) ||
+                !Number.isFinite(pv2.x) || !Number.isFinite(pv2.y)
               ) continue;
 
+              // fast trivial off-screen check (not perfect but useful)
               if (
                 (pv0.x < -1 && pv1.x < -1 && pv2.x < -1) ||
                 (pv0.x > 1 && pv1.x > 1 && pv2.x > 1) ||
                 (pv0.y < -1 && pv1.y < -1 && pv2.y < -1) ||
-                (pv0.y > 1 && pv1.y > 1 && pv2.y > 1) ||
-                (pv0.z < -1 && pv1.z < -1 && pv2.z < -1) ||
-                (pv0.z > 1 && pv1.z > 1 && pv2.z > 1)
+                (pv0.y > 1 && pv1.y > 1 && pv2.y > 1)
               ) {
                 continue;
               }
 
-              const sxA = (pv0.x * 0.5 + 0.5) * canvas.width;
-              const syA = (-pv0.y * 0.5 + 0.5) * canvas.height;
-              const sxB = (pv1.x * 0.5 + 0.5) * canvas.width;
-              const syB = (-pv1.y * 0.5 + 0.5) * canvas.height;
-              const sxC = (pv2.x * 0.5 + 0.5) * canvas.width;
-              const syC = (-pv2.y * 0.5 + 0.5) * canvas.height;
+              // screen coords
+              const sx0 = (pv0.x * 0.5 + 0.5) * canvas.width;
+              const sy0 = (-pv0.y * 0.5 + 0.5) * canvas.height;
+              const sx1 = (pv1.x * 0.5 + 0.5) * canvas.width;
+              const sy1 = (-pv1.y * 0.5 + 0.5) * canvas.height;
+              const sx2 = (pv2.x * 0.5 + 0.5) * canvas.width;
+              const sy2 = (-pv2.y * 0.5 + 0.5) * canvas.height;
 
-              const MAX_SCREEN_COORD = 1e7;
-              if (
-                !Number.isFinite(sxA) || !Number.isFinite(syA) ||
-                !Number.isFinite(sxB) || !Number.isFinite(syB) ||
-                !Number.isFinite(sxC) || !Number.isFinite(syC) ||
-                Math.abs(sxA) > MAX_SCREEN_COORD || Math.abs(syA) > MAX_SCREEN_COORD ||
-                Math.abs(sxB) > MAX_SCREEN_COORD || Math.abs(syB) > MAX_SCREEN_COORD ||
-                Math.abs(sxC) > MAX_SCREEN_COORD || Math.abs(syC) > MAX_SCREEN_COORD
-              ) {
-                continue;
-              }
-
-              const ax = sxB - sxA, ay = syB - syA;
-              const bx = sxC - sxA, by = syC - syA;
+              // small screen-area cull
+              const ax = sx1 - sx0, ay = sy1 - sy0;
+              const bx = sx2 - sx0, by = sy2 - sy0;
               const cross = Math.abs(ax * by - ay * bx);
               const screenArea = cross * 0.5;
               if (screenArea < 0.25) continue;
 
-              // store world-space triangle + material color and opacity for GPU mesh creation
               triangles.push({
-                world: [ triW[0].clone(), triW[1].clone(), triW[2].clone() ],
+                sx: [sx0, sx1, sx2],
+                sy: [sy0, sy1, sy2],
+                depth: [depth0, depth1, depth2],
                 color: colorObj,
-                depth: farthestDepth
+                // optional: store world tri if needed later
+                world: [triW[0].clone(), triW[1].clone(), triW[2].clone()]
               });
             }
           }
@@ -252,63 +381,40 @@ export function voidEngine({ width = 640, height = 360, mode = "painter" } = {})
             x: sx, y: sy, size: sizePx, material: object.material, depth: wp.z
           });
         }
-      });
+      }); // traverseVisible
 
-      // ---------- GPU composition for triangles ----------
-      // bucket triangles by opacity (simple approach to preserve per-material alpha)
-      gpuScene.clear(); // remove previous meshes
-      const buckets = new Map(); // key = opacity string
-      for (let i = 0; i < triangles.length; i++) {
-        const tri = triangles[i];
-        const a = tri.color.a !== undefined ? tri.color.a : 1;
-        const key = String(a);
-        if (!buckets.has(key)) buckets.set(key, []);
-        buckets.get(key).push(tri);
-      }
+      // CPU-heavy path: rasterize into pixelBuf + zBuf
+      if (cpuMode === "rasterize") {
+        rasterizeToBuffer(triangles, canvas.width, canvas.height, pixelBuf, zBuf, clearColor);
+        // upload pixelBuf to DataTexture and render fullscreen quad with GPU
+        ensureQuad(canvas.width, canvas.height);
+        cpuTexture.image.data = pixelBuf;
+        cpuTexture.image.width = canvas.width;
+        cpuTexture.image.height = canvas.height;
+        cpuTexture.needsUpdate = true;
 
-      // For each bucket, create one BufferGeometry mesh with vertex colors (RGB) and material.opacity = bucketAlpha
-      for (const [key, tris] of buckets.entries()) {
-        const alpha = parseFloat(key);
-        const posArray = new Float32Array(tris.length * 9); // 3 verts * 3 components
-        const colArray = new Float32Array(tris.length * 9); // r,g,b for each vertex
-        let writeIdx = 0;
-        for (let i = 0; i < tris.length; i++) {
-          const t = tris[i];
-          for (let v = 0; v < 3; v++) {
-            const wv = t.world[v];
-            posArray[writeIdx * 3 + 0] = wv.x;
-            posArray[writeIdx * 3 + 1] = wv.y;
-            posArray[writeIdx * 3 + 2] = wv.z;
-            colArray[writeIdx * 3 + 0] = (t.color.r / 255);
-            colArray[writeIdx * 3 + 1] = (t.color.g / 255);
-            colArray[writeIdx * 3 + 2] = (t.color.b / 255);
-            writeIdx++;
-          }
+        glRenderer.setSize(canvas.width, canvas.height, false);
+        glRenderer.render(quadScene, orthoCam);
+
+        // blit the glCanvas onto the 2D canvas (keeps original UI layering semantics)
+        ctx.drawImage(glCanvas, 0, 0, canvas.width, canvas.height);
+      } else {
+        // existing GPU-assisted (previous) approach could be placed here
+        // For now just fallback to CPU: draw triangles as filled paths (slower)
+        triangles.sort((a, b) => b.depth - a.depth);
+        for (let t = 0; t < triangles.length; t++) {
+          const tri = triangles[t];
+          ctx.beginPath();
+          ctx.moveTo(tri.sx[0], tri.sy[0]);
+          ctx.lineTo(tri.sx[1], tri.sy[1]);
+          ctx.lineTo(tri.sx[2], tri.sy[2]);
+          ctx.closePath();
+          ctx.fillStyle = `rgba(${Math.round(tri.color.r)},${Math.round(tri.color.g)},${Math.round(tri.color.b)},${tri.color.a})`;
+          ctx.fill();
         }
-        const geom = new THREE.BufferGeometry();
-        geom.setAttribute('position', new THREE.BufferAttribute(posArray, 3));
-        geom.setAttribute('color', new THREE.BufferAttribute(colArray, 3));
-        geom.setDrawRange(0, tris.length * 3);
-        // Important: use double-sided unless you guarantee triangle winding
-        const mat = new THREE.MeshBasicMaterial({
-          vertexColors: true,
-          side: THREE.DoubleSide,
-          transparent: alpha < 1 ? true : false,
-          opacity: alpha
-        });
-        const mesh = new THREE.Mesh(geom, mat);
-        gpuScene.add(mesh);
       }
 
-      // Render GPU scene (triangles) into the offscreen GL canvas using original camera
-      glRenderer.setSize(canvas.width, canvas.height, false);
-      glRenderer.render(gpuScene, camera);
-
-      // Copy GPU canvas into CPU canvas
-      // This ensures GPU-rendered triangles (with proper depth test) are composited into your 2D canvas
-      ctx.drawImage(glCanvas, 0, 0, canvas.width, canvas.height);
-
-      // ---------- fallback CPU sprites drawing (still preserved) ----------
+      // draw sprites on top (cpu)
       sprites.sort((a, b) => b.depth - a.depth);
       for (let s = 0; s < sprites.length; s++) {
         const sp = sprites[s];
@@ -338,9 +444,13 @@ export function voidEngine({ width = 640, height = 360, mode = "painter" } = {})
     },
 
     dispose() {
-      // clean up renderer and GPU scene
+      if (cpuTexture) cpuTexture.dispose();
+      if (quadMesh) {
+        quadMesh.geometry.dispose();
+        quadMesh.material.dispose();
+      }
       glRenderer.dispose();
-      gpuScene.clear();
+      quadScene.clear();
     },
   };
 
