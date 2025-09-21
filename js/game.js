@@ -836,7 +836,7 @@ export async function initSceneCrocodilosConstruction() {
   scene.add(window.camera);
 
   // 3. Renderer (CPU canvas)
-  const cpuRenderer = voidEngine({ width: FIXED_WIDTH, height: FIXED_HEIGHT });
+  const cpuRenderer = voidEngine();
   cpuRenderer.setClearColor(0x000000, 1);
   renderer = cpuRenderer;
   window.renderer = renderer;
@@ -2916,6 +2916,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
