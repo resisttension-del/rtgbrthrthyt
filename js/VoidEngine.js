@@ -295,4 +295,154 @@ export function voidEngine({ width = 640, height = 360, antialias = false, resol
     for (let i = gpuScene.children.length - 1; i >= 0; i--) {
       const c = gpuScene.children[i];
       // keep sprites (we manage spritePool separately)
-      if (c.type === "Sprite") c
+      if (c.type === "Sprite") continue;
+      gpuScene.remove(c);
+      if (c.geometry) c.geometry.dispose();
+      if (c.material) c.material.dispose();
+    }
+
+    meshPool = [];
+    for (const [opacityKey, data] of buckets.entries()) {
+      const positions = new Float32Array(data.positions);
+      const colors = new Float32Array(data.colors);
+      const geom = new THREE.BufferGeometry();
+      geom.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+      geom.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+      geom.computeBoundingSphere();
+
+      const opacity = parseFloat(opacityKey);
+      const mat = new THREE.MeshBasicMaterial({
+        vertexColors: true,
+        transparent: opacity < 1 ? true : false,
+        opacity: opacity,
+        side: THREE.DoubleSide,
+        depthWrite: opacity < 1 ? false : true,
+      });
+
+      const mesh = new THREE.Mesh(geom, mat);
+      mesh.matrixAutoUpdate = false;
+      // world positions are already in world space -> keep identity matrix
+      mesh.matrix.identity();
+      mesh.updateMatrix();
+      gpuScene.add(mesh);
+      meshPool.push(mesh);
+    }
+  }
+
+  // adapt tessLevel to chase cpuTargetMs
+  let smoothedCpuMs = 0;
+  const smoothAlpha = 0.85;
+
+  // PUBLIC API
+  const api = {
+    domElement: canvas,
+
+    setSize(w, h, updateStyle = true) {
+      canvas.width = w; canvas.height = h;
+      if (updateStyle) { canvas.style.width = `${w}px`; canvas.style.height = `${h}px`; }
+      // update GL canvas resolution according to resolutionScale
+      setGlSizeFromResolution();
+    },
+
+    setClearColor(hex = 0x000000, alpha = 1) {
+      clearColor = hexToRgba(hex, alpha);
+    },
+
+    // how many ms we want the CPU build step to spend per frame (raise to push CPU)
+    setCpuTargetMs(ms) {
+      cpuTargetMs = Math.max(1, Number(ms) || cpuTargetMs);
+    },
+
+    // cap for tessellation depth (safeguard)
+    setMaxTessLevel(l) {
+      maxTessLevel = Math.max(0, Math.floor(l));
+    },
+
+    // set internal pixel scale for GL raster
+    setResolutionScale(s) {
+      resolution = Math.max(0.1, Math.min(1, s));
+      setGlSizeFromResolution();
+    },
+
+    // main render loop: CPU preprocess -> upload -> GPU render -> blit
+    render(scene, camera) {
+      if (!scene || !camera) return;
+
+      // 1) prepare lights for CPU shading
+      buildLightCacheFromScene(scene);
+
+      // 2) CPU: preprocess geometry (heavy)
+      const cpuStart = performance.now();
+      const buckets = processSceneToCpuBuffers(scene, camera);
+      const cpuEnd = performance.now();
+      const cpuMs = cpuEnd - cpuStart;
+      smoothedCpuMs = smoothedCpuMs ? (smoothAlpha * smoothedCpuMs + (1 - smoothAlpha) * cpuMs) : cpuMs;
+
+      // adapt tessLevel to chase cpuTargetMs (simple gradient)
+      if (smoothedCpuMs < cpuTargetMs * 0.85 && tessLevel < maxTessLevel) {
+        tessLevel = Math.min(maxTessLevel, tessLevel + 1);
+      } else if (smoothedCpuMs > cpuTargetMs * 1.15 && tessLevel > 0) {
+        tessLevel = Math.max(0, tessLevel - 1);
+      }
+
+      // 3) upload CPU-produced buffers to GPU meshes
+      uploadBucketsToGpu(buckets);
+
+      // 4) update sprites transforms (they were kept in spritePool)
+      scene.traverseVisible((object) => {
+        if (object.isSprite && object.visible) {
+          const s = spritePool.get(object.uuid);
+          if (s) {
+            object.updateMatrixWorld(true);
+            s.matrixAutoUpdate = false;
+            s.matrix.copy(object.matrixWorld);
+            s.visible = object.visible;
+          }
+        }
+      });
+
+      // 5) GPU render and blit
+      glRenderer.setSize(glCanvas.width, glCanvas.height, false);
+      glRenderer.render(gpuScene, camera);
+
+      // 6) composite into 2D canvas (preserve clearColor on 2D)
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      if (clearColor.a > 0) {
+        ctx.fillStyle = rgbaToCss(clearColor);
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+      }
+      // stretch gl canvas to visible canvas
+      ctx.drawImage(glCanvas, 0, 0, canvas.width, canvas.height);
+
+      // return some telemetry useful during tuning
+      return {
+        cpuMs,
+        tessLevel,
+        glRes: { w: glCanvas.width, h: glCanvas.height },
+      };
+    },
+
+    dispose() {
+      // cleanup GPU objects
+      for (const m of meshPool) {
+        if (m.geometry) m.geometry.dispose();
+        if (m.material) m.material.dispose();
+        gpuScene.remove(m);
+      }
+      meshPool.length = 0;
+      for (const s of spritePool.values()) {
+        if (s.material) s.material.dispose();
+        gpuScene.remove(s);
+      }
+      spritePool.clear();
+      glRenderer.dispose();
+      gpuScene.clear();
+    }
+  };
+
+  // init
+  api.setSize(width, height, false);
+  api.setClearColor(0x000000, 1);
+
+  return api;
+}
