@@ -11,6 +11,21 @@ export function voidEngine({ width = 640, height = 360, mode = "painter" } = {})
 
   let clearColor = { r: 0, g: 0, b: 0, a: 1 };
 
+  // --- GPU renderer (offscreen) ---
+  const glCanvas = document.createElement("canvas");
+  glCanvas.width = width;
+  glCanvas.height = height;
+  const glRenderer = new THREE.WebGLRenderer({
+    canvas: glCanvas,
+    antialias: false,
+    alpha: true,
+    preserveDrawingBuffer: false,
+  });
+  glRenderer.setClearColor(0x000000, 0); // transparent clear for compositing
+  glRenderer.setSize(width, height, false);
+
+  const gpuScene = new THREE.Scene();
+
   // scratch
   const vA = new THREE.Vector3();
   const vB = new THREE.Vector3();
@@ -29,7 +44,6 @@ export function voidEngine({ width = 640, height = 360, mode = "painter" } = {})
     return `rgba(${Math.round(r)},${Math.round(g)},${Math.round(b)},${a})`;
   }
 
-  // helper: linear interp of THREE.Vector3 into out
   function lerpVec(out, a, b, t) {
     out.x = a.x + (b.x - a.x) * t;
     out.y = a.y + (b.y - a.y) * t;
@@ -37,69 +51,40 @@ export function voidEngine({ width = 640, height = 360, mode = "painter" } = {})
     return out;
   }
 
-  // clip polygon (in camera space) against near-plane z = -near.
-  // inputs:
-  //  inWorld: array of world-space THREE.Vector3 objects (corresponding to inCam)
-  //  inCam:  array of camera-space THREE.Vector3 objects (same length)
-  // returns array of clipped triangles as arrays of world-space vertices (triangles)
   function clipPolygonAgainstNear(inWorld, inCam, near) {
     if (inWorld.length !== inCam.length) return [];
-
-    // Sutherland–Hodgman for single plane. We'll produce polygon (world & cam) clipped.
     let outWorld = [];
     let outCam = [];
-
     function isInside(camV) {
-      // camera-space: points in front of camera have negative z (three.js convention).
-      // near plane at z = -near. Inside = z <= -near
       return camV.z <= -near;
     }
-
     const n = inWorld.length;
     for (let i = 0; i < n; i++) {
-      const aW = inWorld[i];
-      const aC = inCam[i];
+      const aW = inWorld[i], aC = inCam[i];
       const j = (i + 1) % n;
-      const bW = inWorld[j];
-      const bC = inCam[j];
-
-      const aIn = isInside(aC);
-      const bIn = isInside(bC);
-
+      const bW = inWorld[j], bC = inCam[j];
+      const aIn = isInside(aC), bIn = isInside(bC);
       if (aIn && bIn) {
-        // both inside -> push b
-        outWorld.push(bW.clone());
-        outCam.push(bC.clone());
+        outWorld.push(bW.clone()); outCam.push(bC.clone());
       } else if (aIn && !bIn) {
-        // leaving -> push intersection
-        const t = ( -near - aC.z ) / (bC.z - aC.z);
-        // clamp t for safety
+        const t = (-near - aC.z) / (bC.z - aC.z);
         const tt = Math.max(0, Math.min(1, t));
-        const iW = new THREE.Vector3();
-        const iC = new THREE.Vector3();
+        const iW = new THREE.Vector3(), iC = new THREE.Vector3();
         lerpVec(iW, aW, bW, tt);
         lerpVec(iC, aC, bC, tt);
-        outWorld.push(iW);
-        outCam.push(iC);
+        outWorld.push(iW); outCam.push(iC);
       } else if (!aIn && bIn) {
-        // entering -> push intersection then b
-        const t = ( -near - aC.z ) / (bC.z - aC.z);
+        const t = (-near - aC.z) / (bC.z - aC.z);
         const tt = Math.max(0, Math.min(1, t));
-        const iW = new THREE.Vector3();
-        const iC = new THREE.Vector3();
+        const iW = new THREE.Vector3(), iC = new THREE.Vector3();
         lerpVec(iW, aW, bW, tt);
         lerpVec(iC, aC, bC, tt);
-        outWorld.push(iW);
-        outCam.push(iC);
-        outWorld.push(bW.clone());
-        outCam.push(bC.clone());
+        outWorld.push(iW); outCam.push(iC);
+        outWorld.push(bW.clone()); outCam.push(bC.clone());
       } else {
-        // both outside -> push nothing
+        // both outside
       }
     }
-
-    // now outWorld/outCam represent the clipped polygon (0..4 verts)
-    // triangulate fan if >=3 verts
     const tris = [];
     if (outWorld.length >= 3) {
       for (let i = 1; i < outWorld.length - 1; i++) {
@@ -112,11 +97,11 @@ export function voidEngine({ width = 640, height = 360, mode = "painter" } = {})
   const api = {
     domElement: canvas,
     setSize(w, h, updateStyle = true) {
-      canvas.width = w;
-      canvas.height = h;
+      canvas.width = w; canvas.height = h;
+      glCanvas.width = w; glCanvas.height = h;
+      glRenderer.setSize(w, h, false);
       if (updateStyle) {
-        canvas.style.width = `${w}px`;
-        canvas.style.height = `${h}px`;
+        canvas.style.width = `${w}px`; canvas.style.height = `${h}px`;
       }
     },
     setClearColor(hex = 0x000000, alpha = 1) {
@@ -126,20 +111,18 @@ export function voidEngine({ width = 640, height = 360, mode = "painter" } = {})
     render(scene, camera) {
       if (!scene || !camera) return;
 
-      // ensure up-to-date
       scene.updateMatrixWorld(true);
       camera.updateMatrixWorld(true);
-
-      // compute a fresh camera inverse matrix (don't rely on camera.matrixWorldInverse being set)
       const camInv = new THREE.Matrix4().copy(camera.matrixWorld).invert();
 
-      // clear
+      // clear CPU canvas background
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       if (clearColor.a > 0) {
         ctx.fillStyle = rgbaToCss(clearColor);
         ctx.fillRect(0, 0, canvas.width, canvas.height);
       }
 
+      // collect triangle data (CPU: geometry extraction & near-clipping)
       const triangles = [];
       const sprites = [];
 
@@ -151,7 +134,7 @@ export function voidEngine({ width = 640, height = 360, mode = "painter" } = {})
 
           object.updateMatrixWorld(true);
 
-          // material color fallback
+          // material color fallback + opacity
           let matColor = { r: 255, g: 255, b: 255, a: 1 };
           let opacity = 1;
           if (object.material) {
@@ -161,64 +144,50 @@ export function voidEngine({ width = 640, height = 360, mode = "painter" } = {})
             }
             opacity = m.opacity !== undefined ? m.opacity : 1;
           }
-          const colorCss = `rgba(${Math.round(matColor.r)},${Math.round(matColor.g)},${Math.round(matColor.b)},${opacity})`;
+
+          const colorObj = { r: matColor.r, g: matColor.g, b: matColor.b, a: opacity };
 
           const index = geometry.index ? geometry.index.array : null;
           const posArray = posAttr.array;
           const itemSize = posAttr.itemSize || 3;
           const count = index ? index.length : posArray.length / itemSize;
 
-          // iterate triangles
           for (let i = 0; i < count; i += 3) {
             const ai = index ? index[i] : i;
             const bi = index ? index[i+1] : i+1;
             const ci = index ? index[i+2] : i+2;
 
-            // get world positions for triangle vertices
             const wA = new THREE.Vector3().fromArray(posArray, ai * itemSize).applyMatrix4(object.matrixWorld);
             const wB = new THREE.Vector3().fromArray(posArray, bi * itemSize).applyMatrix4(object.matrixWorld);
             const wC = new THREE.Vector3().fromArray(posArray, ci * itemSize).applyMatrix4(object.matrixWorld);
 
-            // compute camera-space positions
             const cA = wA.clone().applyMatrix4(camInv);
             const cB = wB.clone().applyMatrix4(camInv);
             const cC = wC.clone().applyMatrix4(camInv);
 
             const near = camera.near || 0.001;
-            const far = camera.far || 1e9;
-
-            // Clip triangle against near plane properly
             const clippedTris = clipPolygonAgainstNear([wA, wB, wC], [cA, cB, cC], near);
             if (!clippedTris || clippedTris.length === 0) continue;
 
-            // for each resulting triangle, project and add to list with safety checks
             for (let ct = 0; ct < clippedTris.length; ct++) {
               const triW = clippedTris[ct];
-              
-              // 1. Compute camera-space z for sorting
+
               const camV0 = triW[0].clone().applyMatrix4(camInv);
               const camV1 = triW[1].clone().applyMatrix4(camInv);
               const camV2 = triW[2].clone().applyMatrix4(camInv);
-
-              // compute "farthest" depth as positive distance
-              const depth0 = -camV0.z;
-              const depth1 = -camV1.z;
-              const depth2 = -camV2.z;
+              const depth0 = -camV0.z, depth1 = -camV1.z, depth2 = -camV2.z;
               const farthestDepth = Math.max(depth0, depth1, depth2);
 
-              // 2. Project to NDC / screen as before
               const pv0 = triW[0].clone().project(camera);
               const pv1 = triW[1].clone().project(camera);
               const pv2 = triW[2].clone().project(camera);
 
-              // drop if any non-finite
               if (
                 !Number.isFinite(pv0.x) || !Number.isFinite(pv0.y) || !Number.isFinite(pv0.z) ||
                 !Number.isFinite(pv1.x) || !Number.isFinite(pv1.y) || !Number.isFinite(pv1.z) ||
                 !Number.isFinite(pv2.x) || !Number.isFinite(pv2.y) || !Number.isFinite(pv2.z)
               ) continue;
 
-              // trivial off-screen test (all verts same side)
               if (
                 (pv0.x < -1 && pv1.x < -1 && pv2.x < -1) ||
                 (pv0.x > 1 && pv1.x > 1 && pv2.x > 1) ||
@@ -230,7 +199,6 @@ export function voidEngine({ width = 640, height = 360, mode = "painter" } = {})
                 continue;
               }
 
-              // convert to screen coords
               const sxA = (pv0.x * 0.5 + 0.5) * canvas.width;
               const syA = (-pv0.y * 0.5 + 0.5) * canvas.height;
               const sxB = (pv1.x * 0.5 + 0.5) * canvas.width;
@@ -238,7 +206,6 @@ export function voidEngine({ width = 640, height = 360, mode = "painter" } = {})
               const sxC = (pv2.x * 0.5 + 0.5) * canvas.width;
               const syC = (-pv2.y * 0.5 + 0.5) * canvas.height;
 
-              // sanity check coords
               const MAX_SCREEN_COORD = 1e7;
               if (
                 !Number.isFinite(sxA) || !Number.isFinite(syA) ||
@@ -251,36 +218,28 @@ export function voidEngine({ width = 640, height = 360, mode = "painter" } = {})
                 continue;
               }
 
-              // skip degenerate / tiny triangles
               const ax = sxB - sxA, ay = syB - syA;
               const bx = sxC - sxA, by = syC - syA;
               const cross = Math.abs(ax * by - ay * bx);
               const screenArea = cross * 0.5;
               if (screenArea < 0.25) continue;
 
-              // 3. Push using the farthestDepth as the sort key
+              // store world-space triangle + material color and opacity for GPU mesh creation
               triangles.push({
-                pts: [
-                  { x: sxA, y: syA, z: pv0.z },
-                  { x: sxB, y: syB, z: pv1.z },
-                  { x: sxC, y: syC, z: pv2.z }
-                ],
-                color: colorCss,
+                world: [ triW[0].clone(), triW[1].clone(), triW[2].clone() ],
+                color: colorObj,
                 depth: farthestDepth
               });
-            } // clipped tris loop
-          } // triangle iteration
-        } // mesh handling
+            }
+          }
+        }
 
-        // sprites (unchanged)
         if (object.isSprite && object.visible) {
           object.updateMatrixWorld(true);
           const wp = new THREE.Vector3();
           object.getWorldPosition(wp);
           wp.project(camera);
-
           if (wp.x < -1 || wp.x > 1 || wp.y < -1 || wp.y > 1 || wp.z < -1 || wp.z > 1) return;
-
           const sx = (wp.x * 0.5 + 0.5) * canvas.width;
           const sy = (-wp.y * 0.5 + 0.5) * canvas.height;
           const scale = object.scale ? (object.scale.x || 1) : 1;
@@ -293,25 +252,63 @@ export function voidEngine({ width = 640, height = 360, mode = "painter" } = {})
             x: sx, y: sy, size: sizePx, material: object.material, depth: wp.z
           });
         }
-      }); // traverseVisible
+      });
 
-      // 4. Sort triangles by depth (farthest to nearest)
-      triangles.sort((a, b) => b.depth - a.depth);
-
-      // draw triangles
-      for (let t = 0; t < triangles.length; t++) {
-        const tri = triangles[t];
-        const p0 = tri.pts[0], p1 = tri.pts[1], p2 = tri.pts[2];
-        ctx.beginPath();
-        ctx.moveTo(p0.x, p0.y);
-        ctx.lineTo(p1.x, p1.y);
-        ctx.lineTo(p2.x, p2.y);
-        ctx.closePath();
-        ctx.fillStyle = tri.color;
-        ctx.fill();
+      // ---------- GPU composition for triangles ----------
+      // bucket triangles by opacity (simple approach to preserve per-material alpha)
+      gpuScene.clear(); // remove previous meshes
+      const buckets = new Map(); // key = opacity string
+      for (let i = 0; i < triangles.length; i++) {
+        const tri = triangles[i];
+        const a = tri.color.a !== undefined ? tri.color.a : 1;
+        const key = String(a);
+        if (!buckets.has(key)) buckets.set(key, []);
+        buckets.get(key).push(tri);
       }
 
-      // sprites (far->near)
+      // For each bucket, create one BufferGeometry mesh with vertex colors (RGB) and material.opacity = bucketAlpha
+      for (const [key, tris] of buckets.entries()) {
+        const alpha = parseFloat(key);
+        const posArray = new Float32Array(tris.length * 9); // 3 verts * 3 components
+        const colArray = new Float32Array(tris.length * 9); // r,g,b for each vertex
+        let writeIdx = 0;
+        for (let i = 0; i < tris.length; i++) {
+          const t = tris[i];
+          for (let v = 0; v < 3; v++) {
+            const wv = t.world[v];
+            posArray[writeIdx * 3 + 0] = wv.x;
+            posArray[writeIdx * 3 + 1] = wv.y;
+            posArray[writeIdx * 3 + 2] = wv.z;
+            colArray[writeIdx * 3 + 0] = (t.color.r / 255);
+            colArray[writeIdx * 3 + 1] = (t.color.g / 255);
+            colArray[writeIdx * 3 + 2] = (t.color.b / 255);
+            writeIdx++;
+          }
+        }
+        const geom = new THREE.BufferGeometry();
+        geom.setAttribute('position', new THREE.BufferAttribute(posArray, 3));
+        geom.setAttribute('color', new THREE.BufferAttribute(colArray, 3));
+        geom.setDrawRange(0, tris.length * 3);
+        // Important: use double-sided unless you guarantee triangle winding
+        const mat = new THREE.MeshBasicMaterial({
+          vertexColors: true,
+          side: THREE.DoubleSide,
+          transparent: alpha < 1 ? true : false,
+          opacity: alpha
+        });
+        const mesh = new THREE.Mesh(geom, mat);
+        gpuScene.add(mesh);
+      }
+
+      // Render GPU scene (triangles) into the offscreen GL canvas using original camera
+      glRenderer.setSize(canvas.width, canvas.height, false);
+      glRenderer.render(gpuScene, camera);
+
+      // Copy GPU canvas into CPU canvas
+      // This ensures GPU-rendered triangles (with proper depth test) are composited into your 2D canvas
+      ctx.drawImage(glCanvas, 0, 0, canvas.width, canvas.height);
+
+      // ---------- fallback CPU sprites drawing (still preserved) ----------
       sprites.sort((a, b) => b.depth - a.depth);
       for (let s = 0; s < sprites.length; s++) {
         const sp = sprites[s];
@@ -341,7 +338,9 @@ export function voidEngine({ width = 640, height = 360, mode = "painter" } = {})
     },
 
     dispose() {
-      // nothing heavy
+      // clean up renderer and GPU scene
+      glRenderer.dispose();
+      gpuScene.clear();
     },
   };
 
