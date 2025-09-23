@@ -253,20 +253,24 @@ export function voidEngine({ width = 1280, height = 720 } = {}) {
           }
 
           // Build convex hull from the collected projected points
-          const hull = convexHull(pts2d);
+// Build convex hull from the collected projected points
+const hull = convexHull(pts2d);
 
-          // If hull is trivial (1 or 2 points), but user forced rendering, make fallback shapes
-          if (hull.length >= 3) {
-            drawables.push({ type: 'poly', obj, pts: hull, distNear, distFar, projZ: proj.z });
-          } else if (hull.length === 2) {
-            drawables.push({ type: 'line', obj, pts: hull, distNear, distFar });
-          } else {
-            // single point fallback
-            const p = hull[0] || pts2d[0];
-            if (alwaysRender || obj.userData?.forceMarker) {
-              drawables.push({ type: 'rect', obj, sx: p.x, sy: p.y, distNear, distFar, sizePx: obj.userData?.markerSizePx ?? 6 });
-            }
-          }
+// Calculate the average normalized depth for sorting
+const avgNdcZ = pts2d.reduce((sum, p) => sum + p.ndcZ, 0) / pts2d.length;
+
+// If hull is trivial (1 or 2 points), but user forced rendering, make fallback shapes
+if (hull.length >= 3) {
+  drawables.push({ type: 'poly', obj, pts: hull, distNear, distFar, avgNdcZ });
+} else if (hull.length === 2) {
+  drawables.push({ type: 'line', obj, pts: hull, distNear, distFar, avgNdcZ });
+} else {
+  // single point fallback
+  const p = hull[0] || pts2d[0];
+  if (alwaysRender || obj.userData?.forceMarker) {
+    drawables.push({ type: 'rect', obj, sx: p.x, sy: p.y, distNear, distFar, avgNdcZ });
+  }
+}
 
           return;
         } else {
@@ -280,17 +284,15 @@ export function voidEngine({ width = 1280, height = 720 } = {}) {
       // Painter's order: sort by farthest sampled point first (so large objects that *span* far will be drawn behind)
       // fallback to center-based dist if distFar is missing.
 // Painter's order: sort by projected Z-value (normalized depth)
+// Painter's order: sort by the average normalized depth (avgNdcZ)
 drawables.sort((a, b) => {
-  // Use the projected Z value as the primary sorting key.
-  // A lower Z value is closer to the camera in NDC space, so we want
-  // to draw objects with a higher Z value first (farther away).
-  // The 'projZ' is already calculated from the object's center.
-  const aZ = a.projZ !== undefined ? a.projZ : 1;
-  const bZ = b.projZ !== undefined ? b.projZ : 1;
+  // Use the average normalized Z value as the primary sorting key.
+  // A higher Z value is farther from the camera, so we want to draw it first.
+  const aZ = a.avgNdcZ !== undefined ? a.avgNdcZ : -Infinity;
+  const bZ = b.avgNdcZ !== undefined ? b.avgNdcZ : -Infinity;
   
   if (aZ === bZ) {
-    // Tie-breaker for objects at the same depth. Use the average
-    // world-space distance for more consistent behavior.
+    // Tie-breaker: use the average world-space distance for consistency.
     const aAvgDist = ((a.distNear ?? a.dist ?? 0) + (a.distFar ?? a.dist ?? 0)) * 0.5;
     const bAvgDist = ((b.distNear ?? b.dist ?? 0) + (b.distFar ?? b.dist ?? 0)) * 0.5;
     return bAvgDist - aAvgDist;
