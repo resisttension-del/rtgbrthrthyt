@@ -1471,6 +1471,7 @@ export function addRemotePlayer(data) {
 
 
 // ─── bullet-proof removeRemotePlayer ─────────────────────────────────────────
+
 export function removeRemotePlayer(id) {
     if (!window.remotePlayers) return;
     const rp = window.remotePlayers[id];
@@ -1498,16 +1499,6 @@ export function removeRemotePlayer(id) {
     } catch (e) {}
 
     // console.log(`[removeRemotePlayer] Purged remotePlayers[${id}]`);
-}
-
-// Clear any pending hide‐timeouts
-clearTimeout(playerVisibilityTimeouts[id]);
-delete playerVisibilityTimeouts[id];
-
-
-// Unconditionally delete the map entry
-delete window.remotePlayers[id];
-// console.log(`[removeRemotePlayer] Purged remotePlayers[${id}]`);
 }
 
 export function updateRemotePlayer(data) {
@@ -3097,6 +3088,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
