@@ -627,7 +627,7 @@ equipWeapon(weaponKey) {
     }
   } catch (e) {}
   return 60;
-},
+}
 
 setCameraFov(newFov) {
   // Sets camera FOV for PlayCanvas or Three.js
@@ -652,7 +652,7 @@ setCameraFov(newFov) {
   } catch (e) {
     console.warn("setCameraFov failed", e);
   }
-},
+}
 
 update(inputState, delta, playerState) {
   // Engine-agnostic helpers
