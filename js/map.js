@@ -98,7 +98,7 @@ export async function createCrocodilosConstruction(targetSceneRoot, physicsContr
   loaderUI.show("Loading CrocodilosConstruction Map...", isPlayCanvasRoot ? [0.5, 0.5] : [1.0]);
 
 //  const SCALE = 5;
-    const SCALE = 2;
+    const SCALE = 1;
     const rawSpawnPoints = [
    //     new THREE.Vector3(-14, 7, -36), // 1
   //      new THREE.Vector3(-2, 2, 37), // 2
