@@ -682,7 +682,6 @@ update(inputState, delta, playerState) {
     const vecClone = v => v ? new pc.Vec3(v.x, v.y, v.z) : vec3();
     const vecLerp = (out, a, b, t) => { out.x = lerp(a.x, b.x, t); out.y = lerp(a.y, b.y, t); out.z = lerp(a.z, b.z, t); return out; };
     const RAD_TO_DEG = 180 / Math.PI;
-    const DEG_TO_RAD = Math.PI / 180;
 
     // --- Lazy initialize any weapon (incl. knife) if we haven't yet ---
     if (!this.viewModel) {
