@@ -1160,7 +1160,7 @@ function setupMapStateListener(mapStateRef) {
         const hole = snap.val();
         const holeKey = snap.key;
 
-        addBulletHole(hole, holeKey); // Call UI function to add locally
+       window.pcBulletHoleManager.addBulletHole(holeData, key);
 
         // Schedule removal from Firebase after its visual lifecycle (e.g., 5 seconds)
         setTimeout(() => {
