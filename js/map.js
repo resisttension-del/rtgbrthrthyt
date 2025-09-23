@@ -102,7 +102,7 @@ export async function createCrocodilosConstruction(targetSceneRoot, physicsContr
     const rawSpawnPoints = [
    //     new THREE.Vector3(-14, 7, -36), // 1
   //      new THREE.Vector3(-2, 2, 37), // 2
-        new THREE.Vector3(0, 2, 0), // 3
+        new THREE.Vector3(0, 30, 0), // 3
      //   new THREE.Vector3(2, 7, 34), // 4
     //    new THREE.Vector3(-5, 2, -38), // 5
     //    new THREE.Vector3(-18, 2, 12), // 6
