@@ -85,18 +85,26 @@ export function voidEngine({ width = 1280, height = 720 } = {}) {
         const faceColor = obj.userData?.color || (obj.material.color ? obj.material.color.getStyle() : 'white');
         const opacity = obj.material.opacity !== undefined ? obj.material.opacity : 1;
 
-        for (const idxs of boxFaces) {
-          // Project face corners to screen
-          const pts2d = idxs.map(i => projectToScreen(corners[i], camera));
-          // Average z (for painter's sort)
-          const avgZ = pts2d.reduce((sum, p) => sum + p.z, 0) / pts2d.length;
-          faces.push({
-            pts: pts2d,
-            avgZ,
-            color: faceColor,
-            opacity
-          });
-        }
+for (const idxs of boxFaces) {
+  // Get face world space corners
+  const faceCorners = idxs.map(i => corners[i]);
+  // Compute face normal
+  const v0 = faceCorners[0], v1 = faceCorners[1], v2 = faceCorners[2];
+  const normal = v1.clone().sub(v0).cross(v2.clone().sub(v0)).normalize();
+  // Camera direction
+  const camDir = camera.position.clone().sub(v0).normalize();
+  // Only draw if facing camera (back-face culling)
+  if (normal.dot(camDir) < 0) {
+    const pts2d = faceCorners.map(corner => projectToScreen(corner, camera));
+    const minZ = Math.min(...pts2d.map(p => p.z));
+    faces.push({
+      pts: pts2d,
+      zSort: minZ,
+      color: faceColor,
+      opacity
+    });
+  }
+}
       });
 
       // Sort faces back-to-front (largest z = farthest)
