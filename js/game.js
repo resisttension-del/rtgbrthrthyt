@@ -657,17 +657,7 @@ export async function startGame(username, mapName, initialDetailsEnabled, ffaEna
     window.weaponController = weaponController;
 
     if (mapName === 'CrocodilosConstruction') {
-    // wherever you used initSceneCrocodilosConstruction()
-initSceneCrocodilosConstructionPlayCanvas({
-  physicsController: window.physicsController,
-  GLB_MODEL_URL: 'https://raw.githubusercontent.com/thearthd/3d-models/main/newmaptest.glb',
-  FIXED_WIDTH: FIXED_WIDTH,
-  FIXED_HEIGHT: FIXED_HEIGHT,
-  windSound: window.windSound // if set
-}).then(ctx => {
-  console.log('PlayCanvas scene ready', ctx);
-}).catch(err => console.error(err));
-
+        await initSceneCrocodilosConstruction();
     } else if (mapName === 'SigmaCity') {
         await initSceneSigmaCity();
     } else if (mapName === 'DiddyDunes') {
@@ -824,379 +814,268 @@ function setupDetailToggle() {
 
 
 
-// Updated full function: initSceneCrocodilosConstructionPlayCanvas
-export async function initSceneCrocodilosConstructionPlayCanvas({
-  physicsController,
-  GLB_MODEL_URL = 'https://raw.githubusercontent.com/thearthd/3d-models/main/newmaptest.glb',
-  FIXED_WIDTH = 1280,
-  FIXED_HEIGHT = 720,
-  detailsEnabled = true,
-  windSound // optional HTMLAudioElement / AudioBuffer wrapper you already use
-} = {}) {
-  console.log('Initializing CrocodilosConstruction in PlayCanvas (patched + robust)...');
 
-  // ---------------------
-  // 1) Defensive patch for PlayCanvas internal splitLights getter
-  //    Must run after playcanvas script loads and before creating lights/app.start()
-  // ---------------------
-  (function patchPlayCanvasSplitLights() {
-    try {
-      if (typeof pc === 'undefined' || !pc.Layer || !pc.Layer.prototype) {
-        console.warn('patchPlayCanvasSplitLights: pc.Layer not found; skipping patch.');
-        return;
-      }
-      Object.defineProperty(pc.Layer.prototype, 'splitLights', {
-        configurable: true,
-        get: function () {
-          if (this._splitLightsDirty) {
-            this._splitLightsDirty = false;
+// PlayCanvas conversion of your render + scene init
+// Assumes your existing game objects/controllers (physicsController, weaponController, etc)
+// remain the same and just receive/return plain JS objects (position/rotation etc).
 
-            // Ensure _splitLights is an array
-            this._splitLights = Array.isArray(this._splitLights) ? this._splitLights : [];
-
-            var splitLights = this._splitLights;
-
-            // Ensure each slot exists and clear it
-            for (var i = 0; i < splitLights.length; i++) {
-              if (!Array.isArray(splitLights[i])) splitLights[i] = [];
-              splitLights[i].length = 0;
-            }
-
-            // Safely iterate lights
-            var lights = Array.isArray(this._lights) ? this._lights : [];
-            for (var li = 0; li < lights.length; li++) {
-              var light = lights[li];
-              if (!light) continue;
-              if (light.enabled) {
-                var t = light._type;
-                if (typeof t === 'undefined' || t === null) continue;
-                if (typeof splitLights[t] === 'undefined') splitLights[t] = [];
-                splitLights[t].push(light);
-              }
-            }
-
-            // Sort each bucket safely
-            for (var si = 0; si < splitLights.length; si++) {
-              if (Array.isArray(splitLights[si])) {
-                splitLights[si].sort(function (a, b) {
-                  var ak = a && a.key || 0;
-                  var bk = b && b.key || 0;
-                  return ak - bk;
-                });
-              }
-            }
-          }
-          return this._splitLights;
-        }
-      });
-
-      console.log('patchPlayCanvasSplitLights: applied');
-    } catch (err) {
-      console.error('patchPlayCanvasSplitLights: failed to apply patch', err);
-    }
-  })();
-
-  // ---------------------
-  // 2) Helpers
-  // ---------------------
-  function radToDeg(rad) { return rad * 180 / Math.PI; }
-
-  function enableShadowsRecursively(ent) {
-    if (!ent) return;
-    if (ent.model) {
-      try {
-        ent.model.castShadows = true;
-        ent.model.receiveShadows = true;
-      } catch (e) {
-        // non-fatal
-      }
-    }
-    if (Array.isArray(ent.children) && ent.children.length) {
-      for (let i = 0; i < ent.children.length; i++) {
-        enableShadowsRecursively(ent.children[i]);
-      }
-    }
+// --- Utilities: helpers that work with either three.js object or playcanvas entity ---
+function getPosition(obj) {
+  if (!obj) return { x: 0, y: 0, z: 0 };
+  // PlayCanvas entity (has getPosition)
+  if (typeof obj.getPosition === "function") {
+    const v = obj.getPosition();
+    return { x: v.x, y: v.y, z: v.z };
   }
-
-  function attachSimpleOrbit(cameraEnt, canvas) {
-    let yaw = 0, pitch = 0;
-    let pointerDown = false, lastX = 0, lastY = 0;
-
-    canvas.addEventListener('pointerdown', e => {
-      pointerDown = true;
-      lastX = e.clientX;
-      lastY = e.clientY;
-      if (canvas.setPointerCapture) try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
-    });
-
-    window.addEventListener('pointerup', () => { pointerDown = false; });
-
-    window.addEventListener('pointermove', e => {
-      if (!pointerDown) return;
-      const dx = e.clientX - lastX, dy = e.clientY - lastY;
-      lastX = e.clientX; lastY = e.clientY;
-      yaw -= dx * 0.0025;
-      pitch += dy * 0.0025;
-      pitch = Math.max(-Math.PI/2 + 0.01, Math.min(Math.PI/2 - 0.01, pitch));
-      cameraEnt.setEulerAngles(radToDeg(pitch), radToDeg(yaw), 0);
-    });
-
-    // wheel to zoom (simple)
-    canvas.addEventListener('wheel', e => {
-      e.preventDefault();
-      const dz = Math.sign(e.deltaY) * 0.5;
-      try {
-        cameraEnt.translateLocal(0, 0, dz);
-      } catch (err) {
-        const p = cameraEnt.getPosition();
-        cameraEnt.setPosition(p.x, p.y, p.z + dz);
-      }
-    }, { passive: false });
-  }
-
-  // Robust GLB loader for PlayCanvas: tries app.assets.loadFromUrl then fetch+blob fallback
-  function loadGLBPlayCanvas(app, url, assetName = 'mapContainer') {
-    return new Promise(async (resolve, reject) => {
-      function finishWithAsset(asset) {
-        try {
-          const containerResource = asset.resource;
-          if (!containerResource) {
-            console.error('PlayCanvas: container resource missing after load', asset);
-            return reject(new Error('containerResource missing'));
-          }
-          const instance = containerResource.instantiateRenderEntity();
-          instance.name = assetName + '-instance';
-          app.root.addChild(instance);
-          if (typeof enableShadowsRecursively === 'function') enableShadowsRecursively(instance);
-          resolve(instance);
-        } catch (err) {
-          console.error('PlayCanvas: instantiateRenderEntity failed', err);
-          reject(err);
-        }
-      }
-
-      // Try loadFromUrl if available
-      try {
-        if (typeof app.assets.loadFromUrl === 'function') {
-          try {
-            app.assets.loadFromUrl(url, 'container', function (err, asset) {
-              if (err) {
-                console.warn('PlayCanvas: loadFromUrl error, falling back to fetch', err);
-                doFetchFallback();
-              } else {
-                finishWithAsset(asset);
-              }
-            });
-            return;
-          } catch (err) {
-            console.warn('PlayCanvas: loadFromUrl threw, using fallback', err);
-          }
-        }
-      } catch (err) {
-        console.warn('PlayCanvas: loadFromUrl check failed', err);
-      }
-
-      // fetch + blob fallback
-      async function doFetchFallback() {
-        try {
-          const resp = await fetch(url, { method: 'GET', mode: 'cors' });
-          if (!resp.ok) {
-            console.error('PlayCanvas fetch failed:', resp.status, resp.statusText);
-            return reject(new Error('Failed to fetch GLB: ' + resp.status));
-          }
-          const arrayBuffer = await resp.arrayBuffer();
-          const blob = new Blob([arrayBuffer], { type: 'model/gltf-binary' });
-          const blobUrl = URL.createObjectURL(blob);
-
-          const asset = new pc.Asset(assetName, 'container', { url: blobUrl });
-
-          const onLoaded = () => {
-            try { URL.revokeObjectURL(blobUrl); } catch (e) {}
-            finishWithAsset(asset);
-          };
-          const onError = (err) => {
-            try { URL.revokeObjectURL(blobUrl); } catch (e) {}
-            reject(err);
-          };
-
-          if (asset.once) {
-            asset.once('load', onLoaded);
-            asset.once('error', onError);
-          } else {
-            asset.on && asset.on('load', onLoaded);
-            asset.on && asset.on('error', onError);
-          }
-
-          app.assets.add(asset);
-          try {
-            app.assets.load(asset);
-          } catch (err) {
-            console.warn('PlayCanvas: app.assets.load(asset) threw; trying loadFromUrl with blob', err);
-            if (typeof app.assets.loadFromUrl === 'function') {
-              app.assets.loadFromUrl(blobUrl, 'container', function (e, a) {
-                if (e) return onError(e);
-                finishWithAsset(a || asset);
-              });
-            } else {
-              // last resort: wait briefly for engine to populate resource
-              setTimeout(() => {
-                if (asset.resource) return onLoaded();
-                onError(new Error('PlayCanvas: asset.resource never populated (fallback)'));
-              }, 2500);
-            }
-          }
-        } catch (err) {
-          console.error('PlayCanvas: fetch+blob fallback failed', err);
-          reject(err);
-        }
-      }
-
-      doFetchFallback();
-    });
-  }
-
-  // ---------------------
-  // 3) Prepare container & create PlayCanvas app
-  // ---------------------
-  const container = document.getElementById('game-container');
-  if (!container) throw new Error('#game-container not found');
-
-  // remove previous canvases
-  Array.from(container.querySelectorAll('canvas')).forEach(c => c.remove());
-
-  const canvas = document.createElement('canvas');
-  canvas.id = 'playcanvas-canvas';
-  canvas.style.width = '100%';
-  canvas.style.height = '100%';
-  container.appendChild(canvas);
-
-  // create PlayCanvas application
-  const app = new pc.Application(canvas, {
-    mouse: new pc.Mouse(canvas),
-    touch: new pc.TouchDevice(canvas)
-  });
-  app.setCanvasFillMode(pc.FILLMODE_FILL_WINDOW);
-  app.setCanvasResolution(pc.RESOLUTION_AUTO);
-  app.start();
-
-  // expose for debug
-  window.pcApp = app;
-  window.playcanvasApp = app;
-
-  // ---------------------
-  // 4) Camera + controls
-  // ---------------------
-  const cameraEnt = new pc.Entity('camera');
-  cameraEnt.addComponent('camera', { clearColor: new pc.Color(0,0,0), fov: 60 });
-  cameraEnt.setPosition(0, 1.6, 5);
-  app.root.addChild(cameraEnt);
-  window.pcCameraEntity = cameraEnt;
-  attachSimpleOrbit(cameraEnt, canvas);
-
-  // ---------------------
-  // 5) Lighting
-  // ---------------------
-  const sun = new pc.Entity('directionalLight');
-  sun.addComponent('light', {
-    type: 'directional',
-    color: new pc.Color(1,1,1),
-    intensity: 1,
-    castShadows: true,
-    shadowType: pc.SHADOW_PCF3,
-    shadowResolution: 2048,
-    shadowDistance: 200
-  });
-  sun.setEulerAngles(50, -30, 0);
-  app.root.addChild(sun);
-
-  const ambient = new pc.Entity('ambientLight');
-  ambient.addComponent('light', {
-    type: 'ambient',
-    color: new pc.Color(0.2, 0.25, 0.28),
-    intensity: 0.6
-  });
-  app.root.addChild(ambient);
-
-  // ---------------------
-  // 6) Build BVH collider using your Three.js loader (offscreen scene)
-  // ---------------------
-  const threeSceneForBVH = new THREE.Scene();
-  let spawnPoints = [];
-  try {
-    spawnPoints = await createCrocodilosConstruction(threeSceneForBVH, physicsController);
-    console.log('Three.js BVH collider creation finished.');
-  } catch (err) {
-    console.warn('BVH creation (Three.js) failed or returned with errors:', err);
-  }
-
-  // ---------------------
-  // 7) Load visual GLB into PlayCanvas
-  // ---------------------
-  let playcanvasMapInstance = null;
-  try {
-    playcanvasMapInstance = await loadGLBPlayCanvas(app, GLB_MODEL_URL);
-    console.log('PlayCanvas: visual map instantiated.');
-  } catch (err) {
-    console.warn('PlayCanvas visual GLB load failed:', err);
-  }
-
-  // ---------------------
-  // 8) Audio
-  // ---------------------
-  if (windSound) {
-    try {
-      await windSound.play();
-      window.windSound = windSound;
-    } catch (err) {
-      console.warn('Failed to play windSound:', err);
-    }
+  // Three.js style
+  if (obj.position) return { x: obj.position.x, y: obj.position.y, z: obj.position.z };
+  // plain object fallback
+  return { x: obj.x || 0, y: obj.y || 0, z: obj.z || 0 };
+}
+function setPosition(obj, p) {
+  if (!obj) return;
+  if (typeof obj.setPosition === "function") return obj.setPosition(p.x, p.y, p.z);
+  if (obj.position) {
+    obj.position.x = p.x; obj.position.y = p.y; obj.position.z = p.z;
   } else {
-    console.warn('No windSound provided.');
+    obj.x = p.x; obj.y = p.y; obj.z = p.z;
   }
-
-  // ---------------------
-  // 9) Expose spawn points and set initial player position via physicsController
-  // ---------------------
-  window.spawnPoints = spawnPoints || [];
-  const initialSpawnPoint = (typeof findFurthestSpawn === 'function')
-    ? findFurthestSpawn()
-    : (spawnPoints && spawnPoints[0]) || new THREE.Vector3(0,2,0);
-
-  if (initialSpawnPoint && physicsController && typeof physicsController.setPlayerPosition === 'function') {
-    const p = initialSpawnPoint;
-    if (typeof p.x !== 'undefined') {
-      physicsController.setPlayerPosition({ x: p.x, y: p.y, z: p.z });
-    } else {
-      physicsController.setPlayerPosition(p);
-    }
+}
+function getEuler(obj) {
+  // returns { x, y, z } in radians
+  if (!obj) return { x: 0, y: 0, z: 0 };
+  if (typeof obj.getLocalEulerAngles === "function") {
+    const e = obj.getLocalEulerAngles();
+    // PlayCanvas gives degrees, convert to radians
+    return { x: e.x * Math.PI / 180, y: e.y * Math.PI / 180, z: e.z * Math.PI / 180 };
   }
-
-  // ---------------------
-  // 10) Resize handling & expose context
-  // ---------------------
-  function onResize() {
-    const w = container.clientWidth;
-    const h = container.clientHeight;
-    const hud = document.getElementById('hud');
-    if (hud) { hud.style.width = `${w}px`; hud.style.height = `${h}px`; }
+  if (obj.rotation) {
+    // Three.js Euler or Quaternion case
+    if (obj.rotation.x != null) return { x: obj.rotation.x, y: obj.rotation.y, z: obj.rotation.z };
+    // quaternion fallback (not handled here)
   }
-  window.addEventListener('resize', onResize, false);
-  onResize();
-
-  window.playcanvasApp = app;
-  window.playcanvasMapInstance = playcanvasMapInstance;
-  window.threeSceneForBVH = threeSceneForBVH;
-
-  return {
-    app,
-    cameraEntity: cameraEnt,
-    playcanvasMapInstance,
-    threeSceneForBVH,
-    spawnPoints
-  };
+  return { x: 0, y: 0, z: 0 };
+}
+function setEuler(obj, e) {
+  if (!obj) return;
+  if (typeof obj.setLocalEulerAngles === "function") {
+    // PlayCanvas expects degrees
+    obj.setLocalEulerAngles(e.x * 180 / Math.PI, e.y * 180 / Math.PI, e.z * 180 / Math.PI);
+    return;
+  }
+  if (obj.rotation) {
+    obj.rotation.x = e.x; obj.rotation.y = e.y; obj.rotation.z = e.z;
+  }
 }
 
+// --- PlayCanvas app bootstrap ---
+let pcApp = null;
+export async function initSceneCrocodilosConstruction() {
+  sceneNum = 1;
+  console.log("Initializing CrocodilosConstruction scene (PlayCanvas)...");
 
+  // container and canvas
+  const container = document.getElementById("game-container");
+  if (!container) throw new Error("No #game-container element found");
+
+  // Create canvas or reuse existing canvas
+  let canvas = container.querySelector("canvas");
+  if (!canvas) {
+    canvas = document.createElement("canvas");
+    // make it fill the container by CSS; we'll use fixed internal resolution below
+    canvas.style.width = "100%";
+    canvas.style.height = "100%";
+    container.appendChild(canvas);
+  }
+
+  // If an existing PlayCanvas app exists, destroy it first
+  if (pcApp) {
+    try { pcApp.destroy(); } catch (e) { console.warn("Error destroying previous pc app:", e); }
+    pcApp = null;
+  }
+
+  // Create PlayCanvas application
+  pcApp = new pc.Application(canvas, {
+    mouse: new pc.Mouse(canvas),
+    touch: new pc.TouchDevice(canvas),
+    keyboard: new pc.Keyboard(window)
+  });
+
+  // Set fill/resolution behaviour similar to how you set the renderer in THREE
+  // Internal resolution: FIXED_WIDTH / FIXED_HEIGHT like you had before
+  if (typeof FIXED_WIDTH !== "undefined" && typeof FIXED_HEIGHT !== "undefined") {
+    pcApp.setCanvasFillMode(pc.FILLMODE_NONE);
+    pcApp.setCanvasResolution(pc.RESOLUTION_FIXED);
+    pcApp.graphicsDevice.maxPixelRatio = 1;
+  } else {
+    pcApp.setCanvasFillMode(pc.FILLMODE_FILL_WINDOW);
+    pcApp.setCanvasResolution(pc.RESOLUTION_AUTO);
+  }
+
+  pcApp.start();
+  window.playcanvasApp = pcApp;
+
+  // --- Camera ---
+  const cameraEnt = new pc.Entity("game-camera");
+  cameraEnt.addComponent("camera", {
+    clearColor: new pc.Color(0, 0, 0),
+    fov: 60,
+    nearClip: 0.1,
+    farClip: 2000
+  });
+  // position camera at origin (the rest of your game manages the camera transform)
+  cameraEnt.setPosition(0, 1.6, 0);
+  pcApp.root.addChild(cameraEnt);
+  window.camera = cameraEnt; // keep your code compatibility (window.camera used heavily)
+
+  // Ensure camera rotation order semantics similar to "YXZ" you had in THREE:
+  // PlayCanvas uses localEulerAngles; we'll keep your rotate logic and read/write Euler values via helpers.
+
+  // --- Hemisphere / directional light ---
+  const hemi = new pc.Entity("hemi-light");
+  hemi.addComponent("light", {
+    type: "directional",
+    color: new pc.Color(1, 1, 1),
+    intensity: 0.05,
+    castShadows: false
+  });
+  hemi.setEulerAngles(50, 30, 0); // angled directional light
+  pcApp.root.addChild(hemi);
+  window.hemi = hemi;
+
+  // --- Sky sphere (simple dark sky) ---
+  // We'll create a large sphere using a model with generated mesh. If you have a proper sky asset,
+  // replace this with an asset-based model.
+  const skyEnt = new pc.Entity("sky-sphere");
+  // Try to create a primitive sphere mesh and a simple material (if API provides helper)
+  try {
+    const mesh = pc.createSphere(pcApp.graphicsDevice, { segments: 32, radius: 200 });
+    const node = new pc.GraphNode();
+    const model = new pc.Model();
+    model.graph = node;
+    model.meshInstances = [ new pc.MeshInstance(node, mesh, new pc.StandardMaterial()) ];
+    // NOTE: older/newer engines vary — fallback to a minimal visual representation below if this fails.
+    skyEnt.model = model; // some engines require adding via model component; we handle fallback
+    // Use a render component fallback if model creation fails
+    skyEnt.addComponent("render", {
+      type: "box" // fallback primitive so the entity exists in the scene (non-ideal)
+    });
+  } catch (e) {
+    // fallback: create an empty entity to serve as "sky" placeholder
+    skyEnt.addComponent("script"); // placeholder so it can still be rotated
+  }
+  skyEnt.setLocalScale(200, 200, 200);
+  skyEnt.setLocalPosition(0, 0, 0);
+  pcApp.root.addChild(skyEnt);
+  window.skyMesh = skyEnt; // keep compatibility
+
+  // --- Star field and world fog placeholders ---
+  const starFieldEnt = new pc.Entity("stars");
+  starFieldEnt.addComponent("script"); // placeholder; rotate manually in update
+  pcApp.root.addChild(starFieldEnt);
+  window.starField = starFieldEnt;
+
+  const worldFogEnt = new pc.Entity("worldFog");
+  worldFogEnt.addComponent("script");
+  pcApp.root.addChild(worldFogEnt);
+  window.worldFog = worldFogEnt;
+
+  // 1) expose the PlayCanvas root as "scene" to reduce breaks in code
+  window.scene = pcApp.root;
+
+  // 2) Re-create/update your env meshes, spawn points and physics init using the new scene
+  // Your original createCrocodilosConstruction expects a THREE.Scene and physicsController.
+  // Try calling it with the PlayCanvas root; if it expects a THREE.Scene you'll need to update
+  // that function to produce PlayCanvas entities instead. We'll attempt to call it and catch errors.
+  try {
+    spawnPoints = await createCrocodilosConstruction(pcApp.root, physicsController);
+  } catch (err) {
+    console.warn("createCrocodilosConstruction failed with PlayCanvas root. If it requires Three.js, you'll need to port that function too.", err);
+    // Fallback: attempt to call the old function with a dummy object to at least get a spawn point
+    try {
+      spawnPoints = await createCrocodilosConstruction({}, physicsController);
+    } catch (e2) {
+      spawnPoints = [{ x: 0, y: 2, z: 0 }];
+    }
+  }
+  window.spawnPoints = spawnPoints;
+
+  const initialSpawnPoint = (typeof findFurthestSpawn === "function") ? findFurthestSpawn() : spawnPoints[0];
+  if (physicsController && typeof physicsController.setPlayerPosition === "function") {
+    physicsController.setPlayerPosition(initialSpawnPoint);
+  } else {
+    console.warn("physicsController.setPlayerPosition not available; can't position player automatically.");
+  }
+
+  // --- Audio: if you have existing audio elements reuse them; PlayCanvas also has an audio component API ---
+  if (typeof windSound !== "undefined" && windSound && typeof windSound.play === "function") {
+    windSound.play().catch(err => console.warn("Failed to play wind sound:", err));
+    window.windSound = windSound;
+  } else {
+    console.warn("windSound is not defined. Audio might not play for CrocodilosConstruction.");
+  }
+
+  // --- Resize handler ---
+  function onWindowResize() {
+    const displayWidth = container.clientWidth;
+    const displayHeight = container.clientHeight;
+
+    // PlayCanvas canvas already stretches, but we still keep internal fixed resolution if set
+    if (typeof FIXED_WIDTH !== "undefined" && typeof FIXED_HEIGHT !== "undefined") {
+      pcApp.resizeCanvas(FIXED_WIDTH, FIXED_HEIGHT);
+      const c = pcApp.graphicsDevice.canvas;
+      c.style.width = `${displayWidth}px`;
+      c.style.height = `${displayHeight}px`;
+    } else {
+      pcApp.resizeCanvas(displayWidth, displayHeight);
+    }
+
+    // Update camera aspect if necessary (PlayCanvas camera updates automatically on resize,
+    // but we can manually update projection parameters)
+    const cam = window.camera && window.camera.camera;
+    if (cam) {
+      cam.horizontalFov = false;
+      // No direct aspect setter - PlayCanvas handles it from the canvas size.
+    }
+
+    // Re-attach weapons as in your original code
+    if (window.weaponController && window.localPlayer && typeof getWeaponModel === 'function' && typeof attachWeaponToPlayer === 'function') {
+      const key = window.localPlayer.weapon.replace(/-/g, "").toLowerCase();
+      const proto = getWeaponModel(key);
+      if (proto) attachWeaponToPlayer(window.localPlayer.id, key);
+    }
+
+    if (window.remotePlayers) {
+      Object.values(window.remotePlayers).forEach(({ currentWeapon, weaponRoot }) => {
+        if (currentWeapon && weaponRoot && typeof attachWeaponToPlayer === 'function') {
+          attachWeaponToPlayer(weaponRoot.userData?.playerId || weaponRoot.name, currentWeapon);
+        }
+      });
+    }
+
+    const hud = document.getElementById("hud");
+    if (hud) {
+      hud.style.width = `${displayWidth}px`;
+      hud.style.height = `${displayHeight}px`;
+    }
+  }
+
+  window.addEventListener("resize", onWindowResize, false);
+  onWindowResize();
+
+  // --- Hook your game loop into PlayCanvas update event ---
+  // We'll create a single per-frame handler that mirrors your previous animate loop.
+  // You can still export animate() for compatibility; internally PlayCanvas runs this update.
+  if (pcApp && !pcApp._gameUpdateAttached) {
+    pcApp.on("update", function(dt) {
+      // dt is seconds since last update
+      // convert to expected values in your animate() code:
+      const timestamp = performance.now();
+      playcanvasFrameUpdate(dt, timestamp);
+    });
+    pcApp._gameUpdateAttached = true;
+  }
+}
 
 export async function initSceneSigmaCity() {
   sceneNum = 2;
@@ -1901,10 +1780,10 @@ minDist = dist;
 // If no remote players were found, all minDist will remain Infinity.
 // In this case, all spawn points are equally "furthest", so we'll assign a very large value.
 // If there are remote players, minDist will be a finite number.
-//spawnDistances.push({
-//spawnPoint: sp,
-//distance: minDist
-//});
+spawnDistances.push({
+spawnPoint: sp,
+distance: minDist
+});
 }
 
 // Handle case where no remote players exist (all distances are Infinity)
@@ -2376,40 +2255,28 @@ function round2(n) {
 
 
 
-export function animate(timestamp) {
-  // Schedule the next frame first
-  requestAnimationFrame(animate);
-
+export function playcanvasFrameUpdate(delta, timestamp) {
+  // delta in seconds
   // --- Disconnection/Pause Logic ---
-  if (localPlayerId === null || window.isGamePaused) {
-    return;
-  }
-
-  // Frame throttling ~60fps
-  const FRAME_INTERVAL = 1000 / 60;
-  if (!animate.lastTime) animate.lastTime = timestamp;
-  const deltaMs = timestamp - animate.lastTime;
-  if (deltaMs < FRAME_INTERVAL) return;
-  animate.lastTime = timestamp - (deltaMs % FRAME_INTERVAL);
-  const delta = deltaMs / 1000;
-
-  // Pre-animation checks
-  if (!physicsController || !weaponController) {
-    console.warn("Skipping animate(): controllers not yet initialized");
-    postFrameCleanup();
-    return;
-  }
-  if (!window.mapReady) {
-    postFrameCleanup();
-    return;
-  }
-  if (!window.localPlayer) {
-    console.warn("Skipping animate(): window.localPlayer is not initialized.");
-    postFrameCleanup();
-    return;
-  }
+  if (localPlayerId == null || window.isGamePaused) return;
 
   try {
+    // Pre-animation checks
+    if (!physicsController || !weaponController) {
+      console.warn("Skipping frame: controllers not yet initialized");
+      postFrameCleanup();
+      return;
+    }
+    if (!window.mapReady) {
+      postFrameCleanup();
+      return;
+    }
+    if (!window.localPlayer) {
+      console.warn("Skipping frame: window.localPlayer is not initialized.");
+      postFrameCleanup();
+      return;
+    }
+
     // Death screen handling
     if (window.localPlayer.isDead) {
       const cross = document.getElementById("crosshair");
@@ -2429,13 +2296,7 @@ export function animate(timestamp) {
       }
       if (respawnOverlay) respawnOverlay.style.display = "flex";
 
-      // Render final frame
-      if (composer && typeof composer.render === 'function') {
-        composer.render();
-      } else if (renderer && typeof renderer.render === 'function') {
-        renderer.render(scene, window.camera);
-      }
-
+      // PlayCanvas auto-renders; nothing explicit to call here for the final frame.
       postFrameCleanup();
       return;
     } else {
@@ -2448,39 +2309,61 @@ export function animate(timestamp) {
     // Normal game updates
     checkForDamagePulse();
 
-    if (weaponController.stats.speedModifier != null) {
+    if (weaponController.stats && weaponController.stats.speedModifier != null) {
       physicsController.setSpeedModifier(weaponController.stats.speedModifier);
     }
 
-    // Remote players falling
+    // Remote players falling (works with three or PlayCanvas entities)
     const GRAVITY = 9.8;
-    Object.values(window.remotePlayers).forEach(rp => {
+    Object.values(window.remotePlayers || {}).forEach(rp => {
       const g = rp.group;
-      if (g?.userData.isFalling) {
+      if (g?.userData?.isFalling) {
         g.userData.velocityY = (g.userData.velocityY || 0) + GRAVITY * delta;
-        g.position.y -= g.userData.velocityY * delta;
-        if (g.position.y < -20) {
+        // read/set position in engine-agnostic way
+        const pos = getPosition(g);
+        pos.y -= g.userData.velocityY * delta;
+        setPosition(g, pos);
+
+        if (pos.y < -20) {
           g.userData.isFalling = false;
           g.userData.velocityY = 0;
-          g.visible = false;
+          // hide entity/object whichever API
+          if (typeof g.enabled !== "undefined") g.enabled = false; // PlayCanvas
+          if (g.visible !== undefined) g.visible = false; // THREE
+          if (g.setLocalPosition) g.setLocalPosition(pos.x, pos.y, pos.z);
         }
       }
     });
 
-    if (skyMesh) skyMesh.rotation.x += 0.0001 * deltaMs;
-    if (starField) starField.rotation.x += 0.00008 * deltaMs;
-
-    if (window.worldFog) {
-      window.worldFog.rotation.y += delta * 0.005;
-      const nowMs = performance.now();
-      window.worldFog.position.x += Math.sin(nowMs * 0.0001) * delta * 2;
-      window.worldFog.position.z += Math.cos(nowMs * 0.0001) * delta * 2;
+    // animate sky / stars / fog (rotation)
+    if (window.skyMesh) {
+      const e = getEuler(window.skyMesh);
+      e.x += 0.0001 * (delta * 1000);
+      setEuler(window.skyMesh, e);
+    }
+    if (window.starField) {
+      const e = getEuler(window.starField);
+      e.x += 0.00008 * (delta * 1000);
+      setEuler(window.starField, e);
     }
 
-    // Physics & Input Update
+    if (window.worldFog) {
+      // rotate about Y
+      const we = getEuler(window.worldFog);
+      we.y += delta * 0.005;
+      setEuler(window.worldFog, we);
+
+      const nowMs = performance.now();
+      const pos = getPosition(window.worldFog);
+      pos.x += Math.sin(nowMs * 0.0001) * delta * 2;
+      pos.z += Math.cos(nowMs * 0.0001) * delta * 2;
+      setPosition(window.worldFog, pos);
+    }
+
+    // Physics & Input Update (unchanged)
     const physState = physicsController.update(delta, inputState, window.collidables);
 
-    // Weapon Update
+    // Weapon Update (unchanged)
     weaponController.update(
       inputState,
       delta, {
@@ -2509,8 +2392,8 @@ export function animate(timestamp) {
         y: physState.y,
         z: physState.z,
         rotY: round2(physState.rotY),
-        rotX: round2(window.camera.rotation.x),
-        rotZ: round2(window.camera.rotation.z),
+        rotX: round2(getEuler(window.camera).x),
+        rotZ: round2(getEuler(window.camera).z),
         weapon: window.localPlayer.weapon,
         knifeSwing: window.localPlayer.knifeSwing || false,
         knifeHeavy: window.localPlayer.knifeHeavy || false
@@ -2518,11 +2401,12 @@ export function animate(timestamp) {
       window.localPlayer.knifeSwing = false;
       window.localPlayer.knifeHeavy = false;
     } else {
-      console.warn("Skipping sendPlayerUpdate: dbRefs, dbRefs.playersRef or localPlayerId is null.");
+      // only warn occasionally to avoid spamming console
+      // console.warn("Skipping sendPlayerUpdate: dbRefs, dbRefs.playersRef or localPlayerId is null.");
     }
 
     // Remote avatars update
-    for (const id in window.remotePlayers) {
+    for (const id in window.remotePlayers || {}) {
       const rp = window.remotePlayers[id];
       if (rp.data) updateRemotePlayer(rp.data);
     }
@@ -2540,8 +2424,6 @@ export function animate(timestamp) {
         } catch (error) {
           console.error("Failed to update local player weapon in Firebase:", error);
         }
-      } else {
-        console.warn("Cannot update local player weapon in Firebase: dbRefs or localPlayerId is null.");
       }
 
       weaponController.equipWeapon(newW);
@@ -2552,14 +2434,17 @@ export function animate(timestamp) {
       if (newW === "knife") activeRecoils.length = 0;
     }
 
-    // Mouse look + recoil
+    // Mouse look + recoil (adapts to PlayCanvas camera entity)
     const baseSens = parseFloat(localStorage.getItem("sensitivity") || "5.00");
     const aimMul = inputState.aim ? (window.localPlayer.weapon === "marshal" ? 0.15 : 0.5) : 1;
     const finalSens = baseSens * aimMul;
 
-    window.camera.rotation.y -= inputState.mouseDX * finalSens * 0.002;
-    let newPitch = window.camera.rotation.x - inputState.mouseDY * finalSens * 0.002;
-    window.camera.rotation.x = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, newPitch));
+    // camera rotation uses Euler helper
+    const camEuler = getEuler(window.camera);
+    camEuler.y -= inputState.mouseDX * finalSens * 0.002;
+    let newPitch = camEuler.x - inputState.mouseDY * finalSens * 0.002;
+    camEuler.x = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, newPitch));
+    setEuler(window.camera, camEuler);
 
     // Recoil
     {
@@ -2574,34 +2459,57 @@ export function animate(timestamp) {
         }
         totalOffset += r.angle * (1 - t);
       }
-      window.camera.rotation.x += totalOffset;
+      const ce = getEuler(window.camera);
+      ce.x += totalOffset;
+      setEuler(window.camera, ce);
     }
 
     // Rebuild collidables
     if (window.mapReady) {
-      window.collidables = [...window.envMeshes];
-      for (const otherId in window.remotePlayers) {
+      window.collidables = [...(window.envMeshes || [])];
+      for (const otherId in window.remotePlayers || {}) {
         if (otherId === window.localPlayer.id) continue;
         const other = window.remotePlayers[otherId];
-        if (other.group?.visible) {
-          other.group.traverse(child => {
+        const group = other.group;
+        // traverse compatibility: PlayCanvas entities have traverseHierarchy? we'll do a simple check
+        if (!group) continue;
+        // If PlayCanvas entity: it has children array
+        if (group.children && group.enabled !== false) {
+          const stack = [group];
+          while (stack.length) {
+            const c = stack.pop();
+            // detect mesh-like / player body part flags
+            if (c.meshInstances || c.render || (c.userData && c.userData.isPlayerBodyPart)) {
+              if (c.userData?.isPlayerBodyPart) window.collidables.push(c);
+            }
+            if (c.children) stack.push(...c.children);
+          }
+        } else if (group.traverse) {
+          // Three.js traverse
+          group.traverse(child => {
             if (child.isMesh && child.userData?.isPlayerBodyPart) window.collidables.push(child);
           });
         }
       }
     }
 
-    // Render
-    if (composer && typeof composer.render === 'function') {
-      composer.render();
-    } else if (renderer && typeof renderer.render === 'function') {
-      renderer.render(scene, window.camera);
-    }
+    // No explicit render call needed: PlayCanvas renders automatically each frame.
+
   } catch (err) {
-    console.error("Error in animate:", err);
+    console.error("Error in PlayCanvas frame update:", err);
   } finally {
     postFrameCleanup();
   }
+}
+
+// Backwards-compatible animate export: if other code still calls animate(timestamp),
+// we'll forward to PlayCanvas update once and no-op otherwise (PlayCanvas drives updates).
+export function animate(timestamp) {
+  // keep API compatibility: if a PlayCanvas app exists, do nothing because the app runs update().
+  if (pcApp) return;
+  // otherwise fall back to your original requestAnimationFrame-based loop (kept minimal)
+  requestAnimationFrame(animate);
+  // You can optionally call the original animate logic here if you want to support non-PlayCanvas rendering.
 }
 
 
@@ -3190,12 +3098,6 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
-
-
-
-
-
-
 
 
 
