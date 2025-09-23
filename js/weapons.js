@@ -435,357 +435,182 @@ this._recoil = {
 
 // PlayCanvas version of equipWeapon — drop into your PC WeaponController class
 equipWeapon(weaponKey) {
-    // Validate
-    if (!WeaponController.WEAPONS || !WeaponController.WEAPONS[weaponKey]) {
-        console.warn(`[WeaponController] Unknown weapon: ${weaponKey}`);
-        return;
-    }
+  if (!WeaponController.WEAPONS || !WeaponController.WEAPONS[weaponKey]) {
+    console.warn(`[WeaponController] Unknown weapon: ${weaponKey}`);
+    return;
+  }
 
-    const app = this.app || window.playcanvasApp;
-    if (!app) console.warn("[WeaponController] playcanvas app not found on this.app or window.playcanvasApp");
+  // Save current ammo
+  if (this.currentKey) this.ammoStore = this.ammoStore || {}, this.ammoStore[this.currentKey] = this.ammoInMagazine;
 
-    // ---- Save current ammo ----
-    if (this.currentKey) {
-        this.ammoStore = this.ammoStore || {};
-        this.ammoStore[this.currentKey] = this.ammoInMagazine;
-    }
-
-    // ---- Helpers: disposal for PlayCanvas resources ----
-    // Try to safely destroy a PlayCanvas material and its textures
-    const disposeMaterial = (mat) => {
-        if (!mat) return;
-        try {
-            // If model uses meshInstance.material instances, we'll destroy those separately.
-            if (typeof mat.destroy === "function") mat.destroy();
-        } catch (e) { /* ignore */ }
-    };
-
-    // Recursively destroy an entity and attempt to release model/meshInstance materials & textures
-    const disposeEntityRecursive = (ent) => {
-        if (!ent) return;
-        // walk children first
-        const children = ent.children ? ent.children.slice() : [];
-        for (let ch of children) {
-            disposeEntityRecursive(ch);
-        }
-
-        // handle model component (destroy meshInstance materials)
-        try {
-            if (ent.model && ent.model.model && ent.model.model.meshInstances) {
-                const mis = ent.model.model.meshInstances;
-                for (let mi of mis) {
-                    try {
-                        if (mi.material) {
-                            disposeMaterial(mi.material);
-                            // set to null to help GC
-                            mi.material = null;
-                        }
-                    } catch (e) {}
-                }
-            }
-        } catch (e) {}
-
-        // Finally remove/destroy this entity
-        try {
-            if (ent.parent) ent.parent.removeChild(ent);
-        } catch (e) {}
-        try {
-            // entity.destroy() cleans up components & unlinks resources
-            if (typeof ent.destroy === "function") ent.destroy();
-        } catch (e) {}
-    };
-
-    // Helper to check cached prototype equality
-    if (typeof window._pcWeaponInstanceCache === "undefined") window._pcWeaponInstanceCache = {};
-    const isCachedInstance = (obj) => {
-        if (!obj) return false;
-        for (const k in window._pcWeaponInstanceCache) {
-            if (window._pcWeaponInstanceCache[k] === obj) return true;
-        }
-        return false;
-    };
-
-    // ---- Cleanup tracer objects (PlayCanvas tracer cleanup: window.activeTracers) ----
-    try {
-        if (window.activeTracers && Array.isArray(window.activeTracers)) {
-            for (let i = window.activeTracers.length - 1; i >= 0; i--) {
-                try {
-                    const tr = window.activeTracers[i];
-                    if (tr && typeof tr.dispose === "function") tr.dispose();
-                } catch (e) {}
-                window.activeTracers.splice(i, 1);
-            }
-        }
-    } catch (e) { /* ignore */ }
-
-    // ---- Remove & dispose previous viewModel (PlayCanvas entities) ----
+  // Clean up previous viewModel (PlayCanvas)
+  try {
     if (this.viewModel) {
-        try {
-            if (this.viewModel.parent && this.viewModel.parent === this.camera) {
-                this.camera.removeChild(this.viewModel);
-            } else if (this.viewModel.parent) {
-                // detach from any parent gracefully
-                this.viewModel.parent.removeChild(this.viewModel);
-            }
-        } catch (e) {}
-
-        // If weaponModel is a cached instance, we should not destroy shared resources — just detach and hide
-        if (this.weaponModel && isCachedInstance(this.weaponModel)) {
-            try { this.weaponModel.enabled = false; } catch (e) {}
-            try { if (this.weaponModel.parent) this.weaponModel.parent.removeChild(this.weaponModel); } catch (e) {}
-            // clear only controller references (cached model stays in window._pcWeaponInstanceCache)
-            this.weaponModel = null;
-            this.parts = {};
-            try { this.viewModel.destroy(); } catch (e) {} // destroy container only
-            this.viewModel = null;
-        } else {
-            // Fully dispose the viewModel and its children
-            try { disposeEntityRecursive(this.viewModel); } catch (e) {}
-            this.weaponModel = null;
-            this.parts = {};
-            this.viewModel = null;
-        }
-    }
-
-    // ---- Reset core state and create fresh viewModel container (PlayCanvas) ----
-    this.currentKey = weaponKey;
-    this.stats = WeaponController.WEAPONS[weaponKey];
-    this.isReloadingFlag = false;
-    this.lastShotTime = 0;
-    this.burstCount = 0;
-    this.speedModifier = this.stats.speedModifier;
-    this.ammoStore = this.ammoStore || {};
-    this.ammoInMagazine = (this.ammoStore[weaponKey] != null) ? this.ammoStore[weaponKey] : this.stats.magazineSize;
-
-    // fresh state object (mirrors your THREE state fields but using pc.Vec3)
-    this.state = {
-        pulling: false,
-        pullStart: 0,
-        pullFrom: new pc.Vec3(),
-        pullTo: new pc.Vec3(),
-        recoiling: false,
-        recoilStart: 0,
-        reloading: false,
-        reloadStart: 0,
-        knifeSwing: false,
-        knifeSwingStart: 0,
-        knifeHeavy: false,
-        tracerObjects: []
-    };
-
-    // Create new PlayCanvas container entity to hold the viewmodel
-    this.viewModel = new pc.Entity("ViewModelRoot");
-    // ensure it has a transform and is ready to be parented to the camera
-    this.viewModel.setLocalPosition(0, 0, 0);
-    this.viewModel.setLocalEulerAngles(0, 0, 0);
-    this.viewModel.setLocalScale(1, 1, 1);
-
-    // helper to attach the player arm or any arm entity you expect
-    if (typeof this.createPlayerArm === "function") {
-        try { this.createPlayerArm(); } catch (e) { /* ignore */ }
-    }
-
-    // ---- Build normalized key and pick source (cached clone or prototype or fallback) ----
-    const key = weaponKey.replace(/-/g, "").toLowerCase();
-    const proto = window._pcPrototypeModels && window._pcPrototypeModels[key]; // assume you may have set prototypes here
-
-    // ensure parts object is reset
-    this.parts = {};
-
-    // Inline attachModel that adapts PlayCanvas entity into our viewModel
-    const attachModel = (modelEntity) => {
-        if (!modelEntity) return;
-
-        // detach model from any parent
-        try { if (modelEntity.parent) modelEntity.parent.removeChild(modelEntity); } catch (e) {}
-
-        // make visible/enabled and add to viewModel
-        try {
-            modelEntity.enabled = true;
-            this.viewModel.addChild(modelEntity);
-            this.weaponModel = modelEntity;
-        } catch (e) {
-            console.warn("[WeaponController] attachModel addChild failed:", e);
-        }
-
-        // find muzzle child (traverse)
-        let muzzle = null;
-        const findMuzzle = (ent) => {
-            if (!ent) return;
-            if ((ent.name || "") === "Muzzle") { muzzle = ent; return; }
-            if (ent.children) {
-                for (let ch of ent.children) {
-                    if (muzzle) break;
-                    findMuzzle(ch);
-                }
-            }
+      // If weaponModel is cached prototype, detach only; else destroy whole viewModel
+      if (this.weaponModel && window._pcWeaponInstanceCache && window._pcWeaponInstanceCache[this.currentKey]) {
+        // just detach cached model
+        try { if (this.weaponModel.parent) this.weaponModel.parent.removeChild(this.weaponModel); } catch (e) {}
+      } else {
+        // destroy viewModel and all children
+        const destroyRec = (ent) => {
+          if (!ent) return;
+          const children = ent.children ? ent.children.slice() : [];
+          for (let c of children) destroyRec(c);
+          try { if (ent.parent) ent.parent.removeChild(ent); } catch {}
+          try { ent.destroy(); } catch {}
         };
-        findMuzzle(modelEntity);
-        if (muzzle) this.parts.muzzle = muzzle;
-
-        // add viewModel to camera
-        try {
-            if (this.camera && typeof this.camera.addChild === "function") {
-                this.camera.addChild(this.viewModel);
-            } else if (app && app.root) {
-                app.root.addChild(this.viewModel);
-            }
-        } catch (e) {}
-
-        // set up "pull" state (animation initiation)
-        this.state.pulling = true;
-        this.state.pullStart = performance.now() / 1000;
-        if (this.offPos) this.state.pullFrom.copy(this.offPos);
-        if (this.readyPos) this.state.pullTo.copy(this.readyPos);
-
-        // play pull sound if available (assumes HTMLAudio style objects)
-        try {
-            const pullSnd = this.audio && this.audio[this.currentKey] && this.audio[this.currentKey].pull;
-            if (pullSnd) { pullSnd.currentTime = 0; pullSnd.play(); }
-            // optional: sendSoundEvent fallback if you have it
-            if (typeof sendSoundEvent === "function") {
-                const pos = this.camera ? this.camera.getPosition() : new pc.Vec3();
-                sendSoundEvent(this.currentKey, "pull", pos);
-            }
-        } catch (e) {}
-        // Update UI (hooks)
-        try { if (typeof updateAmmoDisplay === "function") updateAmmoDisplay(this.ammoInMagazine, this.stats.magazineSize); } catch (e) {}
-        try { if (typeof updateInventory === "function") updateInventory(this.currentKey); } catch (e) {}
-    };
-
-    // ---- If prototype exists, try to get or create cached instance ----
-    if (proto) {
-        if (!window._pcWeaponInstanceCache[key]) {
-            try {
-                // attempt deep clone
-                const cached = proto.clone(true);
-                cached.enabled = false;
-                try { if (cached.parent) cached.parent.removeChild(cached); } catch (e) {}
-                window._pcWeaponInstanceCache[key] = cached;
-            } catch (e) {
-                console.warn(`[WeaponController] Failed to clone proto for ${key}:`, e);
-                window._pcWeaponInstanceCache[key] = null;
-            }
-        }
-
-        const cachedInstance = window._pcWeaponInstanceCache[key];
-
-        if (cachedInstance) {
-            // Reset transforms (local)
-            try {
-                cachedInstance.setLocalScale(1, 1, 1);
-                cachedInstance.setLocalEulerAngles(0, 0, 0);
-                cachedInstance.setLocalPosition(0, 0, 0);
-            } catch (e) {}
-
-            // apply per-weapon transforms (using PlayCanvas methods)
-            switch (key) {
-                case "knife":
-                    cachedInstance.setLocalScale(0.001, 0.001, 0.001);
-                    cachedInstance.setLocalEulerAngles(90, 160, 0);
-                    cachedInstance.setLocalPosition(0.5, -0.1, -0.7);
-                    break;
-                case "deagle":
-                case "legion":
-                case "m79":
-                    cachedInstance.setLocalScale(0.3, 0.3, 0.3);
-                    cachedInstance.setLocalEulerAngles(7, 180, 0);
-                    cachedInstance.setLocalPosition(
-                        0.15 * (window.innerWidth / 1920),
-                        0.10 * (window.innerHeight / 1080),
-                        -0.1 * (window.innerWidth / 1920)
-                    );
-                    break;
-                case "ak47":
-                    cachedInstance.setLocalScale(0.4, 0.4, 0.4);
-                    cachedInstance.setLocalEulerAngles(4, 180, 0);
-                    cachedInstance.setLocalPosition(
-                        0.35 * (window.innerWidth / 1920),
-                        -0.15 * (window.innerHeight / 1080),
-                        -0.3 * (window.innerWidth / 1920)
-                    );
-                    break;
-                case "viper":
-                    cachedInstance.setLocalScale(0.4, 0.4, 0.4);
-                    cachedInstance.setLocalEulerAngles(4, 180, 0);
-                    cachedInstance.setLocalPosition(
-                        0.35 * (window.innerWidth / 1920),
-                        -0.15 * (window.innerHeight / 1080),
-                        0
-                    );
-                    break;
-                case "marshal":
-                    cachedInstance.setLocalScale(1, 1, 1);
-                    cachedInstance.setLocalEulerAngles(0, 0, 0);
-                    cachedInstance.setLocalPosition(
-                        0.15 * (window.innerWidth / 1920),
-                        0.15 * (window.innerHeight / 1080),
-                        -0.1 * (window.innerWidth / 1920)
-                    );
-                    break;
-                default:
-                    console.warn(`[WeaponController] No transform logic for "${key}"`);
-            }
-
-            attachModel(cachedInstance);
-        } else {
-            // fallback: use PCWeaponBuilder to build
-            console.warn(`[WeaponController] cached proto missing for "${key}" → falling back to PCWeaponBuilder.`);
-            const builder = new PCWeaponBuilder({ app, viewModel: this.viewModel });
-            // choose appropriate builder call
-            let result;
-            switch (key) {
-                case "knife": result = builder.buildKnife(); break;
-                case "deagle": result = builder.buildDeagle(); break;
-                case "legion": result = builder.buildLegion(); break;
-                case "ak47": result = builder.buildAK47(); break;
-                case "marshal": result = builder.buildMarshal(); break;
-                case "viper": result = builder.buildViper(); break;
-                case "m79": result = builder.buildM79(); break;
-                default: result = null; break;
-            }
-            if (result && result.promise) {
-                result.promise.then(({ weaponRoot, parts }) => {
-                    // PCWeaponBuilder returns { weaponRoot, parts } in this implementation
-                    // attach weaponRoot to viewModel
-                    attachModel(weaponRoot);
-                    // store parts if provided
-                    if (parts) this.parts = parts;
-                }).catch(err => {
-                    console.error("[WeaponController] builder failed:", err);
-                });
-            } else {
-                console.error(`[WeaponController] No build method for "${key}"`);
-            }
-        }
-    } else {
-        // No prototype at all — attempt builder
-        console.warn(`[WeaponController] Prototype for "${key}" missing → running PCWeaponBuilder fallback.`);
-        const builder = new PCWeaponBuilder({ app, viewModel: this.viewModel });
-        let result;
-        switch (key) {
-            case "knife": result = builder.buildKnife(); break;
-            case "deagle": result = builder.buildDeagle(); break;
-            case "legion": result = builder.buildLegion(); break;
-            case "ak47": result = builder.buildAK47(); break;
-            case "marshal": result = builder.buildMarshal(); break;
-            case "viper": result = builder.buildViper(); break;
-            case "m79": result = builder.buildM79(); break;
-            default: result = null; break;
-        }
-        if (result && result.promise) {
-            result.promise.then(({ weaponRoot, parts }) => {
-                attachModel(weaponRoot);
-                if (parts) this.parts = parts;
-            }).catch(err => {
-                console.error("[WeaponController] builder failed:", err);
-            });
-        } else {
-            console.error(`[WeaponController] No build method for "${key}"`);
-        }
+        destroyRec(this.viewModel);
+      }
     }
-} // end equipWeapon
+  } catch (e) { console.warn("equipWeapon cleanup error", e); }
 
+  // Reset core state and set up fresh viewModel container attached to camera
+  this.currentKey = weaponKey;
+  this.stats = WeaponController.WEAPONS[weaponKey];
+  this.isReloadingFlag = false;
+  this.lastShotTime = 0;
+  this.burstCount = 0;
+  this.speedModifier = this.stats.speedModifier;
+  this.ammoStore = this.ammoStore || {};
+  this.ammoInMagazine = (this.ammoStore[weaponKey] != null) ? this.ammoStore[weaponKey] : this.stats.magazineSize;
+
+  this.state = {
+    pulling: false, pullStart: 0, pullFrom: PC.vec(), pullTo: PC.vec(),
+    recoiling: false, recoilStart: 0, reloading: false, reloadStart: 0,
+    knifeSwing: false, knifeSwingStart: 0, knifeHeavy: false,
+    tracerObjects: []
+  };
+
+  // new viewModel container
+  const vm = new pc.Entity("ViewModelRoot");
+  vm.setLocalPosition(0,0,0);
+  vm.setLocalEulerAngles(0,0,0);
+  vm.setLocalScale(1,1,1);
+  vm.enabled = true;
+  this.viewModel = vm;
+
+  // attach viewModel to camera so it inherits camera transforms (ADS + rotation)
+  try {
+    if (this.camera && typeof this.camera.addChild === "function") {
+      this.camera.addChild(vm);
+    } else {
+      // fallback: attach to root scene
+      const pcApp = PC.app();
+      if (pcApp && pcApp.root) pcApp.root.addChild(vm);
+    }
+  } catch (e) { console.warn("equipWeapon attach error", e); }
+
+  // Reset parts ref
+  this.parts = {};
+
+  // Try to use prototype (PlayCanvas entity) from _pcPrototypeModels
+  const key = weaponKey.replace(/-/g,'').toLowerCase();
+  const protoStore = window._pcPrototypeModels || {};
+  const pcProto = protoStore[key];
+
+  const applyCommonTransforms = (ent, k) => {
+    // Reset local transform, then apply per-weapon sensible defaults
+    try { ent.setLocalPosition(0,0,0); ent.setLocalEulerAngles(0,0,0); ent.setLocalScale(1,1,1); } catch {}
+    switch (k) {
+      case "knife":
+        ent.setLocalScale(0.001,0.001,0.001);
+        ent.setLocalEulerAngles(90,160,0);
+        ent.setLocalPosition(0.5,-0.1,-0.7);
+        break;
+      case "deagle":
+      case "legion":
+      case "m79":
+        ent.setLocalScale(0.3,0.3,0.3);
+        ent.setLocalEulerAngles(7,180,0);
+        ent.setLocalPosition(0.15*(window.innerWidth/1920), 0.1*(window.innerHeight/1080), -0.1*(window.innerWidth/1920));
+        break;
+      case "ak47":
+      case "viper":
+        ent.setLocalScale(0.4,0.4,0.4);
+        ent.setLocalEulerAngles(4,180,0);
+        ent.setLocalPosition(0.35*(window.innerWidth/1920), -0.15*(window.innerHeight/1080), -0.3*(window.innerWidth/1920));
+        break;
+      case "marshal":
+        ent.setLocalScale(1,1,1);
+        ent.setLocalEulerAngles(0,0,0);
+        ent.setLocalPosition(0.15*(window.innerWidth/1920), 0.15*(window.innerHeight/1080), -0.1*(window.innerWidth/1920));
+        break;
+      default:
+        break;
+    }
+  };
+
+  if (pcProto && typeof pcProto.clone === "function") {
+    try {
+      const clone = pcProto.clone(true);
+      clone.enabled = true;
+      // ensure detach from any parent then add into viewModel
+      try { if (clone.parent) clone.parent.removeChild(clone); } catch {}
+      vm.addChild(clone);
+      this.weaponModel = clone;
+      applyCommonTransforms(clone, key);
+
+      // find muzzle child by name (common name 'Muzzle')
+      const findMuzzle = (ent) => {
+        if (!ent) return null;
+        if ((ent.name || "").toLowerCase() === "muzzle") return ent;
+        if (ent.children) for (let c of ent.children) {
+          const r = findMuzzle(c);
+          if (r) return r;
+        }
+        return null;
+      };
+      const muzzle = findMuzzle(clone);
+      if (muzzle) this.parts.muzzle = muzzle;
+
+      // animate equip pull
+      this.state.pulling = true;
+      this.state.pullStart = PC.nowSec();
+      this.state.pullFrom = PC.vec().copy(this.offPos || PC.vec());
+      this.state.pullTo = PC.vec().copy(this.readyPos || PC.vec());
+      return;
+    } catch (e) {
+      console.warn("equipWeapon: clone failed, falling back to dynamic loader", e);
+    }
+  }
+
+  // Fallback to dynamic load with PCWeaponBuilder (async) — attach when ready
+  const builder = new PCWeaponBuilder({ app: PC.app(), viewModel: vm });
+  const buildMethod = {
+    knife: 'buildKnife', deagle: 'buildDeagle', ak47: 'buildAK47', marshal: 'buildMarshal',
+    m79: 'buildM79', viper: 'buildViper', legion: 'buildLegion'
+  }[key];
+  if (buildMethod && typeof builder[buildMethod] === "function") {
+    const { promise } = builder[buildMethod]();
+    promise.then((weaponRoot) => {
+      // weaponRoot is a pc.Entity in our builder implementation
+      if (!weaponRoot) return;
+      this.weaponModel = weaponRoot;
+      applyCommonTransforms(weaponRoot, key);
+      // find muzzle
+      const findMuzzle = (ent) => {
+        if (!ent) return null;
+        if ((ent.name || "").toLowerCase() === "muzzle") return ent;
+        if (ent.children) {
+          for (let c of ent.children) {
+            const r = findMuzzle(c);
+            if (r) return r;
+          }
+        }
+        return null;
+      };
+      const muzzle = findMuzzle(weaponRoot);
+      if (muzzle) this.parts.muzzle = muzzle;
+
+      this.state.pulling = true;
+      this.state.pullStart = PC.nowSec();
+      this.state.pullFrom = PC.vec().copy(this.offPos || PC.vec());
+      this.state.pullTo = PC.vec().copy(this.readyPos || PC.vec());
+    }).catch(err => console.warn("equipWeapon builder failed:", err));
+  } else {
+    console.warn(`[equipWeapon] no build method for ${key}`);
+  }
+}
 
 
 
@@ -1406,6 +1231,7 @@ checkBulletPenetration(origin, direction, maxWorldPenetrations = 1) {
 }
 
 fireBullet(spreadAngle) {
+  // ensure required systems are present
   if (!this.physicsController || !this.physicsController.worldBVH) {
     console.error("World BVH not available to fire bullet.");
     return;
@@ -1413,27 +1239,192 @@ fireBullet(spreadAngle) {
 
   let realPenetrate = false;
 
-  this.camera.updateMatrixWorld();
-  const origin = new THREE.Vector3().setFromMatrixPosition(this.camera.matrixWorld);
-  const direction = getSpreadDirection(spreadAngle, this.camera).normalize();
+  // Helpers ----------------------------------------------------------------
+  const toPCVec3 = (v) => {
+    if (!v) return new pc.Vec3();
+    if (v instanceof pc.Vec3) return v.clone();
+    if (typeof v.x === "number" && typeof v.y === "number" && typeof v.z === "number") return new pc.Vec3(v.x, v.y, v.z);
+    return new pc.Vec3();
+  };
 
-  const traj = this.checkBulletPenetration(origin, direction, 1);
+  const toPlainObj = (v) => ({ x: v.x, y: v.y, z: v.z });
 
-  let tracerEnd = null;
+  const toTHREEVec = (v) => {
+    if (typeof THREE === "undefined") return null;
+    return new THREE.Vector3(v.x, v.y, v.z);
+  };
 
-  if (traj.playerHitResult) {
+  // Get world-space origin and forward direction (pc.Vec3)
+  const getWorldPositionOfEntity = (ent) => {
+    if (!ent) return new pc.Vec3();
+    try {
+      // 1) prefer getPosition() (PlayCanvas often exposes world pos via getPosition)
+      if (typeof ent.getPosition === "function") {
+        const p = ent.getPosition();
+        if (p) return p.clone ? p.clone() : new pc.Vec3(p.x, p.y, p.z);
+      }
+      // 2) try getWorldTransform().transformPoint if available
+      if (typeof ent.getWorldTransform === "function") {
+        const wt = ent.getWorldTransform();
+        if (wt && typeof wt.transformPoint === "function") {
+          const out = wt.transformPoint(new pc.Vec3(0, 0, 0));
+          if (out) return out.clone ? out.clone() : new pc.Vec3(out.x, out.y, out.z);
+        }
+      }
+      // 3) fallback to local position transformed by parent's world transform
+      if (typeof ent.getLocalPosition === "function") {
+        const lp = ent.getLocalPosition();
+        // if parent exists, try parent.world transform
+        if (ent.parent && typeof ent.parent.getWorldTransform === "function") {
+          const pwt = ent.parent.getWorldTransform();
+          if (pwt && typeof pwt.transformPoint === "function") {
+            return pwt.transformPoint(lp);
+          }
+        }
+        return lp.clone ? lp.clone() : new pc.Vec3(lp.x, lp.y, lp.z);
+      }
+    } catch (e) {
+      // ignore and return zero
+    }
+    return new pc.Vec3();
+  };
+
+  const getWorldForwardOfEntity = (ent) => {
+    // returns normalized forward world vector (pc.Vec3) pointing along local +Z
+    if (!ent) return new pc.Vec3(0, 0, 1);
+    try {
+      // Use world transform to transform local forward point (0,0,1) and subtract world origin
+      if (typeof ent.getWorldTransform === "function") {
+        const wt = ent.getWorldTransform();
+        if (wt && typeof wt.transformPoint === "function") {
+          const w0 = wt.transformPoint(new pc.Vec3(0, 0, 0));
+          const wf = wt.transformPoint(new pc.Vec3(0, 0, 1));
+          const dir = wf.clone().sub(w0).normalize();
+          return dir;
+        }
+      }
+      // fallback: use entity.forward() if present
+      if (typeof ent.forward === "function") {
+        const f = ent.forward();
+        if (f) return f.clone ? f.clone() : new pc.Vec3(f.x,f.y,f.z);
+      }
+      // last fallback: camera forward if entity is missing world transform
+      if (this.camera) {
+        try {
+          if (typeof this.camera.getWorldTransform === "function") {
+            const cwt = this.camera.getWorldTransform();
+            if (cwt && typeof cwt.transformPoint === "function") {
+              const c0 = cwt.transformPoint(new pc.Vec3(0,0,0));
+              const cf = cwt.transformPoint(new pc.Vec3(0,0,1));
+              return cf.clone().sub(c0).normalize();
+            }
+          }
+        } catch (e) {}
+      }
+    } catch (e) {}
+    return new pc.Vec3(0, 0, 1);
+  };
+
+  // Build origin & direction (pc.Vec3)
+  let originPC = new pc.Vec3();
+  let dirPC = new pc.Vec3(0, 0, 1);
+
+  if (this.parts && this.parts.muzzle) {
+    // try muzzle world transform
+    originPC = getWorldPositionOfEntity(this.parts.muzzle);
+    dirPC = getWorldForwardOfEntity(this.parts.muzzle);
+  } else if (this.camera) {
+    // fallback to camera world forward
+    originPC = getWorldPositionOfEntity(this.camera);
+    dirPC = getWorldForwardOfEntity(this.camera);
+  }
+
+  // Apply spread: use a random cone around dirPC
+  const applySpread = (dir, spreadDeg) => {
+    if (!dir || !dir.length) return dir;
+    const spreadRad = (spreadDeg || 0) * (Math.PI / 180);
+    if (spreadRad <= 0) return dir.clone();
+    // Build orthonormal basis
+    const up = Math.abs(dir.y) < 0.99 ? new pc.Vec3(0,1,0) : new pc.Vec3(1,0,0);
+    const right = dir.clone().cross(up).normalize();
+    const realUp = right.clone().cross(dir).normalize();
+    const theta = Math.random() * 2 * Math.PI;
+    const u = Math.random();
+    const r = Math.sqrt(u) * Math.tan(spreadRad);
+    const offset = right.scale(Math.cos(theta) * r).add(realUp.scale(Math.sin(theta) * r));
+    const out = dir.clone().add(offset).normalize();
+    return out;
+  };
+
+  const directionWithSpread = applySpread(dirPC, spreadAngle);
+
+  // Prepare arguments for checkBulletPenetration
+  // Try to detect which vector types checkBulletPenetration expects:
+  let originForCheck = originPC;
+  let dirForCheck = directionWithSpread;
+  let usedThree = false;
+
+  if (typeof THREE !== "undefined") {
+    // If THREE is present, create THREE vectors to maximize backwards compatibility
+    try {
+      const o3 = new THREE.Vector3(originPC.x, originPC.y, originPC.z);
+      const d3 = new THREE.Vector3(directionWithSpread.x, directionWithSpread.y, directionWithSpread.z);
+      originForCheck = o3;
+      dirForCheck = d3;
+      usedThree = true;
+    } catch (e) {
+      usedThree = false;
+    }
+  }
+
+  // Call penetration check (some implementations expect THREE vectors, others may accept plain objects)
+  let traj = null;
+  try {
+    traj = this.checkBulletPenetration(originForCheck, dirForCheck, 1);
+  } catch (e) {
+    // fallback: try passing plain objects
+    try {
+      traj = this.checkBulletPenetration(toPlainObj(originPC), toPlainObj(directionWithSpread), 1);
+    } catch (err) {
+      console.error("checkBulletPenetration failed (both vector forms):", err);
+      return;
+    }
+  }
+
+  // Helper to coerce intersection/point/normal into pc.Vec3
+  const pointToPC = (p) => {
+    if (!p) return new pc.Vec3();
+    if (p instanceof pc.Vec3) return p.clone();
+    if (typeof p.x === "number" && typeof p.y === "number" && typeof p.z === "number") return new pc.Vec3(p.x, p.y, p.z);
+    // if THREE.Vector3
+    if (typeof THREE !== "undefined" && p instanceof THREE.Vector3) return new pc.Vec3(p.x, p.y, p.z);
+    return new pc.Vec3();
+  };
+
+  // Determine tracer end (pc.Vec3)
+  let tracerEndPC = null;
+
+  if (traj && traj.playerHitResult) {
     const hit = traj.playerHitResult;
     let mesh = hit.mesh;
+    // climb to parent until we find userData.playerId (keep original logic)
     while (mesh && mesh.userData && mesh.userData.playerId == null) mesh = mesh.parent;
 
     if (mesh && mesh.userData && mesh.userData.playerId != null) {
       const isHead = !!hit.isHead;
       const baseDamage = isHead ? this.stats.headshotDamage : this.stats.bodyDamage;
 
-      const distanceMeters = worldUnitsToMeters(origin.distanceTo(hit.intersection), this.unitsPerMeter);
+      // compute distance in meters — convert using your unitsPerMeter if available
+      // make sure to coerce types for distance calculation
+      const hitPos = pointToPC(hit.intersection);
+      const originForDist = usedThree ? pointToPC(originForCheck) : originPC;
+      const distanceUnits = originForDist.distance(hitPos);
+      const distanceMeters = typeof this.unitsPerMeter === "number" && this.unitsPerMeter > 0 ? (distanceUnits / this.unitsPerMeter) : distanceUnits;
 
-      // <-- FIX: pass isHead so calculateDamageWithDropOff uses head/body absolute arrays when present
-      let damageToApply = calculateDamageWithDropOff(baseDamage, distanceMeters, this.stats.damageDropOff, isHead);
+      // calculate damage with drop-off; pass isHead flag if your function supports it
+      let damageToApply = typeof calculateDamageWithDropOff === "function"
+        ? calculateDamageWithDropOff(baseDamage, distanceMeters, this.stats.damageDropOff, isHead)
+        : baseDamage;
 
       if (traj.isPenetrationShot) {
         damageToApply *= 0.5;
@@ -1442,52 +1433,94 @@ fireBullet(spreadAngle) {
 
       damageToApply = Math.round(damageToApply);
 
-      window.applyDamageToRemote?.(
-        mesh.userData.playerId,
-        damageToApply,
-        {
-          id: this.localPlayerId,
-          username: window.localPlayer?.username ?? "Unknown",
-          weapon: this.currentKey,
-          isHeadshot: isHead,
-          isPenetrationShot: realPenetrate
-        }
-      );
+      // Send damage to server/remote handler
+      if (typeof window.applyDamageToRemote === "function") {
+        window.applyDamageToRemote(
+          mesh.userData.playerId,
+          damageToApply,
+          {
+            id: this.localPlayerId,
+            username: window.localPlayer?.username ?? "Unknown",
+            weapon: this.currentKey,
+            isHeadshot: isHead,
+            isPenetrationShot: realPenetrate
+          }
+        );
+      }
 
       realPenetrate = false;
 
       if (!traj.isPenetrationShot) {
-        if (isHead) {
-          playBodyHeadshot && playBodyHeadshot();
-        } else {
-          playBodyHit && playBodyHit();
-        }
+        try { if (isHead) (typeof playBodyHeadshot === "function") && playBodyHeadshot(); else (typeof playBodyHit === "function") && playBodyHit(); } catch (e) {}
       }
     }
 
-    tracerEnd = hit.intersection.clone();
+    tracerEndPC = pointToPC(traj.playerHitResult.intersection);
   } else {
-    if (traj.allWorldHits && traj.allWorldHits.length) {
-      tracerEnd = traj.allWorldHits[traj.allWorldHits.length - 1].point.clone();
+    if (traj && traj.allWorldHits && traj.allWorldHits.length) {
+      const last = traj.allWorldHits[traj.allWorldHits.length - 1];
+      tracerEndPC = pointToPC(last.point);
     } else {
-      tracerEnd = origin.clone().add(direction.clone().multiplyScalar(this.stats.tracerLength || 2000));
+      // fallback to a long tracer in the shot direction
+      const len = this.stats && this.stats.tracerLength ? this.stats.tracerLength : 2000;
+      tracerEndPC = originPC.clone().add(directionWithSpread.clone().scale(len));
     }
   }
 
-  for (const wh of traj.allWorldHits) {
-    sendBulletHole && sendBulletHole({
-      x: wh.point.x, y: wh.point.y, z: wh.point.z,
-      nx: wh.normal.x, ny: wh.normal.y, nz: wh.normal.z,
-      timeCreated: (firebase && firebase.database && firebase.database.ServerValue) ? firebase.database.ServerValue.TIMESTAMP : Date.now()
-    });
+  // Send bullet holes for world hits (convert to plain numeric)
+  if (traj && traj.allWorldHits && Array.isArray(traj.allWorldHits)) {
+    for (const wh of traj.allWorldHits) {
+      if (!wh || !wh.point || !wh.normal) continue;
+      const pt = pointToPC(wh.point);
+      const n = pointToPC(wh.normal);
+      try {
+        const payload = {
+          x: pt.x, y: pt.y, z: pt.z,
+          nx: n.x, ny: n.y, nz: n.z,
+          timeCreated: (typeof firebase !== "undefined" && firebase.database && firebase.database.ServerValue)
+            ? firebase.database.ServerValue.TIMESTAMP
+            : Date.now()
+        };
+        if (typeof sendBulletHole === "function") sendBulletHole(payload);
+      } catch (e) {
+        console.warn("failed to sendBulletHole", e);
+      }
+    }
   }
 
-  const muzzlePos = this.parts?.muzzle ? this.parts.muzzle.getWorldPosition(new THREE.Vector3()) : origin.clone();
-  this.createTracer && this.createTracer(muzzlePos, tracerEnd.clone(), this.currentKey, this.stats.tracerLength);
-  sendTracer && sendTracer({
-    ox: muzzlePos.x, oy: muzzlePos.y, oz: muzzlePos.z,
-    tx: tracerEnd.x, ty: tracerEnd.y, tz: tracerEnd.z
-  });
+  // Create tracer from muzzle world position (pc.Vec3)
+  let muzzleWorld = originPC.clone();
+  try {
+    if (this.parts && this.parts.muzzle) muzzleWorld = getWorldPositionOfEntity(this.parts.muzzle);
+  } catch (e) {}
+
+  // Call createTracer with appropriate types (convert to whatever your tracer implementation expects)
+  try {
+    // If createTracer expects THREE vectors, convert if THREE exists
+    if (typeof createTracer === "function") {
+      // prefer to send plain pc.Vec3 - your createTracer may accept this in PC port
+      createTracer(muzzleWorld.clone(), tracerEndPC.clone(), this.currentKey, this.stats.tracerLength);
+    }
+  } catch (e) {
+    // fallback: if createTracer expects plain number coordinates
+    try {
+      if (typeof createTracer === "function") {
+        createTracer({ ox: muzzleWorld.x, oy: muzzleWorld.y, oz: muzzleWorld.z, tx: tracerEndPC.x, ty: tracerEndPC.y, tz: tracerEndPC.z, key: this.currentKey });
+      }
+    } catch (e2) {
+      console.warn("createTracer failed:", e2);
+    }
+  }
+
+  // Send tracer network event (numbers)
+  try {
+    if (typeof sendTracer === "function") {
+      sendTracer({
+        ox: muzzleWorld.x, oy: muzzleWorld.y, oz: muzzleWorld.z,
+        tx: tracerEndPC.x, ty: tracerEndPC.y, tz: tracerEndPC.z
+      });
+    }
+  } catch (e) { console.warn("sendTracer failed:", e); }
 }
 
 
@@ -1910,35 +1943,91 @@ addDebugMuzzleDot(muzzleObject3D, dotSize = 0.5) {
 
 
 
-export async function preloadWeaponPrototypes(onComplete) {
-  const names = ['knife','deagle','ak47','marshal','m79','viper','legion',];
-  const dummyCam = new THREE.Group();
-  const loaderUI = new Loader();
-  const itemPercentages = names.map(() => 1 / names.length);
+const PC = {
+  app: () => window.playcanvasApp,
+  nowSec: () => performance.now() / 1000,
+  vec: (x=0,y=0,z=0) => new pc.Vec3(x,y,z),
+  clamp: (v, lo, hi) => Math.max(lo, Math.min(hi, v)),
+  lerp: (a, b, t) => a + (b - a) * t,
+  toDeg: (r) => r * 180 / Math.PI,
+  toRad: (d) => d * Math.PI / 180,
+};
 
-  loaderUI.show('Loading...', itemPercentages);
-  loaderUI.onComplete(() => {
-    console.log('▶️ ALL weapon prototypes ready');
-    onComplete?.();
-  });
+/* -------------------------
+   Preload weapon prototypes (PlayCanvas)
+   - Loads GLBs as 'container' assets and stores instantiated root
+   - Result prototypes are pc.Entity roots stored in window._pcPrototypeModels
+   ------------------------- */
+export async function preloadWeaponPrototypes(onComplete) {
+  const names = ['knife','deagle','ak47','marshal','m79','viper','legion'];
+  window._pcPrototypeModels = window._pcPrototypeModels || {};
+  const pcApp = PC.app();
+  if (!pcApp) {
+    console.warn("preloadWeaponPrototypes: playcanvas app not found");
+    onComplete && onComplete();
+    return;
+  }
+
+  const urlMap = {
+    knife: 'https://raw.githubusercontent.com/thearthd/3d-models/main/Weapon/voidffa_knife_V6.glb',
+    deagle: 'https://raw.githubusercontent.com/thearthd/3d-models/main/Weapon/voidffa_deagle.glb',
+    ak47: 'https://raw.githubusercontent.com/thearthd/3d-models/main/Weapon/voidffa_AK47_V2.glb',
+    marshal: 'https://raw.githubusercontent.com/thearthd/3d-models/main/svd_sniper_rfile.glb',
+    m79: 'https://raw.githubusercontent.com/thearthd/3d-models/main/M-79.glb',
+    viper: 'https://raw.githubusercontent.com/thearthd/3d-models/main/Viper.glb',
+    legion: 'https://raw.githubusercontent.com/thearthd/3d-models/main/Legion1212.glb'
+  };
+
+  const loaderUI = (typeof Loader === "function") ? new Loader() : null;
+  if (loaderUI && loaderUI.show) loaderUI.show('Loading weapons...', names.map(()=>1/names.length));
 
   for (let i = 0; i < names.length; i++) {
     const name = names[i];
-    const wc = new WeaponController(dummyCam);
-    const method = 'build' + (name === 'ak47' ? 'AK47' : name[0].toUpperCase() + name.slice(1));
-    console.log(`Preloading ${name}, weight ${itemPercentages[i] * 100}%`);
-
-    // get { promise, register } from buildX()
-    const { promise, register } = wc[method]();
-    // track with live progress
-    await loaderUI.track(itemPercentages[i], promise, cb => register(cb));
-    // post-load housekeeping
-    const model = await promise;
-    dummyCam.remove(model);
-    model.visible = false;
-    _prototypeModels[name] = model;
-    console.log(`Loaded ${name}`);
+    const url = urlMap[name];
+    if (!url) continue;
+    console.log(`[preload] loading ${name} from ${url}`);
+    await new Promise((resolve) => {
+      pcApp.assets.loadFromUrl(url, "container", (err, asset) => {
+        if (err) {
+          console.warn(`[preload] failed to load ${name}:`, err);
+          resolve();
+          return;
+        }
+        // instantiate a render entity group (root)
+        let rootEnt = null;
+        try {
+          if (asset.resource.instantiateRenderEntity) {
+            rootEnt = asset.resource.instantiateRenderEntity();
+          } else if (asset.resource.instantiateModelEntity) {
+            rootEnt = asset.resource.instantiateModelEntity();
+          } else if (asset.resource.instantiate) {
+            rootEnt = asset.resource.instantiate();
+          }
+        } catch (e) {
+          console.warn(`[preload] instantiate failed for ${name}:`, e);
+        }
+        if (!rootEnt) {
+          resolve();
+          return;
+        }
+        // detach from scene if accidentally attached
+        try { if (rootEnt.parent) rootEnt.parent.removeChild(rootEnt); } catch {}
+        // make invisible/prototype-safe
+        rootEnt.enabled = false;
+        window._pcPrototypeModels[name] = rootEnt;
+        console.log(`[preload] prototype stored: ${name}`);
+        resolve();
+      });
+    });
+    // update loader progress if present
+    if (loaderUI && loaderUI.track) {
+      try { loaderUI.track(1/names.length, Promise.resolve()); } catch {}
+    }
   }
+
+  if (loaderUI && loaderUI.onComplete) loaderUI.onComplete();
+  console.log("▶️ ALL PlayCanvas weapon prototypes ready");
+  onComplete && onComplete();
 }
 
 
