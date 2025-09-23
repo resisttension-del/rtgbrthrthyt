@@ -1647,56 +1647,55 @@ addDebugMuzzleDot(muzzleObject3D, dotSize = 0.5) {
     }
   
 // inside PCWeaponBuilder
-buildDeagle(onProgressRegistrar) {
-  const pcApp = PC.app();
-  const url = 'https://raw.githubusercontent.com/thearthd/3d-models/main/Weapon/voidffa_deagle.glb';
-  return new Promise((resolve, reject) => {
-    if (!pcApp) return reject('No PlayCanvas app');
+    buildDeagle(onProgressRegistrar) {
+        const loader = new GLTFLoader();
+        const url = 'https://raw.githubusercontent.com/thearthd/3d-models/main/Weapon/voidffa_deagle.glb';
+        let prog = () => {};
+        const promise = new Promise((res, rej) => {
+            loader.load(
+                url,
+                gltf => {
+                    this.weaponModel = new THREE.Group();
+                    this.parts = {};
+                    if (this.viewModel) this.viewModel.add(this.weaponModel);
+                    const model = gltf.scene;
+                    const box = new THREE.Box3().setFromObject(model);
+                    const center = box.getCenter(new THREE.Vector3());
+                    model.position.sub(center);
+                    this.weaponModel.add(model);
+                    this.weaponModel.scale.set(5, 5, 5);
+                    this.weaponModel.rotation.set(
+                        THREE.MathUtils.degToRad(7),
+                        THREE.MathUtils.degToRad(180),
+                        0
+                    );
+                    const sw = window.innerWidth, sh = window.innerHeight;
+                    this.weaponModel.position.set(
+                        0.15 * (sw/1920),
+                        0.1 * (sh/1080),
+                        -0.1 * (sw/1920)
+                    );
+                    const box2 = new THREE.Box3().setFromObject(model);
+                    const muzzle = new THREE.Object3D();
+                    muzzle.name = 'Muzzle';
+                    // These coordinates are relative to the 'model's' local space after centering
+                    // You'll likely need to adjust these values (`-box2.max.x, box2.max.y, 1`)
+                    // until the debug dot appears at the very tip of your gun's muzzle.
+                    muzzle.position.set(-box2.max.x, box2.max.y, 1);
+                    this.weaponModel.add(muzzle);
+                    this.parts.muzzle = muzzle;
 
-    pcApp.assets.loadFromUrl(url, "container", (err, asset) => {
-      if (err) return reject(err);
+                    // --- ADD THE DEBUG DOT HERE ---
 
-      // instantiate a PlayCanvas entity root for the model
-      let rootEnt = null;
-      try {
-        if (asset.resource.instantiateRenderEntity) rootEnt = asset.resource.instantiateRenderEntity();
-        else if (asset.resource.instantiateModelEntity) rootEnt = asset.resource.instantiateModelEntity();
-        else rootEnt = asset.resource.instantiate();
-      } catch (e) {
-        console.warn('instantiate failed', e);
-        return reject(e);
-      }
-      if (!rootEnt) return reject('instantiate returned null');
 
-      // make safe / local transform
-      try { if (rootEnt.parent) rootEnt.parent.removeChild(rootEnt); } catch (e) {}
-      rootEnt.enabled = true;
-      // attach to viewModel (vm passed via this.viewModel from equipWeapon)
-      if (this.viewModel && this.viewModel.addChild) {
-        this.viewModel.addChild(rootEnt);
-      } else {
-        // fallback if viewModel isn't a pc.Entity (shouldn't happen in PlayCanvas mode)
-        pcApp.root.addChild(rootEnt);
-      }
-
-      // create a muzzle empty entity and attach to model root (pos adjust later)
-      const muzzle = new pc.Entity('Muzzle');
-      muzzle.setLocalPosition(0, 0, 0);
-      muzzle.enabled = true;
-      rootEnt.addChild(muzzle);
-      this.parts.muzzle = muzzle;
-
-      // apply reasonable defaults — tune these numbers if needed
-      rootEnt.setLocalScale(0.4, 0.4, 0.4);
-      rootEnt.setLocalEulerAngles(7, 180, 0);
-      const sw = window.innerWidth, sh = window.innerHeight;
-      rootEnt.setLocalPosition(0.15 * (sw/1920), 0.1 * (sh/1080), -0.1 * (sw/1920));
-
-      this.weaponModel = rootEnt;
-      resolve(rootEnt);
-    });
-  });
-}
+                    res(this.weaponModel);
+                },
+                evt => { if (evt.lengthComputable) prog(evt); },
+                err => rej(err)
+            );
+        });
+        return { promise, register: cb => prog = cb };
+    }
 
 
     buildLegion(onProgressRegistrar) {
@@ -2460,188 +2459,207 @@ export class AnimatedTracer {
   window.addPlaycanvasDebugMuzzleDot = addDebugMuzzleDot;
 
   // ---------- WeaponBuilder ----------
-  class PCWeaponBuilder {
-    /**
-     * @param {object} opts { app: pc.Application (optional), viewModel: pc.Entity (optional) }
-     */
-    constructor(opts = {}) {
-      this.app = opts.app || DEFAULT_APP();
-      this.viewModel = opts.viewModel || null; // parent entity for weapon view-models
-      if (!this.app) console.warn("PCWeaponBuilder: PlayCanvas app not found. You'll need to provide it via opts.app or window.playcanvasApp.");
-    }
+class PCWeaponBuilder {
+  /**
+   * @param {object} opts { app: pc.Application (optional), viewModel: pc.Entity (optional) }
+   */
+  constructor(opts = {}) {
+    this.app = opts.app || (window.playcanvasApp || (typeof pc !== 'undefined' && pc.Application && pc.Application.getApplication && pc.Application.getApplication()));
+    this.viewModel = opts.viewModel || null;
+    if (!this.app) console.warn("PCWeaponBuilder: PlayCanvas app not found. Provide opts.app or ensure window.playcanvasApp exists.");
+  }
 
-    // utility: load a glb container and instantiate a root entity
-    _loadGlb = (url) => {
-      const app = this.app;
-      return new Promise((res, rej) => {
-        if (!app) return rej(new Error("PlayCanvas app not available"));
-        app.assets.loadFromUrl(url, "container", (err, asset) => {
-          if (err) return rej(err);
-          // instantiate render entity group
-          const container = asset.resource; // pc.ContainerResource
-          const inst = container.instantiateRenderEntity();
-          // The instantiated container returns a top-level entity (group). We return that.
-          res(inst);
-        });
+  // load a glb container and instantiate a pc.Entity root
+  _loadGlb(url) {
+    const app = this.app;
+    return new Promise((res, rej) => {
+      if (!app) return rej(new Error("PlayCanvas app not available"));
+      app.assets.loadFromUrl(url, "container", (err, asset) => {
+        if (err) return rej(err);
+        // instantiate a render entity root
+        let inst = null;
+        try {
+          const container = asset.resource;
+          if (container.instantiateRenderEntity) inst = container.instantiateRenderEntity();
+          else if (container.instantiateModelEntity) inst = container.instantiateModelEntity();
+          else if (container.instantiate) inst = container.instantiate();
+        } catch (e) {
+          console.warn("_loadGlb instantiate error", e);
+        }
+        if (!inst) return rej(new Error("instantiate returned null"));
+        // detach if accidentally attached
+        try { if (inst.parent) inst.parent.removeChild(inst); } catch {}
+        res(inst);
       });
-    }
+    });
+  }
 
-    // heuristic: compute combined AABB for a model entity (works with container-instantiated entity)
-    _computeCombinedAabb = (rootEntity) => {
-      // Walk children and gather meshInstances aabb if present
-      const INF = Number.POSITIVE_INFINITY;
-      const min = new pc.Vec3(INF, INF, INF);
-      const max = new pc.Vec3(-INF, -INF, -INF);
-      let found = false;
+  // compute rough combined AABB of an instantiated pc.Entity (returns {min, max, center} or null)
+  _computeCombinedAabb(rootEntity) {
+    if (!rootEntity) return null;
+    const INF = Number.POSITIVE_INFINITY;
+    const min = new pc.Vec3(INF, INF, INF);
+    const max = new pc.Vec3(-INF, -INF, -INF);
+    let found = false;
 
-      // recursive traverse
-      const walk = (ent) => {
-        if (!ent) return;
-        // model component -> model -> meshInstances
-        if (ent.model && ent.model.model && ent.model.model.meshInstances) {
-          const mis = ent.model.model.meshInstances;
-          for (let mi of mis) {
-            if (mi.aabb) {
-              // aabb is in node-local space; we approximate by using mi.node.getWorldTransform
-              const aabbMin = mi.aabb.getMin();
-              const aabbMax = mi.aabb.getMax();
-              // transform corners by world transform of the node to get world-space approx
-              const node = mi.node || ent;
-              const wt = node.getWorldTransform(); // pc.Mat4
-              const corners = [
-                new pc.Vec3(aabbMin.x, aabbMin.y, aabbMin.z),
-                new pc.Vec3(aabbMax.x, aabbMin.y, aabbMin.z),
-                new pc.Vec3(aabbMin.x, aabbMax.y, aabbMin.z),
-                new pc.Vec3(aabbMin.x, aabbMin.y, aabbMax.z),
-                new pc.Vec3(aabbMax.x, aabbMax.y, aabbMin.z),
-                new pc.Vec3(aabbMax.x, aabbMin.y, aabbMax.z),
-                new pc.Vec3(aabbMin.x, aabbMax.y, aabbMax.z),
-                new pc.Vec3(aabbMax.x, aabbMax.y, aabbMax.z),
-              ];
-              for (let c of corners) {
-                const wc = wt.transformPoint(c);
-                min.x = Math.min(min.x, wc.x);
-                min.y = Math.min(min.y, wc.y);
-                min.z = Math.min(min.z, wc.z);
-                max.x = Math.max(max.x, wc.x);
-                max.y = Math.max(max.y, wc.y);
-                max.z = Math.max(max.z, wc.z);
-                found = true;
-              }
+    const visit = (ent) => {
+      if (!ent) return;
+      // if model -> meshInstances
+      if (ent.model && ent.model.model && ent.model.model.meshInstances) {
+        for (let mi of ent.model.model.meshInstances) {
+          if (mi.aabb) {
+            const aMin = mi.aabb.getMin();
+            const aMax = mi.aabb.getMax();
+            // transform both corners to world
+            const node = mi.node || ent;
+            const wt = node.getWorldTransform();
+            const corners = [
+              new pc.Vec3(aMin.x, aMin.y, aMin.z),
+              new pc.Vec3(aMax.x, aMin.y, aMin.z),
+              new pc.Vec3(aMin.x, aMax.y, aMin.z),
+              new pc.Vec3(aMin.x, aMin.y, aMax.z),
+              new pc.Vec3(aMax.x, aMax.y, aMin.z),
+              new pc.Vec3(aMax.x, aMin.y, aMax.z),
+              new pc.Vec3(aMin.x, aMax.y, aMax.z),
+              new pc.Vec3(aMax.x, aMax.y, aMax.z),
+            ];
+            for (let c of corners) {
+              const wc = wt.transformPoint(c);
+              min.x = Math.min(min.x, wc.x);
+              min.y = Math.min(min.y, wc.y);
+              min.z = Math.min(min.z, wc.z);
+              max.x = Math.max(max.x, wc.x);
+              max.y = Math.max(max.y, wc.y);
+              max.z = Math.max(max.z, wc.z);
+              found = true;
             }
           }
         }
-        // children
-        const children = ent.children ? ent.children.slice() : [];
-        for (let ch of children) walk(ch);
-      };
+      }
+      const children = ent.children ? ent.children.slice() : [];
+      for (let ch of children) visit(ch);
+    };
 
-      walk(rootEntity);
+    visit(rootEntity);
 
-      if (!found) return null;
-      return { min, max, center: new pc.Vec3((min.x + max.x) / 2, (min.y + max.y) / 2, (min.z + max.z) / 2) };
-    }
+    if (!found) return null;
+    return { min, max, center: new pc.Vec3((min.x + max.x)/2, (min.y + max.y)/2, (min.z + max.z)/2) };
+  }
 
-    // generic loader pattern used by specific weapon builders
-    _buildGeneric(url, opts = {}) {
-      let progCb = () => {};
-      const promise = this._loadGlb(url).then((entity) => {
-        // `entity` is group root
-        const weaponRoot = new pc.Entity("weaponModel");
-        weaponRoot.addChild(entity);
+  // generic builder that returns a weaponRoot entity and detected parts.
+  _buildGeneric(url, opts = {}) {
+    let prog = () => {};
+    const promise = this._loadGlb(url).then((inst) => {
+      // inst is the instantiated container root (pc.Entity)
+      // create a wrapper root so we can set unified transforms per-weapon
+      const weaponRoot = new pc.Entity("weaponRoot");
+      weaponRoot.enabled = true;
 
-        // optional parent
-        if (this.viewModel) this.viewModel.addChild(weaponRoot);
-        else if (this.app && this.app.root) this.app.root.addChild(weaponRoot);
+      // parent the instanced container under weaponRoot
+      weaponRoot.addChild(inst);
 
-        // compute bounding box and center the model so rotation origin is sensible
-        const aabb = this._computeCombinedAabb(entity);
-        if (aabb && entity.translate) {
-          // shift entity so center is at origin (local transform)
-          const center = aabb.center;
-          // compute world->local offset: transform world center into rootEntity local space
-          const inv = new pc.Mat4();
-          entity.getLocalTransform().invert(inv); // may fail for some nodes but attempt
-          const localCenter = inv.transformPoint(center);
-          entity.translate(-localCenter.x, -localCenter.y, -localCenter.z);
+      // attach to viewModel (so it inherits camera transforms)
+      if (this.viewModel && typeof this.viewModel.addChild === 'function') {
+        this.viewModel.addChild(weaponRoot);
+      } else if (this.app && this.app.root) {
+        this.app.root.addChild(weaponRoot);
+      }
+
+      // compute AABB and center the model (shift inst so its center is origin)
+      const aabb = this._computeCombinedAabb(inst);
+      if (aabb && inst.translate) {
+        // Convert world center to inst local coordinates by using world->local transform
+        try {
+          // get world transform of inst, invert it to get world->local
+          const wt = inst.getWorldTransform();
+          const inv = wt.clone().invert();
+          const localCenter = inv.transformPoint(aabb.center);
+          inst.translate(-localCenter.x, -localCenter.y, -localCenter.z);
+        } catch (e) {
+          // if anything fails we ignore centering (not critical)
         }
+      }
 
-        // attempt to create a muzzle point using AABB max
-        const parts = {};
-        const aabb2 = this._computeCombinedAabb(entity);
+      // create basic parts map and attempt to find named nodes
+      const parts = {};
+      const searchParts = (ent) => {
+        if (!ent) return;
+        const n = (ent.name || "").toLowerCase();
+        if (n) {
+          if (!parts.blade && (n.includes("ater") || n.includes("blade"))) parts.blade = ent;
+          if (!parts.handle && (n.includes("ahva") || n.includes("handle") || n.includes("grip"))) parts.handle = ent;
+          if (!parts.ring && (n.includes("sormensi") || n.includes("ring") || n.includes("guard"))) parts.ring = ent;
+          if (!parts.muzzle && n === "muzzle") parts.muzzle = ent;
+        }
+        if (ent.children) for (let ch of ent.children) searchParts(ch);
+      };
+      searchParts(inst);
+
+      // create a muzzle if none found: try to place at AABB max
+      if (!parts.muzzle) {
         const muzzle = new pc.Entity("Muzzle");
-        muzzle.setLocalPosition(0, 0, 0);
+        muzzle.setLocalPosition(0,0,0);
         weaponRoot.addChild(muzzle);
         parts.muzzle = muzzle;
-
+        const aabb2 = this._computeCombinedAabb(inst);
         if (aabb2) {
-          // put muzzle at the max corner in world space, then convert to weaponRoot local
-          const worldMax = aabb2.max;
-          // convert worldMax into weaponRoot local space
-          const invRoot = weaponRoot.getWorldTransform().invert();
-          const local = invRoot.transformPoint(worldMax);
-          muzzle.setLocalPosition(local.x, local.y, local.z);
+          // world->weaponRoot local
+          try {
+            const invRoot = weaponRoot.getWorldTransform().clone().invert();
+            const local = invRoot.transformPoint(aabb2.max);
+            muzzle.setLocalPosition(local.x, local.y, local.z);
+          } catch (e) {
+            muzzle.setLocalPosition(0, 0.5, 0);
+          }
         } else {
-          // default small offset forward (user will adjust)
           muzzle.setLocalPosition(0, 0.5, 0);
         }
+      }
 
-        // find named parts heuristically (blade, handle, etc.)
-        const names = { blade: ["ater", "blade", "blade"], handle: ["ahva", "handle", "grip"], ring: ["sormensi", "ring", "guard"] };
-        const search = (ent) => {
-          if (!ent) return;
-          const n = (ent.name || "").toLowerCase();
-          if (n) {
-            if (!parts.blade && (n.includes("ater") || n.includes("blade") || n.includes("blade"))) parts.blade = ent;
-            if (!parts.handle && (n.includes("ahva") || n.includes("handle") || n.includes("grip"))) parts.handle = ent;
-            if (!parts.ring && (n.includes("sormensi") || n.includes("ring") || n.includes("guard"))) parts.ring = ent;
-          }
-          if (ent.children) for (let ch of ent.children) search(ch);
-        };
-        search(entity);
+      // reasonable defaults
+      weaponRoot.setLocalScale(1,1,1);
+      weaponRoot.setLocalEulerAngles(0,0,0);
+      weaponRoot.setLocalPosition(0,0,0);
 
-        // make small performance/visibility defaults
-        weaponRoot.enabled = true;
+      return { weaponRoot, parts };
+    });
 
-        return { weaponRoot, parts };
-      });
-
-      return {
-        promise,
-        register: (cb) => { progCb = cb; } // placeholder for parity with your original API
-      };
-    }
-
-    // Concrete builders matching original names (URLs copied from your snippet)
-    buildKnife(onProgressRegistrar) {
-      const url = 'https://raw.githubusercontent.com/thearthd/3d-models/main/Weapon/voidffa_knife_V6.glb';
-      return this._buildGeneric(url);
-    }
-    buildDeagle(onProgressRegistrar) {
-      const url = 'https://raw.githubusercontent.com/thearthd/3d-models/main/Weapon/voidffa_deagle.glb';
-      return this._buildGeneric(url);
-    }
-    buildLegion(onProgressRegistrar) {
-      const url = 'https://raw.githubusercontent.com/thearthd/3d-models/main/Legion1212.glb';
-      return this._buildGeneric(url);
-    }
-    buildAK47(onProgressRegistrar) {
-      const url = 'https://raw.githubusercontent.com/thearthd/3d-models/main/Weapon/voidffa_AK47_V2.glb';
-      return this._buildGeneric(url);
-    }
-    buildViper(onProgressRegistrar) {
-      const url = 'https://raw.githubusercontent.com/thearthd/3d-models/main/Viper.glb';
-      return this._buildGeneric(url);
-    }
-    buildMarshal(onProgressRegistrar) {
-      const url = 'https://raw.githubusercontent.com/thearthd/3d-models/main/svd_sniper_rfile.glb';
-      return this._buildGeneric(url);
-    }
-    buildM79(onProgressRegistrar) {
-      const url = 'https://raw.githubusercontent.com/thearthd/3d-models/main/M-79.glb';
-      return this._buildGeneric(url);
-    }
+    return {
+      promise,
+      register: cb => (prog = cb)
+    };
   }
+
+  // Concrete builders
+  buildKnife(onProgressRegistrar) {
+    const url = 'https://raw.githubusercontent.com/thearthd/3d-models/main/Weapon/voidffa_knife_V6.glb';
+    return this._buildGeneric(url);
+  }
+  buildDeagle(onProgressRegistrar) {
+    const url = 'https://raw.githubusercontent.com/thearthd/3d-models/main/Weapon/voidffa_deagle.glb';
+    return this._buildGeneric(url);
+  }
+  buildLegion(onProgressRegistrar) {
+    const url = 'https://raw.githubusercontent.com/thearthd/3d-models/main/Legion1212.glb';
+    return this._buildGeneric(url);
+  }
+  buildAK47(onProgressRegistrar) {
+    const url = 'https://raw.githubusercontent.com/thearthd/3d-models/main/Weapon/voidffa_AK47_V2.glb';
+    return this._buildGeneric(url);
+  }
+  buildViper(onProgressRegistrar) {
+    const url = 'https://raw.githubusercontent.com/thearthd/3d-models/main/Viper.glb';
+    return this._buildGeneric(url);
+  }
+  buildMarshal(onProgressRegistrar) {
+    const url = 'https://raw.githubusercontent.com/thearthd/3d-models/main/svd_sniper_rfile.glb';
+    return this._buildGeneric(url);
+  }
+  buildM79(onProgressRegistrar) {
+    const url = 'https://raw.githubusercontent.com/thearthd/3d-models/main/M-79.glb';
+    return this._buildGeneric(url);
+  }
+}
 
   // Expose to global
   global.PCWeaponBuilder = PCWeaponBuilder;
