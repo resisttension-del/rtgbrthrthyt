@@ -2505,6 +2505,9 @@ export function playcanvasFrameUpdate(delta, timestamp) {
 // Backwards-compatible animate export: if other code still calls animate(timestamp),
 // we'll forward to PlayCanvas update once and no-op otherwise (PlayCanvas drives updates).
 export function animate(timestamp) {
+
+    if (window.playcanvasApp) return;
+
   // keep API compatibility: if a PlayCanvas app exists, do nothing because the app runs update().
   if (pcApp) return;
   // otherwise fall back to your original requestAnimationFrame-based loop (kept minimal)
@@ -3098,6 +3101,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
