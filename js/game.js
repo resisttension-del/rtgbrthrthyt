@@ -2270,25 +2270,12 @@ function round2(n) {
 
 export function playcanvasFrameUpdate(delta, timestamp) {
   // delta in seconds
-  // --- Disconnection/Pause Logic ---
   if (localPlayerId == null || window.isGamePaused) return;
 
   try {
-    // Pre-animation checks
-    if (!physicsController || !weaponController) {
-      console.warn("Skipping frame: controllers not yet initialized");
-      postFrameCleanup();
-      return;
-    }
-    if (!window.mapReady) {
-      postFrameCleanup();
-      return;
-    }
-    if (!window.localPlayer) {
-      console.warn("Skipping frame: window.localPlayer is not initialized.");
-      postFrameCleanup();
-      return;
-    }
+    if (!physicsController || !weaponController) { postFrameCleanup(); return; }
+    if (!window.mapReady) { postFrameCleanup(); return; }
+    if (!window.localPlayer) { postFrameCleanup(); return; }
 
     // Death screen handling
     if (window.localPlayer.isDead) {
@@ -3114,6 +3101,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
