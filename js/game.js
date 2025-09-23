@@ -1320,191 +1320,150 @@ import { FontLoader } from 'three/examples/jsm/loaders/FontLoader.js'; // Correc
 import { TextGeometry } from 'three/examples/jsm/geometries/TextGeometry.js';
 
 export function addRemotePlayer(data) {
-// Check if the player is ALREADY FULLY CREATED and in the scene.
-// If the group is NOT in the scene, even if it's in remotePlayers, something went wrong,
-// so we should try to re-create it.
-const existingPlayerEntry = window.remotePlayers[data.id];
-if (existingPlayerEntry && window.scene.getObjectById(existingPlayerEntry.group.id)) {
-// Player exists in map AND their group is in the scene. All good.
-console.warn(`Attempted to add remote player ${data.id} but their mesh already exists in scene. Skipping creation.`);
-return;
-}
+    if (!data || data.id == null) return;
+    window.remotePlayers = window.remotePlayers || {};
 
-// If an incomplete entry exists, remove it before re-creating
-if (existingPlayerEntry) {
-console.warn(`Incomplete remote player entry for ${data.id} found. Removing and recreating.`);
-// Clean up any partial Three.js objects if they were added
-if (existingPlayerEntry.group && existingPlayerEntry.group.parent) {
-existingPlayerEntry.group.parent.remove(existingPlayerEntry.group);
-existingPlayerEntry.group.traverse(obj => {
-if (obj.geometry) obj.geometry.dispose();
-if (obj.material) {
-if (Array.isArray(obj.material)) {
-obj.material.forEach(m => m.dispose());
-} else {
-obj.material.dispose();
-}
-}
-});
-}
-delete window.remotePlayers[data.id]; // Remove the stale entry
-}
+    // If player already exists and is in scene, skip
+    const existing = window.remotePlayers[data.id];
+    if (existing && existing.rootEnt && existing.rootEnt._parent) {
+        console.warn(`Attempted to add remote player ${data.id} but their entity already exists in scene. Skipping.`);
+        return;
+    }
+    // If incomplete entry exists, remove it
+    if (existing) {
+        try {
+            if (existing.rootEnt) existing.rootEnt.destroy();
+        } catch (e) {}
+        delete window.remotePlayers[data.id];
+    }
 
+    if (!window.scene) {
+        console.error("Critical Error: window.scene is not initialized when attempting to add remote player mesh.");
+        return;
+    }
 
-// Ensure window.scene is available
-if (!window.scene) {
-console.error("Critical Error: window.scene is not initialized when attempting to add remote player mesh.");
-return;
-}
+    const pcApp = window.playcanvasApp;
+    if (!pcApp) {
+        console.error("PlayCanvas app not available to create remote player.");
+        return;
+    }
 
-// 1) Determine the player’s original color
-const initialColor = (typeof data.trueColor === 'number')
-? data.trueColor
-: (typeof data.bodyColor === 'number' ? data.bodyColor : 0xffffff);
+    // initialColor fallback
+    const initialColor = (typeof data.trueColor === 'number') ? data.trueColor
+        : (typeof data.bodyColor === 'number' ? data.bodyColor : 0xffffff);
 
-console.log(
-`Remote player ${data.id} originalColor → 0x${initialColor
-           .toString(16)
-           .padStart(6, '0')} `);
+    console.log(`Remote player ${data.id} initialColor -> 0x${initialColor.toString(16).padStart(6, '0')}`);
 
-// 2) Build the THREE.Group for this player
-const group = new THREE.Group();
-group.name = `remotePlayer_${data.id}`; // Set the name here for future getObjectByName calls
-group.userData.playerId = data.id; // Store ID on the group
+    // Root entity
+    const root = new pc.Entity(`remotePlayer_${data.id}`);
+    root.setLocalPosition(data.x || 0, data.y || 0, data.z || 0);
+    root.setLocalEulerAngles(0, (data.rotY || 0) * (180/Math.PI), 0);
+    root.enabled = true;
 
-// ─── Body ──────────────────────────────────────────────────────────────────────
-const bodyWidth = 0.6;   // ~2 * capsule radius (0.3)
-const bodyHeight = 1.9;  // approx. capsule total height (1.3 + 2*0.3)
-const bodyDepth = 0.6;
+    // Body - box
+    const body = new pc.Entity(`rp_body_${data.id}`);
+    body.addComponent('model', { type: 'box' });
+    body.setLocalScale(0.6, 1.9, 0.6);
+    body.setLocalPosition(0, -1.1, 0); // relative offset
+    // apply material color
+    try {
+        const mat = new pc.StandardMaterial();
+        mat.diffuse = new pc.Color(
+            ((initialColor >> 16) & 0xff) / 255,
+            ((initialColor >> 8) & 0xff) / 255,
+            (initialColor & 0xff) / 255
+        );
+        mat.update();
+        body.model.material = mat;
+    } catch (e) { /* ignore */ }
 
-const bodyGeom = new THREE.BoxGeometry(bodyWidth, bodyHeight, bodyDepth);
-const bodyMat = new THREE.MeshStandardMaterial({ color: initialColor });
-const bodyMesh = new THREE.Mesh(bodyGeom, bodyMat);
-bodyMesh.castShadow = true;
-bodyMesh.position.set(0, 0.0 - 1.1, 0); // Position relative to group center
-bodyMesh.userData.isPlayerBodyPart = true;
-bodyMesh.userData.playerId = data.id;
+    // Head - smaller box
+    const head = new pc.Entity(`rp_head_${data.id}`);
+    head.addComponent('model', { type: 'box' });
+    head.setLocalScale(0.3, 0.3, 0.3);
+    head.setLocalPosition(0, 0, 0);
+    // head color (yellowish)
+    try {
+        const m2 = new pc.StandardMaterial();
+        m2.diffuse = new pc.Color(1.0, 1.0, 0.66);
+        m2.update();
+        head.model.material = m2;
+    } catch (e) {}
 
-// ensure index exists (some custom routines expect it)
-if (!bodyMesh.geometry.index) {
-  bodyMesh.geometry.setIndex(
-    generateSequentialIndices(bodyMesh.geometry.attributes.position.count)
-  );
-}
-bodyMesh.geometry.computeBoundsTree();
+    // Weapon root & mesh (simple plane box as placeholder)
+    const weaponRoot = new pc.Entity(`rp_weaponRoot_${data.id}`);
+    weaponRoot.setLocalPosition(0.3, -1.0, -0.2);
+    const weaponMesh = new pc.Entity(`rp_weapon_${data.id}`);
+    weaponMesh.addComponent('model', { type: 'box' });
+    weaponMesh.setLocalScale(0.05, 0.5, 0.02);
+    weaponMesh.setLocalPosition(0, 0, 0);
+    // default dark material
+    try {
+        const m3 = new pc.StandardMaterial();
+        m3.diffuse = new pc.Color(0.1, 0.1, 0.1);
+        m3.update();
+        weaponMesh.model.material = m3;
+    } catch (e) {}
 
-group.add(bodyMesh);
+    weaponRoot.addChild(weaponMesh);
 
-// ─── Head (box) ───────────────────────────────────────────────────────────────
-const headSize = 0.3; // ~diameter of original sphere (radius 0.15)
-const headGeom = new THREE.BoxGeometry(headSize, headSize, headSize);
-const headMat = new THREE.MeshStandardMaterial({ color: 0xffffaa });
-const headMesh = new THREE.Mesh(headGeom, headMat);
-headMesh.castShadow = true;
-headMesh.position.set(0, 1.1 - 1.1, 0); // same relative offset as before
-headMesh.userData.isPlayerBodyPart = true;
-headMesh.userData.playerId = data.id;
-headMesh.userData.isPlayerHead = true;
+    // Health bar placeholder (2D plane above head)
+    let healthBarObj = null;
+    try {
+        const hb = new pc.Entity(`rp_health_${data.id}`);
+        hb.addComponent('render', { enabled: true }); // fallback, but we will attach a plane model
+        hb.addComponent('element', {
+            type: pc.ELEMENTTYPE_IMAGE,
+            anchor: [0.5, 0.5, 0.5, 0.5],
+            pivot: [0.5, 0.5],
+            width: 60,
+            height: 6
+        });
+        // If element/element is not desired in worldspace, skip adding to root (left as placeholder)
+        hb.setLocalPosition(0, 0.5, -0.4);
+        hb.setLocalScale(0.25, 0.75, 1);
+        healthBarObj = {
+            group: hb,
+            update: function(health = 100, shield = 0) {
+                // placeholder simple update (no texture) - user should replace with proper UI
+                // keep as no-op for now
+            }
+        };
+    } catch (e) {
+        healthBarObj = {
+            group: null,
+            update: function() {}
+        };
+    }
 
-      if (!headMesh.geometry.index) {
-    headMesh.geometry.setIndex(
-      generateSequentialIndices(headMesh.geometry.attributes.position.count)
-    );
-  }
-  headMesh.geometry.computeBoundsTree();
+    // Assemble the hierarchy
+    root.addChild(body);
+    root.addChild(head);
+    root.addChild(weaponRoot);
+    if (healthBarObj && healthBarObj.group) root.addChild(healthBarObj.group);
 
-  group.add(headMesh);
+    // add entities to scene
+    window.scene.addChild(root);
 
-// ─── Health Bar ───────────────────────────────────────────────────────────────
-// Ensure createHealthBar exists and returns expected object structure
-let healthBarObj;
-try {
-healthBarObj = createHealthBar();
-healthBarObj.group.position.set(0, 0.5 - 1.1, -0.4); // Position relative to group
-healthBarObj.group.scale.set(0.25, 0.75, 1);
-// group.add(healthBarObj.group);
-} catch (e) {
-console.error(`Error creating health bar for player ${data.id}:`, e);
-// Decide how to handle: skip health bar, or abort player creation?
-// For now, let's assume it's non-critical for basic player visibility.
-}
+    // store in map
+    window.remotePlayers[data.id] = {
+        id: data.id,
+        rootEnt: root,
+        bodyEnt: body,
+        headEnt: head,
+        weaponRoot,
+        weaponEnt: weaponMesh,
+        healthBarObj,
+        data: { ...data },
+        currentWeapon: data.weapon || null,
+        swingAnim: { active: false, timerId: null, startTime: 0, duration: 0 },
+        trueColor: initialColor,
+        originalColor: initialColor
+    };
 
-
-// ─── Name Label ───────────────────────────────────────────────────────────────
-let nameMesh;
-try {
-// You'll need to load a font first. This is an example, replace with your font path.
-// Common Three.js fonts are in node_modules/three/examples/fonts/
-const fontLoader = new FontLoader();
-fontLoader.load('https://unpkg.com/three@0.165.0/examples/fonts/helvetiker_regular.typeface.json', function(font) {
-const textGeometry = new TextGeometry(data.username, {
-font: font,
-size: 0.1, // Adjust size as needed
-height: 0.05, // Depth of the 3D text
-curveSegments: 12,
-bevelEnabled: true,
-bevelThickness: 0.01,
-bevelSize: 0.005,
-bevelOffset: 0,
-bevelSegments: 5
-});
-textGeometry.center(); // Center the text geometry
-const textMaterial = new THREE.MeshStandardMaterial({
-color: 0xffffff
-}); // White text
-nameMesh = new THREE.Mesh(textGeometry, textMaterial);
-nameMesh.position.set(0, 0.3 - 1.1, -0.4); // Position above the head
-nameMesh.rotation.set(
-THREE.MathUtils.degToRad(0),
-THREE.MathUtils.degToRad(180),
-0
-);
-nameMesh.userData.isPlayerName = true;
-// group.add(nameMesh);
-}, undefined, function(err) {
-console.error('An error happened loading the font:', err);
-});
-
-} catch (e) {
-console.error(`Error creating name label for player ${data.id}:`, e);
-}
-
-
-// ─── Weapon Root ──────────────────────────────────────────────────────────────
-const weaponRoot = new THREE.Group();
-weaponRoot.name = 'remoteWeaponRoot'; // Name for easy access
-group.add(weaponRoot);
-
-// 3) Position & visibility of the main group
-group.position.set(data.x, data.y, data.z); // Set absolute world position
-group.rotation.y = data.rotY;
-group.visible = !data.isDead; // Set initial visibility
-
-// 4) Add to scene FIRST, then add to remotePlayers map
-window.scene.add(group); // Add the entire player group to the global scene
-
-// Now, create the entry in the map, *after* adding to the scene
-window.remotePlayers[data.id] = {
-id: data.id,
-group, // The main Three.js group for this player
-bodyMesh,
-headMesh,
-healthBarObj, // Object containing the health bar group and update function
-nameMesh,
-weaponRoot,
-data: { ...data }, // Store a copy of the player data
-currentWeapon: null, // Will be updated by attachWeaponToPlayer
-trueColor: initialColor,
-originalColor: initialColor
-};
-
-console.log(`Successfully added remote player mesh for: ${data.username} (ID: ${data.id})`);
-
-// 5) Attach their weapon model after the player group exists
-// Call this AFTER the player object is properly stored in window.remotePlayers
-// to ensure attachWeaponToPlayer can find the weaponRoot.
-// Ensure attachWeaponToPlayer handles cases where the player object might be incomplete if it's called too early
-attachWeaponToPlayer(data.id, data.weapon);
+    // Attach weapon model if you have a loader (skipped here — weapon is placeholder box)
+    console.log(`Successfully added remote player: ${data.username || data.id} (ID: ${data.id})`);
+    return window.remotePlayers[data.id];
 }
 
 
@@ -1513,12 +1472,32 @@ attachWeaponToPlayer(data.id, data.weapon);
 
 // ─── bullet-proof removeRemotePlayer ─────────────────────────────────────────
 export function removeRemotePlayer(id) {
-const rp = window.remotePlayers[id];
+    if (!window.remotePlayers) return;
+    const rp = window.remotePlayers[id];
 
-// Remove model if still in scene
-if (rp && rp.group && rp.group.parent) {
-scene.remove(rp.group);
-console.log(`[removeRemotePlayer] Removed model for player ${id}`);
+    try {
+        if (rp && rp.rootEnt && rp.rootEnt._parent) {
+            rp.rootEnt.destroy();
+            console.log(`[removeRemotePlayer] Removed model for player ${id}`);
+        }
+    } catch (e) {
+        console.warn("Error while destroying remote player rootEnt:", e);
+    }
+
+    // Clear any pending hide-timeouts
+    try {
+        if (window.playerVisibilityTimeouts && window.playerVisibilityTimeouts[id]) {
+            clearTimeout(window.playerVisibilityTimeouts[id]);
+            delete window.playerVisibilityTimeouts[id];
+        }
+    } catch (e) {}
+
+    // Delete the map entry
+    try {
+        delete window.remotePlayers[id];
+    } catch (e) {}
+
+    // console.log(`[removeRemotePlayer] Purged remotePlayers[${id}]`);
 }
 
 // Clear any pending hide‐timeouts
@@ -1532,204 +1511,155 @@ delete window.remotePlayers[id];
 }
 
 export function updateRemotePlayer(data) {
-    // console.log('[updateRemotePlayer] called for id=', data.id);
-    if (data.id == null) return;
-
-    const rp = window.remotePlayers[data.id];
-    if (!rp || typeof rp !== 'object') {
-        removeRemotePlayer(data.id);
-        return;
-    }
-    if (!data.username) {
-        console.warn(`[${data.id}] missing username, removing`);
-        removeRemotePlayer(data.id);
+    if (!data || data.id == null) return;
+    const rp = (window.remotePlayers || {})[data.id];
+    if (!rp) {
+        // if we don't have it, attempt to add as a fresh player
+        addRemotePlayer(data);
         return;
     }
 
-    // Store latest data
     rp.data = data;
 
-    // --- Apply transform only when alive ---
+    // Alive vs dead handling (we'll just set falling flag and position)
     if (!data.isDead) {
-        rp.group.userData.isFalling = false;
-        rp.group.userData.velocityY = 0;
-        if (!rp.group.parent) scene.add(rp.group);
-        rp.group.visible = true;
-        rp.group.position.set(data.x, data.y, data.z);
-        rp.group.rotation.y = data.rotY;
-
-        if (rp.headMesh) {
-            rp.headMesh.rotation.x = data.rotX;
-            rp.headMesh.rotation.z = data.rotZ;
+        rp.rootEnt.enabled = true;
+        rp.rootEnt.setLocalPosition(data.x || 0, data.y || 0, data.z || 0);
+        rp.rootEnt.setLocalEulerAngles(0, (data.rotY || 0) * (180/Math.PI), 0);
+        if (rp.headEnt) {
+            rp.headEnt.setLocalEulerAngles((data.rotX || 0) * (180/Math.PI), 0, (data.rotZ || 0) * (180/Math.PI));
         }
         if (rp.weaponRoot) {
-            rp.weaponRoot.rotation.x = data.rotX;
+            rp.weaponRoot.setLocalEulerAngles((data.rotX || 0) * (180/Math.PI), 0, 0);
         }
     } else {
-        if (!rp.group.userData.isFalling) {
-            rp.group.userData.isFalling = true;
-            rp.group.userData.velocityY = 0;
-        }
-        rp.group.visible = true;
-        rp.group.rotation.y = data.rotY;
-
-        if (rp.headMesh) {
-            rp.headMesh.rotation.x = data.rotX;
-            rp.headMesh.rotation.z = data.rotZ;
-        }
-        if (rp.weaponRoot) {
-            rp.weaponRoot.rotation.x = data.rotX;
-        }
+        // death: start falling (we don't simulate physics here)
+        rp.rootEnt.enabled = true;
+        rp.rootEnt.setLocalEulerAngles(0, (data.rotY || 0) * (180/Math.PI), 0);
     }
 
-    // Health/shield UI
-    rp.healthBarObj.update(data.health, data.shield);
+    // update health UI
+    try {
+        if (rp.healthBarObj && typeof rp.healthBarObj.update === 'function') {
+            rp.healthBarObj.update(data.health, data.shield);
+        }
+    } catch (e) {}
 
-    // Body color flash
-    if (typeof data.bodyColor === 'number') {
-        const colorToUse = data.bodyColor === rp.originalColor ? rp.originalColor : data.bodyColor;
-        rp.bodyMesh.material.color.setHex(colorToUse);
-    }
+    // Body color flash / update
+    try {
+        if (typeof data.bodyColor === 'number' && rp.bodyEnt && rp.bodyEnt.model) {
+            const c = data.bodyColor;
+            const mat = new pc.StandardMaterial();
+            mat.diffuse = new pc.Color(((c>>16)&0xFF)/255, ((c>>8)&0xFF)/255, (c&0xFF)/255);
+            mat.update();
+            rp.bodyEnt.model.material = mat;
+        }
+    } catch (e) {}
 
-    // Weapon change → clear any in-flight swing timer and reset
+    // Weapon change
     if (data.weapon !== rp.currentWeapon) {
+        // reset any swing animation
         if (rp.swingAnim && rp.swingAnim.timerId != null) {
             clearTimeout(rp.swingAnim.timerId);
             rp.swingAnim.timerId = null;
         }
-        rp.swingAnim = { active: false, timerId: null };
-
-        attachWeaponToPlayer(data.id, data.weapon);
+        rp.swingAnim.active = false;
         rp.currentWeapon = data.weapon;
-        resetWeaponPose(data.weapon, rp.weaponMesh);
-        const mats = Array.isArray(rp.weaponMesh.material) ? rp.weaponMesh.material : [rp.weaponMesh.material];
-        mats.forEach(m => m?.emissive?.setHex(0x000000));
+        // In this conversion we keep the placeholder weapon box; you can replace weapon mesh by loading a model
     }
 
-    // Death → start falling (redundant guard)
-    if (data.isDead && !rp.group.userData.isFalling) {
-        rp.group.userData.isFalling = true;
-        rp.group.userData.velocityY = 0;
-    }
-
-    if (!rp.weaponMesh) {
-        console.warn(`[${data.id}] rp.weaponMesh is null or undefined`);
-        return;
-    }
-
-    if (!rp.swingAnim) {
-        rp.swingAnim = { active: false, timerId: null };
-    }
-
-    // === HANDLE KNIFE SWING REQUEST ===
-    // Consume the incoming flag into a local variable (do NOT mutate the incoming `data` object).
+    // Knife swing handling (simulate by rotating weaponEnt)
     const incomingKnifeSwing = !!data.knifeSwing;
     const incomingKnifeHeavy = !!data.knifeHeavy;
-
-    // Start a swing if requested and not already swinging, and if weapon is knife
     if (incomingKnifeSwing && !rp.swingAnim.active && rp.currentWeapon === 'knife') {
         rp.swingAnim.active = true;
-        // Prefer authoritative durations if we have rp.stats (which may be in seconds).
-        // Fall back to a default RPM-derived duration (500ms default).
-        let durationMs;
-        if (rp.stats && typeof rp.stats.swingTime === 'number') {
-            // rp.stats.swingTime likely expressed in seconds on the local model
-            durationMs = rp.stats.swingTime * 1000;
-        } else if (rp.stats && typeof rp.stats.heavySwingTime === 'number' && incomingKnifeHeavy) {
-            durationMs = rp.stats.heavySwingTime * 1000;
-        } else {
-            const rpm = 120; // default fallback
-            durationMs = Math.round(60000 / rpm); // ms per swing
-        }
+        // pick duration (ms)
+        let durationMs = 500;
+        if (rp.stats && typeof rp.stats.swingTime === 'number') durationMs = rp.stats.swingTime * 1000;
+        else if (incomingKnifeHeavy && rp.stats && typeof rp.stats.heavySwingTime === 'number') durationMs = rp.stats.heavySwingTime * 1000;
 
         rp.swingAnim.duration = durationMs;
         rp.swingAnim.startTime = performance.now();
         rp.swingAnim.heavy = incomingKnifeHeavy;
 
-        // Clear any previous timer
-        if (rp.swingAnim.timerId != null) {
-            clearTimeout(rp.swingAnim.timerId);
-            rp.swingAnim.timerId = null;
-        }
-
-        // Set a safety timer to ensure cleanup even if update calls are intermittent.
+        // safety timer
         rp.swingAnim.timerId = setTimeout(() => {
-            if (rp.currentWeapon === 'knife') {
-                resetWeaponPose(rp.currentWeapon, rp.weaponMesh);
-                const mats2 = Array.isArray(rp.weaponMesh.material) ? rp.weaponMesh.material : [rp.weaponMesh.material];
-                mats2.forEach(m => m?.emissive?.setHex(0x000000));
-            }
             rp.swingAnim.active = false;
             rp.swingAnim.timerId = null;
-            // console.log(`[${data.id}] 🗡️ knifeSwing ENDED via timer`);
+            // reset pose
+            if (rp.weaponEnt) rp.weaponEnt.setLocalEulerAngles(90, 180, 0);
         }, rp.swingAnim.duration);
 
-        // Optionally: immediate visual feedback (emissive) at start
-        const matsStart = Array.isArray(rp.weaponMesh.material) ? rp.weaponMesh.material : [rp.weaponMesh.material];
-        matsStart.forEach(m => { if (m?.emissive?.setHex) m.emissive.setHex(0xff0000); });
-
-        // console.log(`[${data.id}] 🗡️ knifeSwing START (heavy=${rp.swingAnim.heavy})`);
+        // immediate visual feedback: tint weapon material (if material exists)
+        try {
+            if (rp.weaponEnt && rp.weaponEnt.model && rp.weaponEnt.model.material) {
+                const mat = rp.weaponEnt.model.material;
+                if (mat.diffuse) mat.diffuse = new pc.Color(1, 0.2, 0.2);
+                mat.update();
+            }
+        } catch (e) {}
     }
 
-    // === Animate ongoing swing in a framerate-safe way ===
+    // animate ongoing swing
     if (rp.swingAnim.active && rp.currentWeapon === 'knife') {
         const now = performance.now();
         const elapsed = now - rp.swingAnim.startTime;
-        const t = Math.min(elapsed / rp.swingAnim.duration, 1);
+        const t = Math.min(1, elapsed / rp.swingAnim.duration);
         const maxF = rp.swingAnim.heavy ? 0.9 : 1.2;
-        const swingAng = maxF * Math.sin(Math.PI * t);
-        const { MathUtils } = THREE;
+        const swingAng = maxF * Math.sin(Math.PI * t); // 0..maxF
+        // convert to degrees for PC Euler
+        const tiltDeg = (90 - swingAng * 90); // rest at 90 deg, subtract swingAng*90
+        if (rp.weaponEnt) {
+            rp.weaponEnt.setLocalEulerAngles(tiltDeg, 180, 0);
+        }
 
-        // emissive pulse: compute an integer hex color and clamp
-        const progress = Math.max(0, Math.min(1, t));
-        const redVal = Math.min(255, Math.floor(255 * progress));
-        const hex = (redVal << 16);
-        const mats = Array.isArray(rp.weaponMesh.material) ? rp.weaponMesh.material : [rp.weaponMesh.material];
-        mats.forEach(mat => {
-            if (mat?.emissive?.setHex) {
-                mat.emissive.setHex(hex);
+        // emissive pulse replacement: tint material based on progress
+        try {
+            if (rp.weaponEnt && rp.weaponEnt.model && rp.weaponEnt.model.material) {
+                const v = Math.floor(255 * t) / 255;
+                const mat = rp.weaponEnt.model.material;
+                mat.diffuse = new pc.Color(1.0 * v, 0.2*(1 - t), 0.2*(1 - t));
+                mat.update();
             }
-        });
+        } catch (e) {}
 
-        // apply tilt (match local rest orientation closely)
-        const restX = MathUtils.degToRad(90);
-        const restY = MathUtils.degToRad(180);
-        const restZ = 0;
-        rp.weaponMesh.rotation.set(
-            restX - swingAng,
-            restY,
-            restZ
-        );
-
-        // If animation reached the end, do cleanup immediately (don't rely on timer alone)
         if (t >= 1) {
-            // clear timer if present
-            if (rp.swingAnim.timerId != null) {
-                clearTimeout(rp.swingAnim.timerId);
-                rp.swingAnim.timerId = null;
-            }
-            resetWeaponPose(rp.currentWeapon, rp.weaponMesh);
-            mats.forEach(m => m?.emissive?.setHex(0x000000));
+            if (rp.swingAnim.timerId != null) { clearTimeout(rp.swingAnim.timerId); rp.swingAnim.timerId = null; }
             rp.swingAnim.active = false;
+            if (rp.weaponEnt) rp.weaponEnt.setLocalEulerAngles(90, 180, 0);
+            // reset weapon tint
+            try {
+                if (rp.weaponEnt && rp.weaponEnt.model && rp.weaponEnt.model.material) {
+                    const mat = rp.weaponEnt.model.material;
+                    mat.diffuse = new pc.Color(0.1, 0.1, 0.1);
+                    mat.update();
+                }
+            } catch (e) {}
         }
     } else if (!rp.swingAnim.active && rp.currentWeapon === 'knife') {
-        // Ensure pose is reset when not swinging
-        resetWeaponPose(rp.currentWeapon, rp.weaponMesh);
-        const mats2 = Array.isArray(rp.weaponMesh.material) ? rp.weaponMesh.material : [rp.weaponMesh.material];
-        mats2.forEach(m => m?.emissive?.setHex(0x000000));
+        // ensure pose is reset
+        if (rp.weaponEnt) rp.weaponEnt.setLocalEulerAngles(90, 180, 0);
+        try {
+            if (rp.weaponEnt && rp.weaponEnt.model && rp.weaponEnt.model.material) {
+                const mat = rp.weaponEnt.model.material;
+                mat.diffuse = new pc.Color(0.1, 0.1, 0.1);
+                mat.update();
+            }
+        } catch (e) {}
     }
 }
 
 
-function cleanUpRemotePlayers() {
-for (const id in window.remotePlayers) {
-const rp = window.remotePlayers[id];
-// If it's not a proper object, just purge it
-if (!rp || typeof rp !== "object") {
-console.log(`[cleanUp] Found invalid entry for ${id}:`, rp);
-removeRemotePlayer(id);
-}
-}
+
+export function cleanUpRemotePlayers() {
+    window.remotePlayers = window.remotePlayers || {};
+    for (const id in window.remotePlayers) {
+        const rp = window.remotePlayers[id];
+        if (!rp || typeof rp !== "object" || !rp.rootEnt) {
+            console.log(`[cleanUp] Found invalid entry for ${id}:`, rp);
+            removeRemotePlayer(id);
+        }
+    }
 }
 
 // Run this on a schedule (or right after you process incoming deltas)
@@ -3167,6 +3097,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
