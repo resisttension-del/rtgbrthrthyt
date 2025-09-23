@@ -1904,42 +1904,151 @@ addDebugMuzzleDot(muzzleObject3D, dotSize = 0.5) {
 
 
 export async function preloadWeaponPrototypes(onComplete) {
-  const names = ['knife','deagle','ak47','marshal','m79','viper','legion',];
+  const names = ['knife','deagle','ak47','marshal','m79','viper','legion'];
   const dummyCam = new THREE.Group();
   const loaderUI = new Loader();
   const itemPercentages = names.map(() => 1 / names.length);
 
-  loaderUI.show('Loading...', itemPercentages);
+  // Ensure storage for prototypes
+  window._prototypeModels = window._prototypeModels || {};
+
+  loaderUI.show('Loading weapon prototypes...', itemPercentages);
   loaderUI.onComplete(() => {
     console.log('▶️ ALL weapon prototypes ready');
     onComplete?.();
   });
 
+  const pcApp = window.playcanvasApp;
+
+  // helper: export a THREE.Group -> ArrayBuffer (binary GLB)
+  function exportThreeGroupToGlbArrayBuffer(group) {
+    return new Promise((resolve, reject) => {
+      if (typeof THREE === 'undefined' || typeof THREE.GLTFExporter === 'undefined') {
+        return reject(new Error('THREE.GLTFExporter not available'));
+      }
+      const exporter = new THREE.GLTFExporter();
+      try {
+        exporter.parse(group, result => {
+          if (result instanceof ArrayBuffer) {
+            resolve(result);
+          } else {
+            // Normally we request binary; if we get JSON, tell user to enable binary exporter
+            reject(new Error('GLTFExporter returned non-binary result; ensure { binary: true } support.'));
+          }
+        }, { binary: true });
+      } catch (err) {
+        reject(err);
+      }
+    });
+  }
+
   for (let i = 0; i < names.length; i++) {
     const name = names[i];
     const wc = new WeaponController(dummyCam);
     const method = 'build' + (name === 'ak47' ? 'AK47' : name[0].toUpperCase() + name.slice(1));
-    console.log(`Preloading ${name}, weight ${itemPercentages[i] * 100}%`);
+    console.log(`Preloading ${name}, weight ${(itemPercentages[i] * 100).toFixed(2)}%`);
 
-    // get { promise, register } from buildX()
+    // builder returns { promise, register }
     const { promise, register } = wc[method]();
-    // track with live progress
-    await loaderUI.track(itemPercentages[i], promise, cb => register(cb));
-    // post-load housekeeping
-    const model = await promise;
-    dummyCam.remove(model);
-    model.visible = false;
-    _prototypeModels[name] = model;
-    console.log(`Loaded ${name}`);
-  }
+
+    // wrappedPromise covers: wait for THREE builder -> export to GLB -> load into PlayCanvas -> store prototype
+    const wrappedPromise = (async () => {
+      // 1) wait for the THREE model
+      const threeModel = await promise;
+
+      // remove from dummy parent (same as your original code)
+      try { if (threeModel.parent) threeModel.parent.remove(threeModel); } catch (e) {}
+      try { threeModel.visible = false; } catch (e) {}
+
+      // If PlayCanvas is not available, keep the THREE model as fallback prototype
+      if (!pcApp || !pcApp.assets || typeof pcApp.assets.loadFromUrl !== 'function') {
+        console.warn('PlayCanvas not available — storing THREE.Group prototype for', name);
+        window._prototypeModels[name] = threeModel;
+        return threeModel;
+      }
+
+      // 2) export THREE.Group -> ArrayBuffer (GLB)
+      let arrayBuffer;
+      try {
+        arrayBuffer = await exportThreeGroupToGlbArrayBuffer(threeModel);
+      } catch (err) {
+        console.warn(`Failed to export THREE model "${name}" to GLB:`, err);
+        // fallback: store threeModel and continue
+        window._prototypeModels[name] = threeModel;
+        return threeModel;
+      }
+
+      // 3) create blob URL and load into PlayCanvas as 'container'
+      const blob = new Blob([arrayBuffer], { type: 'model/gltf-binary' });
+      const blobUrl = URL.createObjectURL(blob);
+
+      return new Promise((resolve, reject) => {
+        try {
+          pcApp.assets.loadFromUrl(blobUrl, 'container', (err, asset) => {
+            // revoke blob URL ASAP (PlayCanvas has fetched the binary)
+            try { URL.revokeObjectURL(blobUrl); } catch (e) {}
+
+            if (err) {
+              console.warn(`PlayCanvas failed to load exported GLB for "${name}":`, err);
+              // fallback: store threeModel
+              window._prototypeModels[name] = threeModel;
+              return resolve(threeModel);
+            }
+
+            try {
+              // instantiate prototype entity (do not add to scene root)
+              let protoEnt = null;
+              if (asset.resource && typeof asset.resource.instantiateModelEntity === 'function') {
+                protoEnt = asset.resource.instantiateModelEntity();
+              } else if (asset.resource && typeof asset.resource.instantiateRenderEntity === 'function') {
+                protoEnt = asset.resource.instantiateRenderEntity();
+              } else if (asset.resource && typeof asset.resource.instantiate === 'function') {
+                protoEnt = asset.resource.instantiate();
+              }
+
+              if (!protoEnt) {
+                console.warn(`Loaded container for "${name}" has no instantiate helper. Storing THREE prototype instead.`);
+                window._prototypeModels[name] = threeModel;
+                return resolve(threeModel);
+              }
+
+              // detach from any parent and disable so it's a safe prototype
+              try { if (protoEnt._parent) protoEnt._parent.removeChild(protoEnt); } catch (e) {}
+              protoEnt.enabled = false;
+
+              // store PlayCanvas prototype entity
+              window._prototypeModels[name] = protoEnt;
+              console.log(`Preloaded PlayCanvas prototype for "${name}"`);
+              resolve(protoEnt);
+            } catch (e) {
+              console.warn('Error instantiating PlayCanvas prototype for', name, e);
+              window._prototypeModels[name] = threeModel;
+              resolve(threeModel);
+            }
+          });
+        } catch (e) {
+          try { URL.revokeObjectURL(blobUrl); } catch (e2) {}
+          console.warn('pcApp.assets.loadFromUrl threw', e);
+          window._prototypeModels[name] = threeModel;
+          resolve(threeModel);
+        }
+      });
+    })();
+
+    // Link the builder's progress reporter into loaderUI.track (keeps original progress UX)
+    try {
+      // loaderUI.track(weight, promiseOrThenable, registerProgressFn)
+      // we pass the wrappedPromise so progress encompasses export+pc load as well
+      await loaderUI.track(itemPercentages[i], wrappedPromise, (cb) => { try { register && register(cb); } catch (e) {} });
+    } catch (err) {
+      // ensure failures don't stop the rest
+      console.warn(`preloadWeaponPrototypes: loading "${name}" failed:`, err);
+    }
+  } // end for
+
+  // loaderUI.onComplete will trigger on its own (we registered earlier)
 }
 
-
-// Call once at startup:
-preloadWeaponPrototypes(() => {
-  console.log("✅ All prototypes including knife have been preloaded!");
-  // Now it's safe to start letting players swap weapons.
-});
 
 // factory to clone
 export function getWeaponModel(name) {
@@ -1957,92 +2066,234 @@ let debugLogElement;
 
 export const activeTracers = []; // <--- EXPORT THIS!
 
-export class AnimatedTracer extends THREE.Mesh {
-    constructor(origin, target, speed = 500) { // Increased default speed significantly
-        // --- NEW GEOMETRY: BoxGeometry for a long rectangle ---
-        // Parameters: width, height, depth (along Z-axis for alignment)
-        // Adjust these values to get the desired look.
-        // width and height are small for a thin line.
-        // depth is the length of the tracer.
-        const tracerLength = 20; // Length of the tracer visual
-        const tracerWidth = 0.05; // Thickness of the tracer
-        const tracerHeight = 0.05; // Thickness of the tracer
+// PlayCanvas equivalent of your THREE AnimatedTracer
+// Usage:
+//   const t = new PlayCanvasAnimatedTracer(originVec3Like, targetVec3Like, speed);
+// It will add itself to the PlayCanvas scene root (window.scene || window.playcanvasApp.root)
+// and register a global update handler to step all active tracers automatically.
+//
+// origin/target may be pc.Vec3, THREE.Vector3-like ({x,y,z}), or plain objects with numeric x,y,z.
 
-        const geometry = new THREE.BoxGeometry(tracerWidth, tracerHeight, tracerLength); 
+export class AnimatedTracer {
+    /**
+     * @param {object|pc.Vec3} origin - {x,y,z} or pc.Vec3 (world space)
+     * @param {object|pc.Vec3} target - {x,y,z} or pc.Vec3 (world space)
+     * @param {number} speed - units per second (default 500, same semantics as your THREE class)
+     * @param {object} opts - optional: { length, width, height, color }
+     */
+    constructor(origin, target, speed = 500, opts = {}) {
+        // Ensure PlayCanvas exists
+        if (typeof pc === "undefined") {
+            throw new Error("PlayCanvas (pc) not found in environment.");
+        }
 
-        const material = new THREE.MeshBasicMaterial({
-            color: 0xffa500, // Orange-ish color for visibility
-            transparent: true,
-            opacity: 1.0,
-            blending: THREE.AdditiveBlending,
-            // --- MODIFICATION: Set depthTest and depthWrite to true ---
-            depthTest: true, // Allow depth testing
-            depthWrite: true // Allow writing to the depth buffer
-        });
+        // normalize inputs into pc.Vec3
+        const toVec3 = v => {
+            if (!v) return new pc.Vec3();
+            if (v instanceof pc.Vec3) return v.clone();
+            if (typeof v.x === "number" && typeof v.y === "number" && typeof v.z === "number") {
+                return new pc.Vec3(v.x, v.y, v.z);
+            }
+            // if THREE.Vector3-like
+            if (v.x !== undefined && v.y !== undefined && v.z !== undefined) {
+                return new pc.Vec3(v.x, v.y, v.z);
+            }
+            return new pc.Vec3();
+        };
 
-        super(geometry, material);
+        this.origin = toVec3(origin);
+        this.target = toVec3(target);
+        this.direction = new pc.Vec3();
+        this.direction.sub2(this.target, this.origin).normalize();
 
-        this.initialOrigin = origin.clone(); // Store initial origin for direction and rotation
-        this.target = target.clone();
-        this.direction = new THREE.Vector3().subVectors(target, origin).normalize();
-        this.distance = origin.distanceTo(target);
-        this.speed = speed; // Use the passed-in speed (default is now 500)
+        this.distance = this.origin.distance(this.target);
+        this.speed = speed;
         this.traveledDistance = 0;
         this.initialOpacity = 1.0;
         this.remove = false;
 
-        // --- NEW: Position and Orient the tracer correctly ---
-        // Calculate the midpoint of the tracer's travel path for initial placement
-        const midpoint = new THREE.Vector3().addVectors(origin, target).multiplyScalar(0.5);
-        this.position.copy(origin); // Start tracer at the origin
+        // Visual parameters (can be overridden by opts)
+        this.length = typeof opts.length === "number" ? opts.length : 20; // plays as world units
+        this.width = typeof opts.width === "number" ? opts.width : 0.05;
+        this.height = typeof opts.height === "number" ? opts.height : 0.05;
+        this.colorHex = typeof opts.color === "number" ? opts.color : 0xffa500; // orange default
 
-        // Orient the tracer along its travel direction
-        const tempQuaternion = new THREE.Quaternion();
-        const up = new THREE.Vector3(0, 1, 0); // Assuming Y is up
-        tempQuaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), this.direction); // Z-axis of box points to target
-        this.rotation.setFromQuaternion(tempQuaternion);
+        // create entity
+        this.entity = new pc.Entity("tracer");
+        // add a box model and use local scale to control dims (box is unit cube centered)
+        this.entity.addComponent("model", { type: "box" });
+        this.entity.model.castShadows = false;
+        this.entity.model.receiveShadows = false;
 
-        // Adjust position so the *start* of the tracer is at the origin
-        // The BoxGeometry is centered at its origin (0,0,0), so we need to offset it
-        // by half its length along its local Z-axis (which now points in 'direction')
-        this.position.addScaledVector(this.direction, 5);
+        // create a dedicated material so opacity changes are safe per-tracer
+        this.material = new pc.StandardMaterial();
+        // set diffuse from hex
+        const r = ((this.colorHex >> 16) & 0xff) / 255;
+        const g = ((this.colorHex >> 8) & 0xff) / 255;
+        const b = (this.colorHex & 0xff) / 255;
+        this.material.diffuse = new pc.Color(r, g, b);
+        // use emissive so it's bright
+        this.material.emissive = new pc.Color(r * 0.6, g * 0.6, b * 0.6);
+        // enable additive blending / transparency
+        this.material.blendType = pc.BLEND_ADDITIVE;
+        this.material.opacity = this.initialOpacity;
+        // ensure transparency takes effect
+        this.material.update();
 
-        if (window.scene) {
-            window.scene.add(this);
-        } else {
-            console.error("THREE.js scene not found. Cannot add tracer.");
+        // assign material to model (model.material expects a single material)
+        try {
+            this.entity.model.material = this.material;
+        } catch (e) {
+            // Some PlayCanvas versions require walking children; but most accept direct assignment.
+            console.warn("Could not assign material directly to model; tracer may use default material.", e);
         }
-        
-        activeTracers.push(this);
+
+        // scale box so its Z size equals `length` and thickness are width/height
+        this.entity.setLocalScale(this.width, this.height, this.length);
+
+        // orientation: compute pitch & yaw to align local +Z toward direction
+        // formula: yaw = atan2(dx, dz); pitch = atan2(-dy, sqrt(dx^2+dz^2))
+        const dx = this.direction.x;
+        const dy = this.direction.y;
+        const dz = this.direction.z;
+        const yaw = Math.atan2(dx, dz); // radians
+        const horizontalLen = Math.sqrt(dx * dx + dz * dz);
+        const pitch = Math.atan2(-dy, horizontalLen); // radians
+
+        // convert to degrees for setLocalEulerAngles
+        const RAD_TO_DEG = 180 / Math.PI;
+        const pitchDeg = pitch * RAD_TO_DEG;
+        const yawDeg = yaw * RAD_TO_DEG;
+
+        // Set rotation (pitch around X, yaw around Y)
+        this.entity.setLocalEulerAngles(pitchDeg, yawDeg, 0);
+
+        // Position the box such that its BACK (start) sits at origin:
+        // Box is centered; to put back at origin, offset by +direction * (length/2)
+        const half = this.length * 0.5;
+        const pos = new pc.Vec3();
+        pos.copy(this.origin).add(this.direction.clone().scale(half));
+        this.entity.setPosition(pos);
+
+        // Add to scene root (try window.scene first, then playcanvasApp.root)
+        const root = (window.scene && window.scene instanceof pc.Entity) ? window.scene : (window.playcanvasApp && window.playcanvasApp.root);
+        if (root && typeof root.addChild === "function") {
+            root.addChild(this.entity);
+        } else {
+            console.warn("PlayCanvas root not found: tracer will not be added to scene automatically.");
+        }
+
+        // register tracer in global list and ensure update loop is attached
+        window.activeTracers = window.activeTracers || [];
+        window.activeTracers.push(this);
+
+        // attach global update once
+        this._ensureGlobalUpdateHook();
     }
 
-    update(deltaTime) {
-        if (this.traveledDistance < this.distance) {
-            const moveAmount = this.speed * deltaTime;
-            
-            // Move the tracer along its direction vector
-            // We move it by `moveAmount` which updates its current position relative to its initial point.
-            this.position.addScaledVector(this.direction, moveAmount);
-            this.traveledDistance += moveAmount;
+    // Single global update hook attached to PlayCanvas app (only once)
+    _ensureGlobalUpdateHook() {
+        if (window._pcTracerUpdateAttached) return;
+        const pcApp = window.playcanvasApp;
+        if (!pcApp || typeof pcApp.on !== "function") {
+            // If no pc app, fallback to requestAnimationFrame loop
+            let last = performance.now();
+            const rafLoop = (t) => {
+                const dt = (t - last) / 1000;
+                last = t;
+                try {
+                    (window.activeTracers || []).forEach(tr => {
+                        try { tr.update(dt); } catch (e) { console.warn("tracer update error", e); }
+                    });
+                    // cleanup removals
+                    (window.activeTracers || []).forEach((tr, i) => { if (tr.remove) { tr.dispose(); window.activeTracers.splice(i, 1); } });
+                } catch (e) {}
+                window._pcTracerRaf = requestAnimationFrame(rafLoop);
+            };
+            window._pcTracerRaf = requestAnimationFrame(rafLoop);
+            window._pcTracerUpdateAttached = true;
+            return;
+        }
 
-            // Optional: Fade out as it approaches the target
-            const remainingDistance = this.distance - this.traveledDistance;
-            const fadeOutStartDistance = this.speed * 0.01; // Fade out over a very short time, proportional to speed
-            if (remainingDistance < fadeOutStartDistance) { 
-                this.material.opacity = this.initialOpacity * (remainingDistance / fadeOutStartDistance);
+        // Use PlayCanvas update event (dt is in seconds)
+        pcApp.on("update", (dt) => {
+            const arr = window.activeTracers || [];
+            for (let i = arr.length - 1; i >= 0; i--) {
+                try {
+                    arr[i].update(dt);
+                } catch (e) {
+                    console.warn("tracer update error:", e);
+                }
+                if (arr[i].remove) {
+                    try { arr[i].dispose(); } catch (e) {}
+                    arr.splice(i, 1);
+                }
             }
-            this.material.opacity = Math.max(0, this.material.opacity); 
+        });
+        window._pcTracerUpdateAttached = true;
+    }
 
-        } else {
+    /**
+     * Step the tracer. deltaTime is seconds.
+     */
+    update(deltaTime) {
+        if (this.remove) return;
+
+        // step traveled distance
+        const moveAmount = this.speed * deltaTime;
+        this.traveledDistance += moveAmount;
+
+        // clamp movement so we don't overshoot in the display position (we still mark remove when done)
+        const traveledForPosition = Math.min(this.traveledDistance, this.distance);
+
+        // recompute center position = origin + direction * (traveled + halfLength)
+        const half = this.length * 0.5;
+        const pos = new pc.Vec3();
+        pos.copy(this.origin).add(this.direction.clone().scale(traveledForPosition + half));
+        this.entity.setPosition(pos);
+
+        // fade out when near the target (short fade window proportional to speed)
+        const remainingDistance = this.distance - this.traveledDistance;
+        const fadeOutStart = Math.max(0.001, this.speed * 0.01); // safety clamp
+        if (remainingDistance < fadeOutStart) {
+            const frac = Math.max(0, remainingDistance / fadeOutStart);
+            this.material.opacity = this.initialOpacity * frac;
+            this.material.update();
+        }
+
+        if (this.traveledDistance >= this.distance) {
             this.remove = true;
         }
     }
 
+    /**
+     * Dispose and free resources.
+     */
     dispose() {
-        if (this.parent) {
-            this.parent.remove(this);
+        try {
+            if (this.entity && this.entity._parent) {
+                this.entity._parent.removeChild(this.entity);
+            }
+        } catch (e) { /* ignore */ }
+
+        try {
+            if (this.entity) {
+                this.entity.destroy();
+            }
+        } catch (e) { /* ignore */ }
+
+        try {
+            if (this.material) {
+                // PlayCanvas StandardMaterial has a destroy method
+                if (typeof this.material.destroy === "function") this.material.destroy();
+            }
+        } catch (e) { /* ignore */ }
+
+        // remove from global list if present
+        if (window.activeTracers) {
+            const idx = window.activeTracers.indexOf(this);
+            if (idx !== -1) window.activeTracers.splice(idx, 1);
         }
-        this.geometry.dispose();
-        this.material.dispose();
     }
 }
+
