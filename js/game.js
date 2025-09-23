@@ -874,48 +874,70 @@ export async function initSceneCrocodilosConstruction() {
   sceneNum = 1;
   console.log("Initializing CrocodilosConstruction scene (PlayCanvas)...");
 
-  // container and canvas
+  // ---------- 0) Dispose any previous THREE WebGL renderer to avoid GL conflicts ----------
+  try {
+    if (window.renderer && window.renderer.forceContextLoss) {
+      try { window.renderer.domElement.remove(); } catch (e) {}
+      try { window.renderer.forceContextLoss(); } catch (e) {}
+      try { window.renderer.dispose(); } catch (e) {}
+      console.log("Disposed previous Three/WebGL renderer.");
+    }
+  } catch (e) {
+    console.warn("Error while disposing previous renderer:", e);
+  }
+
+  // ---------- 1) Ensure container & fixed internal resolution ----------
   const container = document.getElementById("game-container");
   if (!container) throw new Error("No #game-container element found");
 
-  // Create canvas or reuse existing canvas
-  let canvas = container.querySelector("canvas");
-  if (!canvas) {
-    canvas = document.createElement("canvas");
-    // make it fill the container by CSS; we'll use fixed internal resolution below
-    canvas.style.width = "100%";
-    canvas.style.height = "100%";
-    container.appendChild(canvas);
+  // Ensure FIXED_WIDTH/HEIGHT exist (fallback)
+  if (!window.FIXED_WIDTH || !window.FIXED_HEIGHT) {
+    window.FIXED_WIDTH = window.FIXED_WIDTH || Math.max(800, container.clientWidth || 800);
+    window.FIXED_HEIGHT = window.FIXED_HEIGHT || Math.max(600, container.clientHeight || 600);
   }
 
-  // If an existing PlayCanvas app exists, destroy it first
-  if (pcApp) {
-    try { pcApp.destroy(); } catch (e) { console.warn("Error destroying previous pc app:", e); }
-    pcApp = null;
-  }
+  // ---------- 2) Create or reuse PlayCanvas application ----------
+  let pcApp = window.playcanvasApp;
+  if (!pcApp) {
+    // create canvas and append to container (reuse existing <canvas> if present)
+    let canvas = container.querySelector("canvas");
+    if (!canvas) {
+      canvas = document.createElement("canvas");
+      canvas.id = "game-canvas";
+      canvas.style.width = "100%";
+      canvas.style.height = "100%";
+      container.appendChild(canvas);
+    }
 
-  // Create PlayCanvas application
-  pcApp = new pc.Application(canvas, {
-    mouse: new pc.Mouse(canvas),
-    touch: new pc.TouchDevice(canvas),
-    keyboard: new pc.Keyboard(window)
-  });
+    pcApp = new pc.Application(canvas, {
+      mouse: new pc.Mouse(canvas),
+      touch: new pc.TouchDevice(canvas),
+      keyboard: new pc.Keyboard(window)
+    });
 
-  // Set fill/resolution behaviour similar to how you set the renderer in THREE
-  // Internal resolution: FIXED_WIDTH / FIXED_HEIGHT like you had before
-  if (typeof FIXED_WIDTH !== "undefined" && typeof FIXED_HEIGHT !== "undefined") {
+    // Use fixed internal resolution similar to your previous renderer
     pcApp.setCanvasFillMode(pc.FILLMODE_NONE);
     pcApp.setCanvasResolution(pc.RESOLUTION_FIXED);
-    pcApp.graphicsDevice.maxPixelRatio = 1;
+    try { pcApp.graphicsDevice.maxPixelRatio = 1; } catch (e) {}
+
+    // Start the engine loop
+    pcApp.start();
+    window.playcanvasApp = pcApp;
+    console.log("Created new PlayCanvas app and started it.");
   } else {
-    pcApp.setCanvasFillMode(pc.FILLMODE_FILL_WINDOW);
-    pcApp.setCanvasResolution(pc.RESOLUTION_AUTO);
+    console.log("Reusing existing PlayCanvas app.");
   }
 
-  pcApp.start();
-  window.playcanvasApp = pcApp;
+  // Expose pcApp locally
+  window.pcApp = pcApp;
 
-  // --- Camera ---
+  // ---------- 3) Camera ----------
+  // Remove any previously created camera entity named "game-camera"
+  try {
+    const prevCam = pcApp.root.findByName("game-camera");
+    if (prevCam) prevCam.destroy();
+  } catch (e) {}
+
   const cameraEnt = new pc.Entity("game-camera");
   cameraEnt.addComponent("camera", {
     clearColor: new pc.Color(0, 0, 0),
@@ -923,136 +945,112 @@ export async function initSceneCrocodilosConstruction() {
     nearClip: 0.1,
     farClip: 2000
   });
-  // position camera at origin (the rest of your game manages the camera transform)
-  cameraEnt.setPosition(0, 1.6, 0);
+  // default position (your physicsController will teleport player/camera)
+  cameraEnt.setLocalPosition(0, 1.6, 0);
   pcApp.root.addChild(cameraEnt);
-  window.camera = cameraEnt; // keep your code compatibility (window.camera used heavily)
 
-  // Ensure camera rotation order semantics similar to "YXZ" you had in THREE:
-  // PlayCanvas uses localEulerAngles; we'll keep your rotate logic and read/write Euler values via helpers.
-
-  // --- Hemisphere / directional light ---
-  const hemi = new pc.Entity("hemi-light");
-  hemi.addComponent("light", {
-    type: "directional",
-    color: new pc.Color(1, 1, 1),
-    intensity: 0.05,
-    castShadows: false
-  });
-  hemi.setEulerAngles(50, 30, 0); // angled directional light
-  pcApp.root.addChild(hemi);
-  window.hemi = hemi;
-
-  // --- Sky sphere (simple dark sky) ---
-  // We'll create a large sphere using a model with generated mesh. If you have a proper sky asset,
-  // replace this with an asset-based model.
-  const skyEnt = new pc.Entity("sky-sphere");
-  // Try to create a primitive sphere mesh and a simple material (if API provides helper)
-  try {
-    const mesh = pc.createSphere(pcApp.graphicsDevice, { segments: 32, radius: 200 });
-    const node = new pc.GraphNode();
-    const model = new pc.Model();
-    model.graph = node;
-    model.meshInstances = [ new pc.MeshInstance(node, mesh, new pc.StandardMaterial()) ];
-    // NOTE: older/newer engines vary — fallback to a minimal visual representation below if this fails.
-    skyEnt.model = model; // some engines require adding via model component; we handle fallback
-    // Use a render component fallback if model creation fails
-    skyEnt.addComponent("render", {
-      type: "box" // fallback primitive so the entity exists in the scene (non-ideal)
-    });
-  } catch (e) {
-    // fallback: create an empty entity to serve as "sky" placeholder
-    skyEnt.addComponent("script"); // placeholder so it can still be rotated
-  }
-  skyEnt.setLocalScale(200, 200, 200);
-  skyEnt.setLocalPosition(0, 0, 0);
-  pcApp.root.addChild(skyEnt);
-  window.skyMesh = skyEnt; // keep compatibility
-
-  // --- Star field and world fog placeholders ---
-  const starFieldEnt = new pc.Entity("stars");
-  starFieldEnt.addComponent("script"); // placeholder; rotate manually in update
-  pcApp.root.addChild(starFieldEnt);
-  window.starField = starFieldEnt;
-
-  const worldFogEnt = new pc.Entity("worldFog");
-  worldFogEnt.addComponent("script");
-  pcApp.root.addChild(worldFogEnt);
-  window.worldFog = worldFogEnt;
-
-  // 1) expose the PlayCanvas root as "scene" to reduce breaks in code
+  // Keep compatibility: window.camera used across your code — now reference the PlayCanvas entity
+  window.camera = cameraEnt;
   window.scene = pcApp.root;
 
-  // 2) Re-create/update your env meshes, spawn points and physics init using the new scene
-  // Your original createCrocodilosConstruction expects a THREE.Scene and physicsController.
-  // Try calling it with the PlayCanvas root; if it expects a THREE.Scene you'll need to update
-  // that function to produce PlayCanvas entities instead. We'll attempt to call it and catch errors.
+  // ---------- 4) Light ----------
   try {
+    // remove old light if exists
+    const prevLight = pcApp.root.findByName("map-sun");
+    if (prevLight) prevLight.destroy();
+
+    const sunEnt = new pc.Entity("map-sun");
+    sunEnt.addComponent("light", {
+      type: "directional",
+      color: new pc.Color(1, 1, 1),
+      intensity: 0.9,
+      castShadows: false
+    });
+    sunEnt.setLocalEulerAngles(50, 30, 0);
+    pcApp.root.addChild(sunEnt);
+    window.hemi = sunEnt; // compatibility name
+  } catch (e) {
+    console.warn("Failed to create PlayCanvas light:", e);
+  }
+
+  // ---------- 5) Disable composer / three render references ----------
+  // If your code used composer/renderPass, null them to avoid accidental calls
+  composer = null;
+  renderPass = null;
+  window.composer = null;
+  window.renderPass = null;
+
+  // ---------- 6) Load map and build collider (calls your new createCrocodilosConstruction) ----------
+  let spawnPoints = [];
+  try {
+    // Pass the PlayCanvas scene root so createCrocodilosConstruction will load visuals into PlayCanvas
     spawnPoints = await createCrocodilosConstruction(pcApp.root, physicsController);
   } catch (err) {
-    console.warn("createCrocodilosConstruction failed with PlayCanvas root. If it requires Three.js, you'll need to port that function too.", err);
-    // Fallback: attempt to call the old function with a dummy object to at least get a spawn point
-    try {
-      spawnPoints = await createCrocodilosConstruction({}, physicsController);
-    } catch (e2) {
-      spawnPoints = [{ x: 0, y: 2, z: 0 }];
-    }
+    console.warn("createCrocodilosConstruction failed when called with PlayCanvas root:", err);
+    // fallback single spawn
+    spawnPoints = [{ x: 0, y: 2, z: 0 }];
   }
   window.spawnPoints = spawnPoints;
 
+  // choose initial spawn and tell physicsController to place player
   const initialSpawnPoint = (typeof findFurthestSpawn === "function") ? findFurthestSpawn() : spawnPoints[0];
   if (physicsController && typeof physicsController.setPlayerPosition === "function") {
     physicsController.setPlayerPosition(initialSpawnPoint);
+    console.log("Player and camera teleported to:", `(${initialSpawnPoint.x}, ${initialSpawnPoint.y}, ${initialSpawnPoint.z})`);
   } else {
-    console.warn("physicsController.setPlayerPosition not available; can't position player automatically.");
+    console.warn("physicsController.setPlayerPosition not available.");
   }
 
-  // --- Audio: if you have existing audio elements reuse them; PlayCanvas also has an audio component API ---
-  if (typeof windSound !== "undefined" && windSound && typeof windSound.play === "function") {
-    windSound.play().catch(err => console.warn("Failed to play wind sound:", err));
+  // ---------- 7) Audio initialization (reuse existing audio APIs) ----------
+  if (typeof windSound !== "undefined") {
+    try { windSound.play().catch(err => console.warn("Failed to play wind sound:", err)); } catch (e) {}
     window.windSound = windSound;
   } else {
     console.warn("windSound is not defined. Audio might not play for CrocodilosConstruction.");
   }
 
-  // --- Resize handler ---
+  // ---------- 8) Resize handling ----------
   function onWindowResize() {
     const displayWidth = container.clientWidth;
     const displayHeight = container.clientHeight;
 
-    // PlayCanvas canvas already stretches, but we still keep internal fixed resolution if set
-    if (typeof FIXED_WIDTH !== "undefined" && typeof FIXED_HEIGHT !== "undefined") {
-      pcApp.resizeCanvas(FIXED_WIDTH, FIXED_HEIGHT);
+    // 1) Keep the internal fixed resolution for consistent physics/collision logic
+    try {
+      pcApp.resizeCanvas(window.FIXED_WIDTH, window.FIXED_HEIGHT);
       const c = pcApp.graphicsDevice.canvas;
       c.style.width = `${displayWidth}px`;
       c.style.height = `${displayHeight}px`;
-    } else {
-      pcApp.resizeCanvas(displayWidth, displayHeight);
+    } catch (e) {
+      // fallback: resize to container
+      try { pcApp.resizeCanvas(displayWidth, displayHeight); } catch (e2) {}
     }
 
-    // Update camera aspect if necessary (PlayCanvas camera updates automatically on resize,
-    // but we can manually update projection parameters)
-    const cam = window.camera && window.camera.camera;
-    if (cam) {
-      cam.horizontalFov = false;
-      // No direct aspect setter - PlayCanvas handles it from the canvas size.
+    // 2) Camera/projection auto-updates in PlayCanvas but we keep compatibility
+    if (window.camera && window.camera.camera) {
+      // no explicit aspect setter; PlayCanvas handles it
     }
 
-    // Re-attach weapons as in your original code
+    // 3) Re-attach weapon to local player (if needed)
     if (window.weaponController && window.localPlayer && typeof getWeaponModel === 'function' && typeof attachWeaponToPlayer === 'function') {
-      const key = window.localPlayer.weapon.replace(/-/g, "").toLowerCase();
-      const proto = getWeaponModel(key);
-      if (proto) attachWeaponToPlayer(window.localPlayer.id, key);
+      try {
+        const key = window.localPlayer.weapon.replace(/-/g, "").toLowerCase();
+        const proto = getWeaponModel(key);
+        if (proto) attachWeaponToPlayer(window.localPlayer.id, key);
+      } catch (e) { console.warn("Error re-attaching local weapon after resize:", e); }
     }
 
+    // 4) Re-attach weapons for remote players
     if (window.remotePlayers) {
       Object.values(window.remotePlayers).forEach(({ currentWeapon, weaponRoot }) => {
-        if (currentWeapon && weaponRoot && typeof attachWeaponToPlayer === 'function') {
-          attachWeaponToPlayer(weaponRoot.userData?.playerId || weaponRoot.name, currentWeapon);
-        }
+        try {
+          if (currentWeapon && weaponRoot && typeof attachWeaponToPlayer === 'function') {
+            attachWeaponToPlayer(weaponRoot.userData?.playerId || weaponRoot.name, currentWeapon);
+          }
+        } catch (e) {}
       });
     }
 
+    // 5) Resize HUD overlay
     const hud = document.getElementById("hud");
     if (hud) {
       hud.style.width = `${displayWidth}px`;
@@ -1063,19 +1061,21 @@ export async function initSceneCrocodilosConstruction() {
   window.addEventListener("resize", onWindowResize, false);
   onWindowResize();
 
-  // --- Hook your game loop into PlayCanvas update event ---
-  // We'll create a single per-frame handler that mirrors your previous animate loop.
-  // You can still export animate() for compatibility; internally PlayCanvas runs this update.
+  // ---------- 9) Hook game loop into PlayCanvas update if not already done ----------
+  // We assume playcanvasFrameUpdate() is defined (from earlier port). Add update listener once.
   if (pcApp && !pcApp._gameUpdateAttached) {
     pcApp.on("update", function(dt) {
-      // dt is seconds since last update
-      // convert to expected values in your animate() code:
       const timestamp = performance.now();
-      playcanvasFrameUpdate(dt, timestamp);
+      // dt is seconds; forward to existing playcanvasFrameUpdate
+      try { playcanvasFrameUpdate(dt, timestamp); } catch (err) { console.error("playcanvasFrameUpdate error:", err); }
     });
     pcApp._gameUpdateAttached = true;
   }
+
+  // ---------- 10) Done ----------
+  console.log("CrocodilosConstruction initialization complete (PlayCanvas).");
 }
+
 
 export async function initSceneSigmaCity() {
   sceneNum = 2;
@@ -3098,6 +3098,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
