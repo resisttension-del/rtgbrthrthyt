@@ -215,21 +215,52 @@ export function voidEngine({ width = 1280, height = 720, playcanvasAttrs = {} } 
     cameraEntity,
     domElement: canvas,
     pcCanvas,
-    setSize(w, h) {
-      canvas.width = w;
-      canvas.height = h;
-      canvas.style.width = `${w}px`;
-      canvas.style.height = `${h}px`;
-      pcCanvas.width = w;
-      pcCanvas.height = h;
-      pcCanvas.style.width = `${w}px`;
-      pcCanvas.style.height = `${h}px`;
-      // update PlayCanvas graphics device viewport
-      app.graphicsDevice.resize(w, h);
-      if (cameraEntity.camera) {
-        cameraEntity.camera.aspectRatio = w / h;
-      }
-    },
+setSize(w, h) {
+  // overlay canvas (2D)
+  canvas.width = w;
+  canvas.height = h;
+  canvas.style.width = `${w}px`;
+  canvas.style.height = `${h}px`;
+
+  // PlayCanvas canvas
+  // apply CSS size
+  pcCanvas.style.width = `${w}px`;
+  pcCanvas.style.height = `${h}px`;
+
+  // set backing buffer size to account for devicePixelRatio (helps crispness on high-DPI)
+  const dpr = window.devicePixelRatio || 1;
+  const backW = Math.max(1, Math.floor(w * dpr));
+  const backH = Math.max(1, Math.floor(h * dpr));
+  pcCanvas.width = backW;
+  pcCanvas.height = backH;
+
+  // Update camera aspect ratio (PlayCanvas camera uses aspectRatio property)
+  if (cameraEntity && cameraEntity.camera) {
+    cameraEntity.camera.aspectRatio = w / h;
+  }
+
+  // Try a few PlayCanvas resize hooks in a safe order:
+  // 1) app.resizeCanvas (common helper)
+  if (typeof app.resizeCanvas === 'function') {
+    try { app.resizeCanvas(true); } catch (e) { /* ignore */ }
+    return;
+  }
+
+  // 2) older/newer runtimes might have graphicsDevice.resize(width, height)
+  if (app.graphicsDevice && typeof app.graphicsDevice.resize === 'function') {
+    try { app.graphicsDevice.resize(backW, backH); } catch (e) { /* ignore */ }
+    return;
+  }
+
+  // 3) fallback: adjust graphicsDevice.width/height if they exist (non-function)
+  if (app.graphicsDevice) {
+    if (typeof app.graphicsDevice.width === 'number') app.graphicsDevice.width = backW;
+    if (typeof app.graphicsDevice.height === 'number') app.graphicsDevice.height = backH;
+  }
+
+  // last resort: force one update so the engine picks up canvas changes (harmless)
+  try { app.fire && app.fire('resize'); } catch (e) { /* ignore */ }
+},
     destroy() {
       app.destroy();
       if (canvas.parentNode) canvas.parentNode.removeChild(canvas);
