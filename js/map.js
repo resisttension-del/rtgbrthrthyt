@@ -87,35 +87,18 @@ export class Lantern {
     }
 }
 
-/**
- * Loads the CrocodilosConstruction map, sets up lighting, and creates a MeshBVH collider.
- * @param {THREE.Scene} scene The Three.js scene to add the map to.
- * @param {object} physicsController An object with a `setCollider` method to receive the collision mesh.
- * @returns {Promise<THREE.Vector3[]>} A promise that resolves with an array of spawn points.
- */
-// Replace your existing createCrocodilosConstruction with this function.
-export async function createCrocodilosConstruction(targetScene, physicsController) {
-  // Detect environment
-  const isThreeScene = targetScene && typeof targetScene.add === "function";
-  const pcApp = window.playcanvasApp || null;
-  const isPlayCanvasRoot = !!pcApp && (targetScene === pcApp.root || targetScene === window.playcanvasApp?.root);
+export async function createCrocodilosConstruction(targetSceneRoot, physicsController) {
+  // targetSceneRoot: expected to be pcApp.root for PlayCanvas
+  const isPlayCanvasRoot = !!window.playcanvasApp && (targetSceneRoot === window.playcanvasApp.root);
 
-  // Track loaded meshes and readiness
-  window.envMeshes = [];
+  window.envMeshes = window.envMeshes || [];
   window.mapReady = false;
 
-  // Loader UI
   const loaderUI = new Loader();
-  // We'll have two steps (1) GLB for Three (BVH) (2) GLB for PlayCanvas visuals (optional)
-  const stepWeights = isPlayCanvasRoot ? [0.5, 0.5] : [1.0];
-  loaderUI.show("Loading CrocodilosConstruction Map...", stepWeights);
+  loaderUI.show("Loading CrocodilosConstruction Map...", isPlayCanvasRoot ? [0.5, 0.5] : [1.0]);
 
-  // Spawn points converted to simple objects for portability
   const SCALE = 1;
-  const rawSpawnPoints = [
-    new THREE.Vector3(0, 50, 0)
-    // add more spawn vectors if you want
-  ];
+  const rawSpawnPoints = [ new THREE.Vector3(0, 50, 0) ];
   const spawnPoints = rawSpawnPoints.map(p => {
     const scaled = p.clone().multiplyScalar(SCALE / 5);
     return { x: scaled.x, y: scaled.y, z: scaled.z };
@@ -123,16 +106,12 @@ export async function createCrocodilosConstruction(targetScene, physicsControlle
 
   const GLB_MODEL_URL = "https://raw.githubusercontent.com/thearthd/3d-models/main/newmaptest.glb";
 
-  // Promise A: load GLB with THREE.GLTFLoader -> build BVH collider and collect env meshes.
+  // Promise A: Three.js GLTF load -> BVH
   const threeLoadPromise = new Promise((resolve, reject) => {
     if (typeof THREE === "undefined" || typeof GLTFLoader === "undefined") {
-      const err = new Error("Three.js or GLTFLoader not available in this environment.");
-      console.error(err);
-      return reject(err);
+      return reject(new Error("Three.js or GLTFLoader not available in this environment."));
     }
-
     const loader = new GLTFLoader();
-    let onProgress = () => {};
     loader.load(
       GLB_MODEL_URL,
       gltf => {
@@ -141,61 +120,43 @@ export async function createCrocodilosConstruction(targetScene, physicsControlle
           gltfGroup.scale.set(SCALE, SCALE, SCALE);
           gltfGroup.updateMatrixWorld(true);
 
-          // If a Three scene was passed, add the visual group to it so Three rendering (if any) still works
-          if (isThreeScene) {
-            targetScene.add(gltfGroup);
+          if (targetSceneRoot && typeof targetSceneRoot.add === "function") {
+            targetSceneRoot.add(gltfGroup);
           } else {
-            // Keep a ref for debugging / CPU upload
             window.__threeMapGroup = gltfGroup;
           }
 
-          // Collect meshes and ensure geometry indices exist
+          // collect meshes
+          window.envMeshes = window.envMeshes || [];
           gltfGroup.traverse(child => {
             if (child.isMesh) {
               child.castShadow = true;
               child.receiveShadow = true;
-              if (child.material && child.material.map) {
-                try { child.material.map.anisotropy = 4; } catch (e) {}
-              }
               child.userData = child.userData || {};
               child.userData.cpuStatic = true;
               child.userData.cpuRenderable = true;
-
               window.envMeshes.push(child);
-
-              // Ensure geometry index exists for BVH
+              // ensure index
               if (child.geometry && !child.geometry.index) {
                 child.geometry.setIndex(generateSequentialIndices(child.geometry.attributes.position.count));
               }
             }
           });
 
-          // Build merged geometry via your StaticGeometryGenerator (same as original)
+          // merged geometry and BVH
           const staticGenerator = new StaticGeometryGenerator(gltfGroup);
           staticGenerator.attributes = ["position"];
           const mergedGeometry = staticGenerator.generate();
-
-          // Build BVH
           mergedGeometry.boundsTree = new MeshBVH(mergedGeometry);
 
-          // Create collider mesh (THREE.Mesh) - physics uses this
           const collider = new THREE.Mesh(mergedGeometry, new THREE.MeshBasicMaterial());
-          collider.material.wireframe = true;
-          collider.material.opacity = 0.5;
-          collider.material.transparent = true;
           collider.visible = false;
-
-          // If Three scene present, add collider / visualizer there for debugging
-          if (isThreeScene) {
-            targetScene.add(collider);
-            const visualizer = new MeshBVHHelper(collider, 10);
-            visualizer.visible = false;
-            targetScene.add(visualizer);
+          if (targetSceneRoot && typeof targetSceneRoot.add === "function") {
+            targetSceneRoot.add(collider);
           } else {
             window.__threeCollider = collider;
           }
 
-          // Attach collider to physics controller
           if (physicsController && typeof physicsController.setCollider === "function") {
             physicsController.setCollider(collider);
             physicsController.worldBVH = collider.geometry.boundsTree;
@@ -204,125 +165,69 @@ export async function createCrocodilosConstruction(targetScene, physicsControlle
           }
 
           console.log("Three: GLB loaded and BVH collider built.");
-          resolve({ gltfGroup, collider, onProgressSetter: cb => (onProgress = cb) });
+          resolve({ gltfGroup, collider });
         } catch (err) {
-          console.error("Error during GLTF (Three) processing:", err);
           reject(err);
         }
       },
       // progress
-      evt => {
-        // Map progress to first step weight (index 0)
-        // We'll let loaderUI.track handle callbacks; expose setter in resolved object
-        // For now if loaderUI provided a callback system we can call it later if needed
-      },
-      err => {
-        console.error("Error loading GLB for BVH:", err);
-        reject(err);
-      }
+      xhr => { /* optional hook */ },
+      err => reject(err)
     );
   });
 
-  // Promise B (optional): if PlayCanvas is running, also load GLB into PlayCanvas as a container asset
+  // Promise B: PlayCanvas container import (if requested)
   let pcLoadPromise = Promise.resolve(null);
   if (isPlayCanvasRoot) {
     pcLoadPromise = new Promise((resolve, reject) => {
-      // ensure app available
+      const pcApp = window.playcanvasApp;
       if (!pcApp || !pcApp.assets || typeof pcApp.assets.loadFromUrl !== "function") {
-        console.warn("PlayCanvas app or asset loader not available; skipping PlayCanvas visual import.");
+        console.warn("PlayCanvas asset loader not available; skipping PlayCanvas import.");
         return resolve(null);
       }
 
-      // progress helper
-      let lastPercent = 0;
-      // create an asset and load as 'container'
       pcApp.assets.loadFromUrl(GLB_MODEL_URL, "container", (err, asset) => {
-        if (err) {
-          console.error("PlayCanvas: failed to load GLB container:", err);
-          return reject(err);
-        }
+        if (err) return reject(err);
         try {
-          // instantiate model entity (retains hierarchy, materials, animations)
-          // prefer instantiateModelEntity if available for animated skinned models, otherwise instantiateRenderEntity
           let entity = null;
           if (asset.resource && typeof asset.resource.instantiateModelEntity === "function") {
             entity = asset.resource.instantiateModelEntity({ castShadows: true, receiveShadows: true });
           } else if (asset.resource && typeof asset.resource.instantiateRenderEntity === "function") {
             entity = asset.resource.instantiateRenderEntity({ castShadows: true, receiveShadows: true });
+          } else if (asset.resource && typeof asset.resource.instantiate === "function") {
+            entity = asset.resource.instantiate();
           } else {
-            // fallback: use generic container instantiate (older/newer engine differences)
-            if (asset.resource && typeof asset.resource.instantiate === "function") {
-              entity = asset.resource.instantiate();
-            } else {
-              throw new Error("PlayCanvas container resource has no instantiate helper.");
-            }
+            throw new Error("PlayCanvas container resource has no instantiate helper.");
           }
 
-          // scale & position as your Three group expects
-          try {
-            entity.setLocalScale(SCALE, SCALE, SCALE);
-            entity.setLocalPosition(0, 0, 0);
-          } catch (e) {
-            // if entity API differs, ignore and continue
-          }
-
-          // Add to PlayCanvas root so it renders
+          try { entity.setLocalScale(SCALE, SCALE, SCALE); entity.setLocalPosition(0, 0, 0); } catch (e) {}
           pcApp.root.addChild(entity);
           entity.name = entity.name || "CrocodilosConstructionMap";
-
-          // If animations exist, expose them in case you want to drive them
-          const animComp = entity.anim;
-          if (animComp) {
-            // user can start animations via animComp.play(...)
-            console.log("PlayCanvas map entity has animations available.");
-          }
-
           console.log("PlayCanvas: GLB imported and instantiated into scene.");
           resolve(entity);
-        } catch (err) {
-          console.error("PlayCanvas instantiate error:", err);
-          reject(err);
-        }
-      }, null, (xhr) => {
-        // Optional progress callback from loadFromUrl (not always available in older engine)
-        // Map to step index 1 for loaderUI if present
-        if (xhr && xhr.loaded && xhr.total) {
-          const percent = Math.min(1, xhr.loaded / xhr.total);
-          if (loaderUI && typeof loaderUI.track === "function") {
-            // We will call loaderUI.track later with promises; for now just log
-          }
-          lastPercent = percent;
-        }
-      });
+        } catch (err) { reject(err); }
+      }, null, xhr => { /* optional progress */ });
     });
   }
 
-  // Wire loaderUI tracking:
-  // If loaderUI.track expects individual promises per step, pass them accordingly.
+  // Track with loaderUI (best-effort)
   try {
     if (isPlayCanvasRoot) {
-      // First half -> threeLoadPromise, second half -> pcLoadPromise
-      loaderUI.track(stepWeights[0], threeLoadPromise, cb => {
-        // no-op: GLTFLoader's progress handler not easily hooked here; left for future improvement
-      });
-      loaderUI.track(stepWeights[1], pcLoadPromise, cb => {
-        // pc asset loader progress hooking not directly exposed; left as-is
-      });
+      loaderUI.track(0.5, threeLoadPromise, () => {});
+      loaderUI.track(0.5, pcLoadPromise, () => {});
     } else {
-      loaderUI.track(1.0, threeLoadPromise, cb => {});
+      loaderUI.track(1.0, threeLoadPromise, () => {});
     }
   } catch (e) {
-    // loaderUI may have different API; ignore if it fails but continue
-    console.warn("loaderUI.track failed or is incompatible:", e);
+    console.warn("loaderUI.track incompatible:", e);
   }
 
-  // Await both promises (pcLoadPromise may be immediately resolved if PlayCanvas not present)
-  const [threeResult, pcEntity] = await Promise.all([threeLoadPromise, pcLoadPromise.catch(e => { console.warn("PlayCanvas load failed:", e); return null; })]);
+  const [threeResult, pcEntity] = await Promise.all([threeLoadPromise, pcLoadPromise.catch(e => { console.warn("PC load fail:", e); return null; })]);
 
-  // If you have a CPU renderer that can scan and upload scene, pass it the Three group (BVH/collider based on the Three group)
+  // optionally inform any CPU renderer
   if (window.renderer && typeof window.renderer.scanAndUploadScene === "function") {
     try {
-      const maybeScene = (isThreeScene ? targetScene : window.__threeMapGroup || targetScene);
+      const maybeScene = (targetSceneRoot && typeof targetSceneRoot.add === "function") ? targetSceneRoot : (window.__threeMapGroup || targetSceneRoot);
       await window.renderer.scanAndUploadScene(maybeScene);
       console.log("Renderer: scene scanned and uploaded.");
     } catch (e) {
@@ -330,15 +235,22 @@ export async function createCrocodilosConstruction(targetScene, physicsControlle
     }
   }
 
-  // Mark ready once loader UI completes/steps finished
-  loaderUI.onComplete(() => {
+  // ensure loaderUI completes and set mapReady
+  try {
+    loaderUI.onComplete(() => {
+      window.mapReady = true;
+      console.log("Map + BVH Collider fully ready!");
+    });
+    // best-effort manual complete if loaderUI didn't auto-fire
+    if (typeof loaderUI.complete === "function") loaderUI.complete();
+  } catch (e) {
+    // fallback: set mapReady true
     window.mapReady = true;
-    console.log("Map + BVH Collider fully ready!");
-  });
+  }
 
-  // Return spawn points (in the same structure you expect)
   return spawnPoints;
 }
+
 
 
 /**
