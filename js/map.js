@@ -113,7 +113,7 @@ export async function createCrocodilosConstruction(targetSceneRoot, physicsContr
     return { x: scaled.x, y: scaled.y, z: scaled.z };
   });
 
-    const GLB_MODEL_URL = 'https://raw.githubusercontent.com/thearthd/3d-models/main/croccodilosconstruction.glb';
+    const GLB_MODEL_URL = 'https://raw.githubusercontent.com/thearthd/3d-models/main/didddydunes.glb';
 
   // Promise A: Three.js GLTF load -> BVH
   const threeLoadPromise = new Promise((resolve, reject) => {
