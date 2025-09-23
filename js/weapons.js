@@ -1130,7 +1130,7 @@ export class WeaponController {
     const isGrounded = !!(playerState?.physicsController && playerState.physicsController.isGrounded);
     const sinceLast = now - (this.lastShotTime || 0);
 
-    // aim positions for viewModel
+    // aim positions for viewModel (local space offsets relative to camera/viewmodel root)
     const gunAimPos = {
       "ak-47": { x:0, y:-0.3, z:-0.5 }, "deagle": { x:0, y:-0.3, z:-0.5 }, "m79": { x:0.2, y:-0.4, z:-0.7 },
       "viper": { x:0, y:-0.3, z:-0.5 }, "legion": { x:0, y:-0.15, z:-0.5 }, "marshal": { x:-0.025, y:-0.035, z:-0.2 }
@@ -1140,13 +1140,17 @@ export class WeaponController {
     if (this.state && this.state.pulling) {
       const tPull = (now - (this.state.pullStart||now)) / (this.stats.pullDuration || 0.001);
       if (tPull >= 1) {
-        try { if (this.viewModel.setLocalPosition) this.viewModel.setLocalPosition((this.state.pullTo||{x:0}).x, (this.state.pullTo||{y:0}).y, (this.state.pullTo||{z:0}).z); } catch(e){}
+        try {
+          if (this.viewModel.setLocalPosition) this.viewModel.setLocalPosition((this.state.pullTo||{x:0}).x, (this.state.pullTo||{y:0}).y, (this.state.pullTo||{z:0}).z);
+          else if (this.viewModel.position) this.viewModel.position.set((this.state.pullTo||{x:0}).x, (this.state.pullTo||{y:0}).y, (this.state.pullTo||{z:0}).z);
+        } catch(e){}
         this.state.pulling = false;
       } else {
         try {
           const pf = this.state.pullFrom || {x:0,y:0,z:0}; const pt = this.state.pullTo || {x:0,y:0,z:0};
           const ix = lerp(pf.x, pt.x, clamp(tPull,0,1)); const iy = lerp(pf.y, pt.y, clamp(tPull,0,1)); const iz = lerp(pf.z, pt.z, clamp(tPull,0,1));
-          if (this.viewModel.setLocalPosition) this.viewModel.setLocalPosition(ix,iy,iz); else if (this.viewModel.position) this.viewModel.position.set(ix,iy,iz);
+          if (this.viewModel.setLocalPosition) this.viewModel.setLocalPosition(ix,iy,iz);
+          else if (this.viewModel.position) this.viewModel.position.set(ix,iy,iz);
         } catch (e) {}
       }
     }
@@ -1160,18 +1164,36 @@ export class WeaponController {
 
     // Aim toggle tweening
     if (wishAim !== this._prevWishAim) {
+      // if mid-pull or reloading, ignore aim toggle to avoid jank
       if (this.state.pulling || this.isReloadingFlag) { this._prevWishAim = wishAim; return; }
       const aimableGuns = ["ak-47","deagle","m79","viper","legion","marshal"];
       if (wishAim && !aimableGuns.includes(this.currentKey)) { this._prevWishAim = wishAim; return; }
 
-      this._baseFov = this.getCameraFov();
-      // read scale & pos
+      // read scale & pos (robust across PC/THREE)
       const readScale = () => {
-        try { if (this.viewModel && typeof this.viewModel.getLocalScale === 'function') return this.viewModel.getLocalScale(); if (this.viewModel && this.viewModel.scale) return { x:this.viewModel.scale.x, y:this.viewModel.scale.y, z:this.viewModel.scale.z }; } catch(e){}
+        try {
+          if (this.viewModel && typeof this.viewModel.getLocalScale === 'function') {
+            const s = this.viewModel.getLocalScale();
+            return { x: s.x, y: s.y, z: s.z };
+          }
+          if (this.viewModel && this.viewModel.scale) {
+            const s = this.viewModel.scale;
+            return { x: s.x !== undefined ? s.x : s, y: s.y !== undefined ? s.y : s, z: s.z !== undefined ? s.z : s };
+          }
+        } catch(e){}
         return {x:1,y:1,z:1};
       };
       const readPos = () => {
-        try { if (this.viewModel && typeof this.viewModel.getLocalPosition === 'function') return this.viewModel.getLocalPosition(); if (this.viewModel && this.viewModel.position) return { x:this.viewModel.position.x, y:this.viewModel.position.y, z:this.viewModel.position.z }; } catch(e){}
+        try {
+          if (this.viewModel && typeof this.viewModel.getLocalPosition === 'function') {
+            const p = this.viewModel.getLocalPosition();
+            return { x: p.x, y: p.y, z: p.z };
+          }
+          if (this.viewModel && this.viewModel.position) {
+            const p = this.viewModel.position;
+            return { x: p.x, y: p.y, z: p.z };
+          }
+        } catch(e){}
         return {x:0,y:0,z:0};
       };
 
@@ -1179,18 +1201,29 @@ export class WeaponController {
       this._baseScale = { x: currentScale.x, y: currentScale.y, z: currentScale.z };
       this._fromPos = readPos();
 
-      const adsFovMap = (typeof ADS_FOV !== "undefined") ? {
-        "ak-47": ADS_FOV.ak47, "viper": ADS_FOV.viper, "deagle": ADS_FOV.deagle, "m79": ADS_FOV.m79, "legion": ADS_FOV.legion, "marshal": ADS_FOV.marshal
-      } : {};
-
-      const targetFov = wishAim ? ((this.stats && this.stats.isSniper) ? (ADS_FOV ? ADS_FOV.marshal : this._baseFov) : (adsFovMap[this.currentKey] || (ADS_FOV ? ADS_FOV.default : this._baseFov))) : (ADS_FOV ? ADS_FOV.default : this._baseFov);
-
+      // NOTE: We intentionally DO NOT change camera FOV for ADS to avoid "zooming" the camera.
+      // The tween below will only animate the viewModel's position/scale/rotation (not camera FOV).
       const toPos = wishAim ? (gunAimPos[this.currentKey] ? gunAimPos[this.currentKey] : (this.readyPos || {x:0,y:0,z:0})) : (this.readyPos ? this.readyPos : {x:0,y:0,z:0});
-      const scaleFactor = (this._baseFov && this._baseFov !== 0) ? (targetFov / this._baseFov) : 1;
-      const toScale = { x: this._baseScale.x * scaleFactor, y: this._baseScale.y * scaleFactor, z: this._baseScale.z * scaleFactor };
 
-      this._fovTween = { active: true, fromFov: this._baseFov, toFov: targetFov, fromScale: { ...this._baseScale }, toScale, fromPos: {...this._fromPos}, toPos, startTime: now, duration: 0.2 };
+      // Keep scale consistent while ADS (avoid scaling the viewmodel to invisible sizes)
+      const toScale = { x: this._baseScale.x, y: this._baseScale.y, z: this._baseScale.z };
 
+      this._fovTween = {
+        active: true,
+        // camera fov will be preserved — store only for reference
+        fromFov: this.getCameraFov(),
+        toFov: this.getCameraFov(),
+        fromScale: { ...this._baseScale },
+        toScale,
+        fromPos: { ...this._fromPos },
+        toPos,
+        startTime: now,
+        duration: 0.2,
+        // flag to indicate we should NOT apply camera FOV change
+        applyFovToCamera: false
+      };
+
+      // hide scope overlay only when necessary (sniper handled later)
       if (this.currentKey !== "marshal" && typeof scopeOverlay !== "undefined" && scopeOverlay) scopeOverlay.style.display = 'none';
     }
     this._prevWishAim = wishAim;
@@ -1205,6 +1238,7 @@ export class WeaponController {
       if (clamped >= 1) {
         this._fovTween.active = false;
         this._aiming = wishAim;
+        // sniper special handling: show/hide overlay and optionally hide viewmodel
         if (this.currentKey === "marshal") {
           if (this._aiming) {
             if (typeof scopeOverlay !== "undefined" && scopeOverlay) scopeOverlay.style.display = 'block';
@@ -1220,9 +1254,11 @@ export class WeaponController {
         }
       }
 
-      const newFov = lerp(this._fovTween.fromFov, this._fovTween.toFov, s);
-      this.setCameraFov(newFov);
+      // NOTE: do NOT change camera FOV here to avoid zooming effect.
+      // const newFov = lerp(this._fovTween.fromFov, this._fovTween.toFov, s);
+      // this.setCameraFov(newFov);
 
+      // animate scale (kept equal to base to avoid disappearing models)
       try {
         const fs = this._fovTween.fromScale || {x:1,y:1,z:1}; const ts = this._fovTween.toScale || {x:1,y:1,z:1};
         const sx = fs.x + (ts.x - fs.x) * s; const sy = fs.y + (ts.y - fs.y) * s; const sz = fs.z + (ts.z - fs.z) * s;
@@ -1230,6 +1266,7 @@ export class WeaponController {
         else if (this.viewModel && this.viewModel.scale) this.viewModel.scale.set(sx,sy,sz);
       } catch (e) {}
 
+      // animate position (center the gun relative to camera)
       try {
         const fp = this._fovTween.fromPos || {x:0,y:0,z:0}; const tp = this._fovTween.toPos || {x:0,y:0,z:0};
         const px = fp.x + (tp.x - fp.x) * s, py = fp.y + (tp.y - fp.y) * s, pz = fp.z + (tp.z - fp.z) * s;
@@ -1238,6 +1275,7 @@ export class WeaponController {
       } catch (e) {}
     }
 
+    // ensure viewModel visible if not aiming (in case sniper branch hid it)
     if (!this._aiming) {
       if (isPcEntity(this.viewModel)) { try { this.viewModel.enabled = true; } catch (e) {} }
       else if (this.viewModel && this.viewModel.visible !== undefined) this.viewModel.visible = true;
