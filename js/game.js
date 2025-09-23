@@ -893,140 +893,144 @@ function _disposeWebGLCanvasesInContainer(container, keepCanvasId = "game-canvas
   }
 }
 
-// ---------- Init PlayCanvas scene (CrocodilosConstruction) ----------
+function _disposeOtherCanvases(container, keepId = "game-canvas") {
+  try {
+    const canvases = Array.from(container.querySelectorAll("canvas"));
+    canvases.forEach(c => {
+      if (c.id === keepId) return;
+      try {
+        const gl = c.getContext && (c.getContext("webgl2") || c.getContext("webgl") || c.getContext("experimental-webgl"));
+        if (gl) {
+          const ext = gl.getExtension && gl.getExtension("WEBGL_lose_context");
+          if (ext && typeof ext.loseContext === "function") ext.loseContext();
+        }
+      } catch (e) {}
+      try { c.remove(); } catch (e) {}
+    });
+  } catch (e) { console.warn("_disposeOtherCanvases error:", e); }
+}
+
+// ---------- Robust PlayCanvas scene initializer ----------
 export async function initSceneCrocodilosConstruction() {
   sceneNum = 1;
   console.log("Initializing CrocodilosConstruction scene (PlayCanvas)...");
 
-  // 0) Dispose any previous THREE / WebGL canvas in the game container to avoid context conflicts
   const container = document.getElementById("game-container");
   if (!container) throw new Error("No #game-container element found");
 
-  _disposeWebGLCanvasesInContainer(container, "game-canvas");
+  // 0) remove other canvases/contexts that may create conflicting GL contexts
+  _disposeOtherCanvases(container, "game-canvas");
 
-  // Ensure FIXED_WIDTH/HEIGHT exist (fallback)
+  // fallback fixed internal resolution
   if (!window.FIXED_WIDTH || !window.FIXED_HEIGHT) {
     window.FIXED_WIDTH = window.FIXED_WIDTH || Math.max(800, container.clientWidth || 800);
     window.FIXED_HEIGHT = window.FIXED_HEIGHT || Math.max(600, container.clientHeight || 600);
   }
 
-  // 1) Create or reuse PlayCanvas application via window.playcanvasApp
-  let pcApp = window.playcanvasApp;
+  // 1) create or reuse canvas
   let canvas = container.querySelector("#game-canvas");
   if (!canvas) {
     canvas = document.createElement("canvas");
     canvas.id = "game-canvas";
-    // set actual drawingbuffer size (very important)
+    // set drawingbuffer size *attributes* (critical)
     canvas.width = window.FIXED_WIDTH;
     canvas.height = window.FIXED_HEIGHT;
     canvas.style.width = "100%";
     canvas.style.height = "100%";
     container.appendChild(canvas);
   } else {
-    // ensure canvas attributes match expected
     canvas.width = canvas.width || window.FIXED_WIDTH;
     canvas.height = canvas.height || window.FIXED_HEIGHT;
     canvas.style.width = "100%";
     canvas.style.height = "100%";
   }
 
+  // 2) create or reuse the PlayCanvas app (single global instance)
+  let pcApp = window.playcanvasApp;
   if (!pcApp) {
-    // create app and attach input devices to canvas explicitly
     pcApp = new pc.Application(canvas, {
       mouse: new pc.Mouse(canvas),
       touch: new pc.TouchDevice(canvas),
       keyboard: new pc.Keyboard(window)
     });
 
-    // Use fixed internal resolution similar to your original approach
-    try {
-      pcApp.setCanvasFillMode(pc.FILLMODE_NONE);
-      pcApp.setCanvasResolution(pc.RESOLUTION_FIXED);
-    } catch (e) {
-      console.warn("setCanvasFillMode/resolution failed (engine mismatch?):", e);
-    }
+    // fixed-res config
+    try { pcApp.setCanvasFillMode(pc.FILLMODE_NONE); pcApp.setCanvasResolution(pc.RESOLUTION_FIXED); } catch (e) {}
 
-    // force the canvas drawingbuffer size immediately
-    try { pcApp.resizeCanvas(window.FIXED_WIDTH, window.FIXED_HEIGHT); } catch (e) { console.warn("resizeCanvas failed:", e); }
-
-    // cap pixel ratio to avoid hi-dpi framebuffer bigness
+    // enforce drawingbuffer size & cap pixel ratio
+    try { pcApp.resizeCanvas(window.FIXED_WIDTH, window.FIXED_HEIGHT); } catch (e) {}
     try { if (pcApp.graphicsDevice) pcApp.graphicsDevice.maxPixelRatio = 1; } catch (e) {}
 
-    // start engine loop
     pcApp.start();
     window.playcanvasApp = pcApp;
     console.log("Created new PlayCanvas app and started it.");
   } else {
-    // On reuse, ensure canvas/drawbuffer sizes are correct and attach to this container
-    try {
-      const gd = pcApp.graphicsDevice;
-      if (gd && gd.canvas !== canvas) {
-        // If PlayCanvas's canvas differs, swap it if possible (best-effort)
-        try { gd.canvas.parentNode && gd.canvas.parentNode.removeChild(gd.canvas); } catch (e) {}
-      }
-      // ensure drawingbuffer size
-      try { pcApp.resizeCanvas(window.FIXED_WIDTH, window.FIXED_HEIGHT); } catch (e) {}
-    } catch (e) {}
+    // ensure canvas/drawbuffer sizes match our fixed resolution
+    try { pcApp.resizeCanvas(window.FIXED_WIDTH, window.FIXED_HEIGHT); } catch (e) {}
     console.log("Reusing existing PlayCanvas app.");
   }
 
-  // Expose global references
-  window.pcApp = pcApp;
-  window.camera = window.camera || null;
-  window.scene = pcApp.root;
+  // Small delayed re-assertion (works around engine race where drawingbuffer can be zero momentarily)
+  setTimeout(() => {
+    try {
+      const gd = pcApp.graphicsDevice;
+      if (gd && gd.canvas) {
+        // Force attributes on the canvas the GL device actually uses
+        gd.canvas.width = window.FIXED_WIDTH;
+        gd.canvas.height = window.FIXED_HEIGHT;
+        gd.canvas.style.width = `${container.clientWidth}px`;
+        gd.canvas.style.height = `${container.clientHeight}px`;
+      }
+      try { pcApp.resizeCanvas(window.FIXED_WIDTH, window.FIXED_HEIGHT); } catch (e) {}
+    } catch (e) { /* ignore */ }
+    // dump sizes for debugging
+    try {
+      const gd = pcApp.graphicsDevice;
+      const gl = gd && gd.gl;
+      console.log("Post-start canvas sizes:",
+        gd && gd.canvas && gd.canvas.width, "x", gd && gd.canvas && gd.canvas.height,
+        "GL drawingBuffer:", gl && gl.drawingBufferWidth, "x", gl && gl.drawingBufferHeight);
+    } catch (e) {}
+  }, 50);
 
-  // 2) Camera: ensure only one "game-camera" exists; create if missing or replace
+  // 3) camera entity - always recreate to keep names consistent for other code
   try {
     const prevCam = pcApp.root.findByName("game-camera");
     if (prevCam) prevCam.destroy();
   } catch (e) {}
-
   const cameraEnt = new pc.Entity("game-camera");
-  cameraEnt.addComponent("camera", {
-    clearColor: new pc.Color(0.0, 0.0, 0.0), // keep black default; change if you like visible sky
-    fov: 60,
-    nearClip: 0.1,
-    farClip: 2000
-  });
+  cameraEnt.addComponent("camera", { clearColor: new pc.Color(0,0,0), fov:60, nearClip:0.1, farClip:2000 });
   cameraEnt.setLocalPosition(0, 1.6, 0);
   pcApp.root.addChild(cameraEnt);
 
   window.camera = cameraEnt;
   window.scene = pcApp.root;
 
-  // 3) Light
+  // 4) directional light (best effort)
   try {
     const prevLight = pcApp.root.findByName("map-sun");
     if (prevLight) prevLight.destroy();
-
     const sunEnt = new pc.Entity("map-sun");
-    sunEnt.addComponent("light", {
-      type: "directional",
-      color: new pc.Color(1, 1, 1),
-      intensity: 0.9,
-      castShadows: false
-    });
+    sunEnt.addComponent("light", { type: "directional", color: new pc.Color(1,1,1), intensity: 0.9, castShadows:false });
     sunEnt.setLocalEulerAngles(50, 30, 0);
     pcApp.root.addChild(sunEnt);
     window.hemi = sunEnt;
-  } catch (e) {
-    console.warn("Failed to create PlayCanvas light:", e);
-  }
+  } catch (e) { console.warn("failed to create light", e); }
 
-  // 4) Disable references to old THREE composer to prevent accidental use
+  // 5) disable previous three composer references if present
   try { composer = null; renderPass = null; window.composer = null; window.renderPass = null; } catch (e) {}
 
-  // 5) Load the map and BVH collider (use the PlayCanvas root and current physicsController)
+  // 6) load map and BVH collider (keeps your original createCrocodilosConstruction API)
   let spawnPoints = [];
   try {
     spawnPoints = await createCrocodilosConstruction(pcApp.root, physicsController);
   } catch (err) {
     console.warn("createCrocodilosConstruction failed:", err);
-    spawnPoints = [{ x: 0, y: 2, z: 0 }];
+    spawnPoints = [{ x:0, y:2, z:0 }];
   }
   window.spawnPoints = spawnPoints;
 
-  // choose initial spawn
+  // 7) set initial player position if physics controller supports it
   const initialSpawnPoint = (typeof findFurthestSpawn === "function") ? findFurthestSpawn() : spawnPoints[0];
   if (physicsController && typeof physicsController.setPlayerPosition === "function") {
     physicsController.setPlayerPosition(initialSpawnPoint);
@@ -1035,53 +1039,23 @@ export async function initSceneCrocodilosConstruction() {
     console.warn("physicsController.setPlayerPosition not available.");
   }
 
-  // 6) Audio attempt - non-blocking
-  if (typeof windSound !== "undefined") {
-    try { windSound.play().catch(err => console.warn("Failed to play wind sound:", err)); } catch (e) {}
-    window.windSound = windSound;
-  } else {
-    console.warn("windSound is not defined. Audio might not play for CrocodilosConstruction.");
-  }
-
-  // 7) Resize handling (ensures drawingbuffer size and CSS size)
+  // 8) resize handler
   function onWindowResize() {
     const displayWidth = Math.max(1, container.clientWidth);
     const displayHeight = Math.max(1, container.clientHeight);
-
-    // Keep fixed internal resolution for deterministic physics/collisions
-    try {
-      pcApp.resizeCanvas(window.FIXED_WIDTH, window.FIXED_HEIGHT);
-      const c = pcApp.graphicsDevice.canvas;
-      if (c) {
-        c.style.width = `${displayWidth}px`;
-        c.style.height = `${displayHeight}px`;
-      }
-    } catch (e) {
-      try { pcApp.resizeCanvas(displayWidth, displayHeight); } catch (e2) {}
-    }
-
-    // re-attach weapons for local/remote players if necessary (best-effort)
-    try {
-      if (window.weaponController && window.localPlayer && typeof getWeaponModel === 'function' && typeof attachWeaponToPlayer === 'function') {
-        const key = window.localPlayer.weapon.replace(/-/g, "").toLowerCase();
-        const proto = getWeaponModel(key);
-        if (proto) attachWeaponToPlayer(window.localPlayer.id, key);
-      }
-    } catch (e) { console.warn("Error re-attaching local weapon after resize:", e); }
-
-    // HUD sizing
+    try { pcApp.resizeCanvas(window.FIXED_WIDTH, window.FIXED_HEIGHT); } catch (e) { try { pcApp.resizeCanvas(displayWidth, displayHeight); } catch (e2) {} }
+    const c = pcApp.graphicsDevice && pcApp.graphicsDevice.canvas;
+    if (c) { c.style.width = `${displayWidth}px`; c.style.height = `${displayHeight}px`; }
     const hud = document.getElementById("hud");
     if (hud) { hud.style.width = `${displayWidth}px`; hud.style.height = `${displayHeight}px`; }
   }
-
   window.addEventListener("resize", onWindowResize, false);
   onWindowResize();
 
-  // 8) Hook game loop into PlayCanvas update (attach once)
+  // 9) attach update hook once
   if (pcApp && !pcApp._gameUpdateAttached) {
     pcApp.on("update", function(dt) {
-      const timestamp = performance.now();
-      try { playcanvasFrameUpdate(dt, timestamp); } catch (err) { console.error("playcanvasFrameUpdate error:", err); }
+      try { playcanvasFrameUpdate(dt, performance.now()); } catch (err) { console.error("playcanvasFrameUpdate error:", err); }
     });
     pcApp._gameUpdateAttached = true;
   }
@@ -3101,6 +3075,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
