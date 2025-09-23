@@ -1331,129 +1331,44 @@ export function addRemotePlayer(data) {
     }
     // If incomplete entry exists, remove it
     if (existing) {
-        try {
-            if (existing.rootEnt) existing.rootEnt.destroy();
-        } catch (e) {}
+        try { if (existing.rootEnt) existing.rootEnt.destroy(); } catch (e) {}
         delete window.remotePlayers[data.id];
     }
 
     if (!window.scene) {
-        console.error("Critical Error: window.scene is not initialized when attempting to add remote player mesh.");
+        console.error("Critical Error: window.scene is not initialized when attempting to add remote player entity.");
         return;
     }
-
     const pcApp = window.playcanvasApp;
     if (!pcApp) {
         console.error("PlayCanvas app not available to create remote player.");
         return;
     }
 
-    // initialColor fallback
+    // initialColor fallback (stored for later use if/when a model is attached)
     const initialColor = (typeof data.trueColor === 'number') ? data.trueColor
         : (typeof data.bodyColor === 'number' ? data.bodyColor : 0xffffff);
 
     console.log(`Remote player ${data.id} initialColor -> 0x${initialColor.toString(16).padStart(6, '0')}`);
 
-    // Root entity
+    // Root entity only — no placeholder body/head/weapon created
     const root = new pc.Entity(`remotePlayer_${data.id}`);
     root.setLocalPosition(data.x || 0, data.y || 0, data.z || 0);
-    root.setLocalEulerAngles(0, (data.rotY || 0) * (180/Math.PI), 0);
-    root.enabled = true;
-
-    // Body - box
-    const body = new pc.Entity(`rp_body_${data.id}`);
-    body.addComponent('model', { type: 'box' });
-    body.setLocalScale(0.6, 1.9, 0.6);
-    body.setLocalPosition(0, -1.1, 0); // relative offset
-    // apply material color
-    try {
-        const mat = new pc.StandardMaterial();
-        mat.diffuse = new pc.Color(
-            ((initialColor >> 16) & 0xff) / 255,
-            ((initialColor >> 8) & 0xff) / 255,
-            (initialColor & 0xff) / 255
-        );
-        mat.update();
-        body.model.material = mat;
-    } catch (e) { /* ignore */ }
-
-    // Head - smaller box
-    const head = new pc.Entity(`rp_head_${data.id}`);
-    head.addComponent('model', { type: 'box' });
-    head.setLocalScale(0.3, 0.3, 0.3);
-    head.setLocalPosition(0, 0, 0);
-    // head color (yellowish)
-    try {
-        const m2 = new pc.StandardMaterial();
-        m2.diffuse = new pc.Color(1.0, 1.0, 0.66);
-        m2.update();
-        head.model.material = m2;
-    } catch (e) {}
-
-    // Weapon root & mesh (simple plane box as placeholder)
-    const weaponRoot = new pc.Entity(`rp_weaponRoot_${data.id}`);
-    weaponRoot.setLocalPosition(0.3, -1.0, -0.2);
-    const weaponMesh = new pc.Entity(`rp_weapon_${data.id}`);
-    weaponMesh.addComponent('model', { type: 'box' });
-    weaponMesh.setLocalScale(0.05, 0.5, 0.02);
-    weaponMesh.setLocalPosition(0, 0, 0);
-    // default dark material
-    try {
-        const m3 = new pc.StandardMaterial();
-        m3.diffuse = new pc.Color(0.1, 0.1, 0.1);
-        m3.update();
-        weaponMesh.model.material = m3;
-    } catch (e) {}
-
-    weaponRoot.addChild(weaponMesh);
-
-    // Health bar placeholder (2D plane above head)
-    let healthBarObj = null;
-    try {
-        const hb = new pc.Entity(`rp_health_${data.id}`);
-        hb.addComponent('render', { enabled: true }); // fallback, but we will attach a plane model
-        hb.addComponent('element', {
-            type: pc.ELEMENTTYPE_IMAGE,
-            anchor: [0.5, 0.5, 0.5, 0.5],
-            pivot: [0.5, 0.5],
-            width: 60,
-            height: 6
-        });
-        // If element/element is not desired in worldspace, skip adding to root (left as placeholder)
-        hb.setLocalPosition(0, 0.5, -0.4);
-        hb.setLocalScale(0.25, 0.75, 1);
-        healthBarObj = {
-            group: hb,
-            update: function(health = 100, shield = 0) {
-                // placeholder simple update (no texture) - user should replace with proper UI
-                // keep as no-op for now
-            }
-        };
-    } catch (e) {
-        healthBarObj = {
-            group: null,
-            update: function() {}
-        };
-    }
-
-    // Assemble the hierarchy
-    root.addChild(body);
-    root.addChild(head);
-    root.addChild(weaponRoot);
-    if (healthBarObj && healthBarObj.group) root.addChild(healthBarObj.group);
-
-    // add entities to scene
+    // rotY in incoming data is likely radians; convert to degrees for setLocalEulerAngles
+    root.setLocalEulerAngles(0, (data.rotY || 0) * (180 / Math.PI), 0);
+    root.enabled = !data.isDead; // if dead, can be disabled initially (up to your usage)
     window.scene.addChild(root);
 
-    // store in map
+    // Store an entry with null placeholders — ready for real models to be attached later
     window.remotePlayers[data.id] = {
         id: data.id,
         rootEnt: root,
-        bodyEnt: body,
-        headEnt: head,
-        weaponRoot,
-        weaponEnt: weaponMesh,
-        healthBarObj,
+        // Removed placeholder entities. These are intentionally null so your real model loader
+        // can attach actual meshes later via attachWeaponToPlayer / other helpers.
+        bodyEnt: null,
+        headEnt: null,
+        weaponRoot: null,
+        weaponEnt: null,
         data: { ...data },
         currentWeapon: data.weapon || null,
         swingAnim: { active: false, timerId: null, startTime: 0, duration: 0 },
@@ -1461,10 +1376,10 @@ export function addRemotePlayer(data) {
         originalColor: initialColor
     };
 
-    // Attach weapon model if you have a loader (skipped here — weapon is placeholder box)
-    console.log(`Successfully added remote player: ${data.username || data.id} (ID: ${data.id})`);
+    console.log(`Added remote player entity (no placeholders): ${data.username || data.id} (ID: ${data.id})`);
     return window.remotePlayers[data.id];
 }
+
 
 
 
@@ -2554,133 +2469,192 @@ function resetWeaponPose(weaponKey, mesh) {
     }
 }
 
-function attachWeaponToPlayer(playerId, weaponName) {
-    const key = weaponName.replace(/-/g, "").toLowerCase();
-    const rp = window.remotePlayers[playerId];
-    if (!rp) return;
+export function attachWeaponToPlayer(playerId, weaponName) {
+  if (!playerId) return;
+  window.remotePlayers = window.remotePlayers || {};
+  const rp = window.remotePlayers[playerId];
+  if (!rp) {
+    console.warn(`attachWeaponToPlayer: remote player ${playerId} not found`);
+    return;
+  }
 
-    // 1) Clear any previous model
-    while (rp.weaponRoot.children.length) {
-        rp.weaponRoot.remove(rp.weaponRoot.children[0]);
+  const key = (weaponName || "").replace(/-/g, "").toLowerCase();
+  const pcApp = window.playcanvasApp;
+
+  // Ensure weaponRoot exists
+  if (!rp.weaponRoot) {
+    rp.weaponRoot = new pc.Entity(`rp_weaponRoot_${playerId}`);
+    // small default offset relative to root if needed
+    rp.weaponRoot.setLocalPosition(0.3, -1.0, -0.2);
+    rp.rootEnt.addChild(rp.weaponRoot);
+  }
+
+  // 1) Clear previous weapon children
+  try {
+    if (rp.weaponRoot._children && rp.weaponRoot._children.length) {
+      // destroy all existing children (deep)
+      while (rp.weaponRoot._children.length) {
+        const c = rp.weaponRoot._children[0];
+        // detach then destroy to be safe
+        if (c._parent) c._parent.removeChild(c);
+        try { c.destroy(); } catch (e) { /* ignore */ }
+      }
     }
-    rp.weaponMesh = null;
+  } catch (e) {
+    console.warn("attachWeaponToPlayer: failed clearing previous weapon children", e);
+  }
+  rp.weaponEnt = null;
+  rp.currentWeapon = null;
 
-    // 2) Get preloaded prototype
-    const proto = _prototypeModels[key];
+  // 2) Try to use a preloaded prototype model (expected to be a PlayCanvas Entity)
+  const protoStore = window._prototypeModels || {};
+  const proto = protoStore[key];
+  if (proto && typeof proto.clone === "function") {
+    try {
+      const clone = proto.clone(); // deep clone entity tree
+      rp.weaponRoot.addChild(clone);
+      // apply transforms per-weapon (kept consistent with original three.js values)
+      switch (key) {
+        case "knife":
+          clone.setLocalScale(0.0007, 0.0007, 0.0007);
+          clone.setLocalEulerAngles(90, 180, 0);
+          clone.setLocalPosition(0.5, 0.8 - 1.4, 0);
+          break;
+        case "deagle":
+        case "legion":
+          clone.setLocalScale(0.5, 0.5, 0.5);
+          clone.setLocalEulerAngles(0, 180, 0);
+          clone.setLocalPosition(0.5, 0.8 - 1.4, 0);
+          break;
+        case "ak47":
+        case "viper":
+          clone.setLocalScale(0.4, 0.4, 0.4);
+          clone.setLocalEulerAngles(0, 180, 0);
+          clone.setLocalPosition(0.5, 0.8 - 1.4, 0);
+          break;
+        case "marshal":
+          clone.setLocalScale(2, 2, 2);
+          clone.setLocalEulerAngles(0, 0, 0);
+          clone.setLocalPosition(0.5, 0.8 - 1.4, 0);
+          break;
+        case "m79":
+          clone.setLocalScale(0.5, 0.5, 0.5);
+          clone.setLocalEulerAngles(0, 180, 0);
+          clone.setLocalPosition(0.5, 0.8 - 1.4, 0);
+          break;
+        default:
+          console.warn(`attachWeaponToPlayer(): unknown weapon key "${key}" — attached prototype with no special transform`);
+          break;
+      }
 
-    if (proto && proto.children.length) {
-        const clone = proto.clone(true);
-        clone.visible = true;
+      rp.weaponEnt = clone;
+      rp.currentWeapon = key;
+      console.log(`[attachWeaponToPlayer] attached prototype "${key}" to player ${playerId}`);
+      return;
+    } catch (e) {
+      console.warn("attachWeaponToPlayer: failed to clone prototype, falling back to loader", e);
+    }
+  }
 
-        // 3) Apply original buildX() transforms
-        switch (key) {
-            case "knife": {
-                const s = 0.0007;
-                clone.scale.set(s, s, s);
-                clone.rotation.set(
-                    THREE.MathUtils.degToRad(90),
-                    THREE.MathUtils.degToRad(180),
-                    0
-                );
-                clone.position.set(0.5, 0.8 - 1.4, 0);
-                break;
-            }
-            case "deagle":
-                clone.scale.set(0.5, 0.5, 0.5);
-                clone.rotation.set(
-                    THREE.MathUtils.degToRad(0),
-                    THREE.MathUtils.degToRad(180),
-                    0
-                );
-                clone.position.set(0.5, 0.8 - 1.4, 0);
-                break;
+  // 3) Fallback: Attempt to load GLB into PlayCanvas at runtime (async). Does not return a Promise;
+  //    it attaches the weapon entity when load completes.
+  const urlMap = {
+    knife: 'https://raw.githubusercontent.com/thearthd/3d-models/main/Weapon/voidffa_knife_V6.glb',
+    deagle: 'https://raw.githubusercontent.com/thearthd/3d-models/main/Weapon/voidffa_deagle.glb',
+    legion: 'https://raw.githubusercontent.com/thearthd/3d-models/main/Legion1212.glb',
+    ak47: 'https://raw.githubusercontent.com/thearthd/3d-models/main/Weapon/voidffa_AK47_V2.glb',
+    viper: 'https://raw.githubusercontent.com/thearthd/3d-models/main/Viper.glb',
+    marshal: 'https://raw.githubusercontent.com/thearthd/3d-models/main/svd_sniper_rfile.glb',
+    m79: 'https://raw.githubusercontent.com/thearthd/3d-models/main/M-79.glb'
+  };
 
-            case "legion":
-                clone.scale.set(0.5, 0.5, 0.5);
-                clone.rotation.set(
-                    THREE.MathUtils.degToRad(0),
-                    THREE.MathUtils.degToRad(180),
-                    0
-                );
-                clone.position.set(0.5, 0.8 - 1.4, 0);
-                break;
+  const url = urlMap[key];
+  if (!url) {
+    console.warn(`attachWeaponToPlayer(): No prototype and no fallback URL for "${key}"`);
+    return;
+  }
 
-            case "ak47":
-                clone.scale.set(0.4, 0.4, 0.4);
-                clone.rotation.set(
-                    THREE.MathUtils.degToRad(0),
-                    THREE.MathUtils.degToRad(180),
-                    0
-                );
-                clone.position.set(0.5, 0.8 - 1.4, 0);
-                break;
+  if (!pcApp || !pcApp.assets || typeof pcApp.assets.loadFromUrl !== "function") {
+    console.warn("attachWeaponToPlayer(): PlayCanvas asset loader not available to load weapon GLB.");
+    return;
+  }
 
-            case "viper":
-                clone.scale.set(0.4, 0.4, 0.4);
-                clone.rotation.set(
-                    THREE.MathUtils.degToRad(0),
-                    THREE.MathUtils.degToRad(180),
-                    0
-                );
-                clone.position.set(0.5, 0.8 - 1.4, 0);
-                break;
-
-            case "marshal":
-                clone.scale.set(2, 2, 2);
-                clone.rotation.set(
-                    THREE.MathUtils.degToRad(0),
-                    THREE.MathUtils.degToRad(0),
-                    0
-                );
-                clone.position.set(0.5, 0.8 - 1.4, 0);
-                break;
-
-            case "m79":
-                clone.scale.set(0.5, 0.5, 0.5);
-                clone.rotation.set(
-                    THREE.MathUtils.degToRad(0),
-                    THREE.MathUtils.degToRad(180),
-                    0
-                );
-                clone.position.set(0.5, 0.8 - 1.4, 0);
-                break;
-
-            default:
-                console.warn(`attachWeaponToPlayer(): Unknown weapon "${key}"`);
-                return;
+  // Load as 'container' to support instantiation helpers
+  try {
+    pcApp.assets.loadFromUrl(url, "container", (err, asset) => {
+      if (err) {
+        console.warn(`[attachWeaponToPlayer] failed loading "${key}" from ${url}:`, err);
+        return;
+      }
+      try {
+        let ent = null;
+        if (asset.resource && typeof asset.resource.instantiateModelEntity === "function") {
+          ent = asset.resource.instantiateModelEntity();
+        } else if (asset.resource && typeof asset.resource.instantiateRenderEntity === "function") {
+          ent = asset.resource.instantiateRenderEntity();
+        } else if (asset.resource && typeof asset.resource.instantiate === "function") {
+          ent = asset.resource.instantiate();
+        } else {
+          console.warn("[attachWeaponToPlayer] loaded asset has no instantiate helper; cannot attach.");
+          return;
         }
 
-        // 4) Parent it under the hand and record for animation
-        rp.weaponRoot.add(clone);
-        rp.weaponMesh = clone;
+        // safe default parent/transform
+        rp.weaponRoot.addChild(ent);
+
+        switch (key) {
+          case "knife":
+            ent.setLocalScale(0.001, 0.001, 0.001); // GLB scales vary — use small default
+            ent.setLocalEulerAngles(90, 160, 0);
+            ent.setLocalPosition(0.5, -0.1, -0.7);
+            break;
+          case "deagle":
+            ent.setLocalScale(5, 5, 5);
+            ent.setLocalEulerAngles(7, 180, 0);
+            ent.setLocalPosition(0.15 * (window.innerWidth / 1920), 0.1 * (window.innerHeight / 1080), -0.1 * (window.innerWidth / 1920));
+            break;
+          case "legion":
+            ent.setLocalScale(5, 5, 5);
+            ent.setLocalEulerAngles(7, 180, 0);
+            ent.setLocalPosition(0.15 * (window.innerWidth / 1920), 0.1 * (window.innerHeight / 1080), -0.1 * (window.innerWidth / 1920));
+            break;
+          case "ak47":
+            ent.setLocalScale(0.4, 0.4, 0.4);
+            ent.setLocalEulerAngles(4, 180, 0);
+            ent.setLocalPosition(0.35 * (window.innerWidth / 1920), -0.15 * (window.innerHeight / 1080), -0.3 * (window.innerWidth / 1920));
+            break;
+          case "viper":
+            ent.setLocalScale(0.4, 0.4, 0.4);
+            ent.setLocalEulerAngles(4, 180, 0);
+            ent.setLocalPosition(0.35 * (window.innerWidth / 1920), -0.15 * (window.innerHeight / 1080), 0);
+            break;
+          case "marshal":
+            ent.setLocalScale(1, 1, 1);
+            ent.setLocalEulerAngles(0, 0, 0);
+            ent.setLocalPosition(0.15 * (window.innerWidth / 1920), 0.15 * (window.innerHeight / 1080), -0.1 * (window.innerWidth / 1920));
+            break;
+          case "m79":
+            ent.setLocalScale(5, 5, 5);
+            ent.setLocalEulerAngles(7, 180, 0);
+            ent.setLocalPosition(0.15 * (window.innerWidth / 1920), 0.1 * (window.innerHeight / 1080), -0.1 * (window.innerWidth / 1920));
+            break;
+          default:
+            // no-op transform
+            break;
+        }
+
+        rp.weaponEnt = ent;
         rp.currentWeapon = key;
-        return;
-    }
-
-    // 5) Knife fallback only if prototype isn't ready
-    if (key === "knife") {
-        console.warn(`[attachWeaponToPlayer] Knife prototype missing — fallback to live build`);
-        const tempWC = new WeaponController(new THREE.Group());
-        tempWC.buildKnife((knifeGroup) => {
-            knifeGroup.visible = true;
-            knifeGroup.scale.set(0.001, 0.001, 0.001);
-            knifeGroup.rotation.set(
-                THREE.MathUtils.degToRad(90),
-                THREE.MathUtils.degToRad(160),
-                0
-            );
-            knifeGroup.position.set(0.5, -0.1, -0.7);
-
-            rp.weaponRoot.add(knifeGroup);
-            rp.weaponMesh = knifeGroup;
-            rp.currentWeapon = "knife";
-
-            console.log(`[${playerId}] attached fallback knife as weaponMesh`, knifeGroup);
-        });
-    } else {
-        console.warn(`attachWeaponToPlayer(): No prototype available for "${key}"`);
-    }
+        console.log(`[attachWeaponToPlayer] dynamically loaded & attached "${key}" to player ${playerId}`);
+      } catch (e) {
+        console.warn("[attachWeaponToPlayer] error instantiating loaded weapon:", e);
+      }
+    });
+  } catch (e) {
+    console.warn("[attachWeaponToPlayer] failed to start loader:", e);
+  }
 }
+
 
 
 
@@ -3088,6 +3062,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
