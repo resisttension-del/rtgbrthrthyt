@@ -8,10 +8,38 @@ export function voidEngine({ width = 1280, height = 720 } = {}) {
   canvas.height = height;
   const ctx = canvas.getContext('2d');
 
-  let clearColor = { hex: 0x000000, alpha: 1 };
+  // Scratch vars for projections & temp math
+  const proj = new THREE.Vector3();
+  const tmpPos = new THREE.Vector3();
+  const tmpVec = new THREE.Vector3();
+  const tmpMat = new THREE.Matrix4();
+
+  // helper: build convex hull (Andrew monotone chain) of 2D points
+  function convexHull(points) {
+    if (points.length <= 1) return points.slice();
+    const pts = points.slice().sort((a, b) => (a.x === b.x ? a.y - b.y : a.x - b.x));
+    const cross = (o, a, b) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+    const lower = [];
+    for (let p of pts) {
+      while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop();
+      lower.push(p);
+    }
+    const upper = [];
+    for (let i = pts.length - 1; i >= 0; i--) {
+      const p = pts[i];
+      while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop();
+      upper.push(p);
+    }
+    lower.pop();
+    upper.pop();
+    return lower.concat(upper);
+  }
 
   const api = {
     domElement: canvas,
+    options: {
+      strictNearClip: true
+    },
     setSize(w, h, updateStyle = true) {
       canvas.width = w;
       canvas.height = h;
@@ -21,12 +49,13 @@ export function voidEngine({ width = 1280, height = 720 } = {}) {
       }
     },
     setClearColor(hex, alpha = 1) {
-      clearColor = { hex, alpha };
+      api._clearColor = { hex, alpha };
     },
-    // Only draw boxes: sort by depth, draw filled then outline if requested
+    _clearColor: { hex: 0x000000, alpha: 1 },
+
     render(scene, camera) {
-      // Clear
-      const c = clearColor;
+      // Clear the canvas
+      const c = api._clearColor;
       const r = (c.hex >> 16) & 0xff;
       const g = (c.hex >> 8) & 0xff;
       const b = c.hex & 0xff;
@@ -39,62 +68,80 @@ export function voidEngine({ width = 1280, height = 720 } = {}) {
       camera.updateMatrixWorld();
       if (camera.updateProjectionMatrix) camera.updateProjectionMatrix();
 
-      const boxes = [];
-      scene.traverse(obj => {
+      const camInv = tmpMat.copy(camera.matrixWorld).invert();
+
+      // 1. Collect drawables (only meshes with bounding boxes for boxes)
+      const drawables = [];
+      scene.traverse((obj) => {
         if (!obj.visible) return;
-        if (!obj.isMesh || !obj.geometry || !obj.geometry.boundingBox) return;
+        if (obj.isCamera || obj.isLight) return;
+        if (!obj.isMesh || !obj.geometry) return;
 
-        // Get world-space box corners
-        obj.geometry.computeBoundingBox();
-        const bb = obj.geometry.boundingBox;
-        const corners = [
-          [bb.min.x, bb.min.y, bb.min.z], [bb.min.x, bb.min.y, bb.max.z],
-          [bb.min.x, bb.max.y, bb.min.z], [bb.min.x, bb.max.y, bb.max.z],
-          [bb.max.x, bb.min.y, bb.min.z], [bb.max.x, bb.min.y, bb.max.z],
-          [bb.max.x, bb.max.y, bb.min.z], [bb.max.x, bb.max.y, bb.max.z]
-        ];
-        // Project all corners to screen
-        const screenPts = corners.map(c =>
-          new THREE.Vector3(c[0], c[1], c[2]).applyMatrix4(obj.matrixWorld).project(camera)
-        );
-        // Screen coordinates
-        const xs = screenPts.map(p => (p.x * 0.5 + 0.5) * canvas.width);
-        const ys = screenPts.map(p => (-p.y * 0.5 + 0.5) * canvas.height);
-        const minX = Math.min(...xs), maxX = Math.max(...xs);
-        const minY = Math.min(...ys), maxY = Math.max(...ys);
-        // Use average z of box for sorting
-        const avgZ = screenPts.reduce((sum, p) => sum + p.z, 0) / screenPts.length;
+        // Ensure bounding box
+        const geom = obj.geometry;
+        if (!geom.boundingBox) geom.computeBoundingBox && geom.computeBoundingBox();
 
-        boxes.push({
-          x: minX, y: minY,
-          width: Math.max(2, maxX - minX),
-          height: Math.max(2, maxY - minY),
-          z: avgZ,
-          color: obj.userData?.color || (obj.material.color ? obj.material.color.getStyle() : '#eee'),
-          opacity: obj.material.opacity ?? 1,
-          outline: !!obj.userData?.drawBoundingBox
-        });
+        if (geom.boundingBox) {
+          // Project all 8 corners of the box
+          const bb = geom.boundingBox;
+          const corners = [
+            [bb.min.x, bb.min.y, bb.min.z], [bb.min.x, bb.min.y, bb.max.z],
+            [bb.min.x, bb.max.y, bb.min.z], [bb.min.x, bb.max.y, bb.max.z],
+            [bb.max.x, bb.min.y, bb.min.z], [bb.max.x, bb.min.y, bb.max.z],
+            [bb.max.x, bb.max.y, bb.min.z], [bb.max.x, bb.max.y, bb.max.z]
+          ];
+          const pts2d = [];
+          const zs = [];
+          for (let c of corners) {
+            tmpVec.set(c[0], c[1], c[2]).applyMatrix4(obj.matrixWorld);
+            const cameraSpace = tmpVec.clone().applyMatrix4(camInv);
+            const projected = tmpVec.clone().project(camera);
+            const px = (projected.x * 0.5 + 0.5) * canvas.width;
+            const py = (-projected.y * 0.5 + 0.5) * canvas.height;
+            pts2d.push({ x: px, y: py, ndcZ: projected.z });
+            zs.push(cameraSpace.z);
+          }
+          // Use the minimum z (closest point to camera) for painter's sort
+          const minZ = Math.min(...zs);
+
+          // Build convex hull for footprint
+          const hull = convexHull(pts2d);
+
+          drawables.push({
+            type: 'box',
+            obj,
+            pts: hull,
+            zSort: minZ, // painter's sort key
+            color: obj.userData?.color || (obj.material.color ? obj.material.color.getStyle() : 'white'),
+            opacity: obj.material.opacity !== undefined ? obj.material.opacity : 1,
+            outline: !!obj.userData?.drawBoundingBox
+          });
+        }
       });
 
-      // Sort boxes farthest to nearest (most negative z to least)
-      boxes.sort((a, b) => a.z - b.z);
+      // 2. Sort by closest z (painter's order: farthest first)
+      drawables.sort((a, b) => a.zSort - b.zSort);
 
-      // Draw all boxes
-      for (const box of boxes) {
+      // 3. Draw
+      for (const d of drawables) {
+        // Fill the convex hull footprint
         ctx.save();
-        ctx.globalAlpha = box.opacity;
-        ctx.fillStyle = box.color;
-        ctx.fillRect(box.x, box.y, box.width, box.height);
-        ctx.restore();
+        ctx.beginPath();
+        ctx.moveTo(d.pts[0].x, d.pts[0].y);
+        for (let j = 1; j < d.pts.length; j++) ctx.lineTo(d.pts[j].x, d.pts[j].y);
+        ctx.closePath();
+        ctx.globalAlpha = d.opacity;
+        ctx.fillStyle = d.color;
+        ctx.fill();
 
-        if (box.outline) {
-          ctx.save();
+        // Optionally draw outline
+        if (d.outline) {
           ctx.globalAlpha = 1;
-          ctx.strokeStyle = 'yellow';
           ctx.lineWidth = 2;
-          ctx.strokeRect(box.x, box.y, box.width, box.height);
-          ctx.restore();
+          ctx.strokeStyle = 'yellow';
+          ctx.stroke();
         }
+        ctx.restore();
       }
     }
   };
