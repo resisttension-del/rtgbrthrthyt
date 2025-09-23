@@ -2287,7 +2287,25 @@ export function playcanvasFrameUpdate(delta, timestamp) {
       physicsController.setSpeedModifier(weaponController.stats.speedModifier);
     }
 
-syncPhysicsCamToPcWithSnapping();
+    // --- ensure PlayCanvas camera follows the freshly-updated physics camera ---
+    try {
+      if (typeof window.syncPhysicsCamToPcWithSnapping === "function") {
+        window.syncPhysicsCamToPcWithSnapping();
+      } else {
+        // fallback: direct copy if sync function missing
+        if (physicsController && physicsController.camera && window.camera && typeof window.camera.setLocalPosition === "function") {
+          const phys = physicsController.camera;
+          window.camera.setLocalPosition(phys.position.x, phys.position.y + (window.EYE_OFFSET || -0.6), phys.position.z);
+          const rx = phys.rotation.x * 180/Math.PI;
+          const ry = phys.rotation.y * 180/Math.PI;
+          const rz = phys.rotation.z * 180/Math.PI;
+          window.camera.setLocalEulerAngles(rx, ry, rz);
+        }
+      }
+    } catch (syncErr) {
+      console.warn("playcanvasFrameUpdate: syncPhysicsCam failed:", syncErr);
+    }
+
       
     // Remote players falling (works with three or PlayCanvas entities)
     const GRAVITY = 9.8;
@@ -2481,28 +2499,19 @@ syncPhysicsCamToPcWithSnapping();
 // Backwards-compatible animate export: if other code still calls animate(timestamp),
 // we'll forward to PlayCanvas update once and no-op otherwise (PlayCanvas drives updates).
 export function animate(timestamp) {
-  // schedule next frame first
+  // Schedule next frame first
   requestAnimationFrame(animate);
 
-  // always attempt to sync physics camera -> PlayCanvas camera every frame (if function exists)
-  try {
-    if (typeof window.syncPhysicsCamToPcWithSnapping === "function") {
-      window.syncPhysicsCamToPcWithSnapping();
-    }
-  } catch (e) {
-    console.warn("animate: sync call failed", e);
-  }
-
-  // keep previous compatibility behavior:
-  // If PlayCanvas app exists, it runs its own update loop; we still call sync above so camera follows.
+  // If PlayCanvas app is present it runs its own update loop.
+  // We must not prematurely overwrite PlayCanvas camera here.
   if (window.playcanvasApp) return;
 
-  // If pcApp module-level variable exists (legacy), don't run fallback loop
+  // If legacy module-level pcApp exists, don't run fallback loop.
   if (typeof pcApp !== "undefined" && pcApp) return;
 
-  // Otherwise, run your old requestAnimationFrame-based fallback loop (minimal)
-  // Place any original per-frame work you want here if needed.
+  // Optionally: put any non-PlayCanvas per-frame work here if needed.
 }
+
 
 
 
@@ -3091,6 +3100,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
