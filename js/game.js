@@ -824,21 +824,7 @@ function setupDetailToggle() {
 
 
 
-
-
-/* ---------- Updated scene initializers (CPU renderer) ---------- */
-
-// playcanvasRenderer.js
-// Assumes your existing createCrocodilosConstruction(scene, physicsController) and
-// other map loaders remain available (they currently use Three.js and produce a BVH).
-// This file will:
-//  - create a PlayCanvas Application and canvas inside #game-container
-//  - load the same GLB(s) into PlayCanvas for visuals
-//  - keep the Three.js BVH creation (hidden) for physics by calling your existing map loader
-//  - set up camera, lights, audio hook, and resize behavior
-//
-// NOTE: you can later migrate physicsController to PlayCanvas/Ammo if you prefer — see notes.
-
+// Updated PlayCanvas init function (drop into your playcanvasRenderer.js)
 export async function initSceneCrocodilosConstructionPlayCanvas({
   physicsController,
   GLB_MODEL_URL = 'https://raw.githubusercontent.com/thearthd/3d-models/main/newmaptest.glb',
@@ -847,55 +833,43 @@ export async function initSceneCrocodilosConstructionPlayCanvas({
   detailsEnabled = true,
   windSound // optional HTMLAudioElement / AudioBuffer wrapper you already use
 } = {}) {
-  console.log('Initializing CrocodilosConstruction in PlayCanvas...');
+  console.log('Initializing CrocodilosConstruction in PlayCanvas (updated)...');
 
-  // --- 0) Create/clear canvas inside #game-container
-  const container = document.getElementById('game-container');
-  if (!container) throw new Error('#game-container not found');
+  // --- Helpers ---
+  function radToDeg(rad) { return rad * 180 / Math.PI; }
 
-  // remove previous canvas element(s)
-  Array.from(container.querySelectorAll('canvas')).forEach(c => c.remove());
+  function enableShadowsRecursively(ent) {
+    if (!ent) return;
+    // model component exists as ent.model in PlayCanvas runtime
+    if (ent.model) {
+      try {
+        // Some PlayCanvas builds expose model.castShadows / receiveShadows on the component
+        ent.model.castShadows = true;
+        ent.model.receiveShadows = true;
+      } catch (e) {
+        console.warn('enableShadowsRecursively: failed for', ent.name, e);
+      }
+    }
+    if (Array.isArray(ent.children) && ent.children.length) {
+      for (let i = 0; i < ent.children.length; i++) {
+        enableShadowsRecursively(ent.children[i]);
+      }
+    }
+  }
 
-  // create canvas element for PlayCanvas
-  const canvas = document.createElement('canvas');
-  canvas.id = 'playcanvas-canvas';
-  canvas.style.width = '100%';
-  canvas.style.height = '100%';
-  container.appendChild(canvas);
-
-  // --- 1) Create PlayCanvas application
-  const app = new pc.Application(canvas, {
-    mouse: new pc.Mouse(canvas),
-    touch: new pc.TouchDevice(canvas)
-  });
-  // Fill the container and handle retina
-  app.setCanvasFillMode(pc.FILLMODE_FILL_WINDOW);
-  app.setCanvasResolution(pc.RESOLUTION_AUTO);
-  app.start();
-
-  // Expose to window for debugging
-  window.pcApp = app;
-  window.playcanvas = pc;
-
-  // --- 2) Camera
-  const cameraEnt = new pc.Entity('camera');
-  cameraEnt.addComponent('camera', {
-    clearColor: new pc.Color(0, 0, 0),
-    fov: 60
-  });
-  // place camera similar to your previous camera orientation
-  cameraEnt.setPosition(0, 1.6, 5);
-  app.root.addChild(cameraEnt);
-  window.pcCameraEntity = cameraEnt;
-
-  // Optional: orbit or pointer lock controls — simple orbit example:
-  // (You can replace with a robust control module)
-  (function attachSimpleOrbit() {
+  function attachSimpleOrbit(cameraEnt, canvas) {
     let yaw = 0, pitch = 0;
-    let pointerDown = false;
-    let lastX = 0, lastY = 0;
-    canvas.addEventListener('pointerdown', e => { pointerDown = true; lastX = e.clientX; lastY = e.clientY; canvas.setPointerCapture(e.pointerId); });
-    window.addEventListener('pointerup', () => pointerDown = false);
+    let pointerDown = false, lastX = 0, lastY = 0;
+
+    canvas.addEventListener('pointerdown', e => {
+      pointerDown = true;
+      lastX = e.clientX;
+      lastY = e.clientY;
+      if (canvas.setPointerCapture) try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
+    });
+
+    window.addEventListener('pointerup', () => { pointerDown = false; });
+
     window.addEventListener('pointermove', e => {
       if (!pointerDown) return;
       const dx = e.clientX - lastX, dy = e.clientY - lastY;
@@ -903,12 +877,109 @@ export async function initSceneCrocodilosConstructionPlayCanvas({
       yaw -= dx * 0.0025;
       pitch += dy * 0.0025;
       pitch = Math.max(-Math.PI/2 + 0.01, Math.min(Math.PI/2 - 0.01, pitch));
-      cameraEnt.setEulerAngles(pc.math.radToDeg(pitch), pc.math.radToDeg(yaw), 0);
+      cameraEnt.setEulerAngles(radToDeg(pitch), radToDeg(yaw), 0);
     });
-  })();
 
-  // --- 3) Lighting roughly matching your Three.js lights
-  // directional (sun) light
+    // wheel to zoom
+    canvas.addEventListener('wheel', e => {
+      e.preventDefault();
+      const cam = cameraEnt.camera;
+      // move camera forward/back along local Z (simple zoom)
+      const forward = cameraEnt.forward ? cameraEnt.forward.clone() : new pc.Vec3(0,0,-1);
+      const dz = Math.sign(e.deltaY) * 0.5;
+      try {
+        cameraEnt.translateLocal(0, 0, dz);
+      } catch (err) {
+        // fallback: modify position
+        const p = cameraEnt.getPosition();
+        cameraEnt.setPosition(p.x, p.y, p.z + dz);
+      }
+    }, { passive: false });
+  }
+
+  // Robust GLB loader for PlayCanvas
+  function loadGLBPlayCanvas(app, url) {
+    return new Promise((resolve, reject) => {
+      try {
+        const asset = new pc.Asset('mapContainer', 'container', { url });
+        console.log('PlayCanvas: creating asset', asset);
+        app.assets.add(asset);
+
+        asset.once && asset.once('load', onLoad);
+        asset.on && asset.on('load', onLoad);
+        asset.once && asset.once('error', onError);
+        asset.on && asset.on('error', onError);
+
+        function onLoad() {
+          try {
+            const containerResource = asset.resource;
+            if (!containerResource) {
+              console.error('PlayCanvas: container resource missing after load', asset);
+              return reject(new Error('Container resource missing'));
+            }
+            const instance = containerResource.instantiateRenderEntity();
+            instance.name = 'CrocodilosVisuals';
+            app.root.addChild(instance);
+
+            enableShadowsRecursively(instance);
+            resolve(instance);
+          } catch (err) {
+            console.error('PlayCanvas: instantiateRenderEntity failed', err);
+            reject(err);
+          }
+        }
+
+        function onError(err) {
+          console.error('PlayCanvas: asset load error', err);
+          reject(err);
+        }
+
+        // start loading
+        app.assets.load(asset);
+      } catch (err) {
+        console.error('PlayCanvas: exception creating/loading asset', err);
+        reject(err);
+      }
+    });
+  }
+
+  // --- 0) Prepare container & canvas ---
+  const container = document.getElementById('game-container');
+  if (!container) throw new Error('#game-container not found');
+
+  // remove previous canvas elements to avoid multiple contexts
+  Array.from(container.querySelectorAll('canvas')).forEach(c => c.remove());
+
+  const canvas = document.createElement('canvas');
+  canvas.id = 'playcanvas-canvas';
+  canvas.style.width = '100%';
+  canvas.style.height = '100%';
+  container.appendChild(canvas);
+
+  // --- 1) Create PlayCanvas application ---
+  const app = new pc.Application(canvas, {
+    mouse: new pc.Mouse(canvas),
+    touch: new pc.TouchDevice(canvas)
+  });
+  app.setCanvasFillMode(pc.FILLMODE_FILL_WINDOW);
+  app.setCanvasResolution(pc.RESOLUTION_AUTO);
+  app.start();
+
+  // expose for debugging
+  window.pcApp = app;
+  window.playcanvasApp = app;
+
+  // --- 2) Camera ---
+  const cameraEnt = new pc.Entity('camera');
+  cameraEnt.addComponent('camera', { clearColor: new pc.Color(0,0,0), fov: 60 });
+  cameraEnt.setPosition(0, 1.6, 5);
+  app.root.addChild(cameraEnt);
+  window.pcCameraEntity = cameraEnt;
+
+  // attach safe orbit controls
+  attachSimpleOrbit(cameraEnt, canvas);
+
+  // --- 3) Lights ---
   const sun = new pc.Entity('directionalLight');
   sun.addComponent('light', {
     type: 'directional',
@@ -919,11 +990,9 @@ export async function initSceneCrocodilosConstructionPlayCanvas({
     shadowResolution: 2048,
     shadowDistance: 200
   });
-  // place and point toward origin
   sun.setEulerAngles(50, -30, 0);
   app.root.addChild(sun);
 
-  // soft ambient / hemisphere-like effect
   const ambient = new pc.Entity('ambientLight');
   ambient.addComponent('light', {
     type: 'ambient',
@@ -932,116 +1001,71 @@ export async function initSceneCrocodilosConstructionPlayCanvas({
   });
   app.root.addChild(ambient);
 
-  // --- 4) Load GLB into PlayCanvas for visuals
-  // We'll load the GLB as a container asset, instantiate it, and add to app.root
-  function loadGLBPlayCanvas(url) {
-    return new Promise((resolve, reject) => {
-      // PlayCanvas uses asset type 'container' for glb/gltf
-      const asset = new pc.Asset('mapContainer', 'container', { url });
-      app.assets.add(asset);
-      app.assets.load(asset);
-
-      asset.on('load', () => {
-        try {
-          // instantiate the container's model(s)
-          // container.resource.instantiateRenderEntity() is the typical pattern:
-          const containerResource = asset.resource; // pc.ContainerResource
-          const instance = containerResource.instantiateRenderEntity();
-          // instance is a root entity containing the model hierarchy
-          instance.name = 'CrocodilosVisuals';
-          app.root.addChild(instance);
-
-          // optionally: enable shadows on model entities
-          instance.findByTag && instance.findByTag('model'); // fallback
-          instance.model && (instance.model.castShadows = true);
-          // traverse children and enable shadows if model component found
-          instance.forEach && instance.forEach(child => {
-            if (child.model) {
-              child.model.castShadows = true;
-              child.model.receiveShadows = true;
-            }
-          });
-
-          resolve(instance);
-        } catch (err) {
-          reject(err);
-        }
-      });
-
-      asset.on('error', err => reject(err));
-    });
+  // --- 4) Build BVH collider using your Three.js loader (offscreen scene) ---
+  // Create a hidden Three.Scene to avoid rendering the Three scene in any renderer
+  const threeSceneForBVH = new THREE.Scene();
+  let spawnPoints = [];
+  try {
+    spawnPoints = await createCrocodilosConstruction(threeSceneForBVH, physicsController);
+    console.log('Three.js BVH collider creation finished.');
+  } catch (err) {
+    console.warn('BVH creation (Three.js) failed or returned with errors:', err);
   }
 
-  // --- 5) Meanwhile, run your existing Three.js-based map loader to build BVH for physics.
-  // This uses your existing createCrocodilosConstruction which returns spawnPoints and
-  // invokes physicsController.setCollider(collider) with the Three.js collider mesh.
-  //
-  // To avoid double-adding the Three scene to your render tree, call createCrocodilosConstruction
-  // but do NOT attach its returned gltfGroup to any visible Three renderer (your current map.js
-  // *already* adds to the Three scene — if you kept that, set that scene as hidden and never render it).
-  //
-  // Another approach (safer): copy/create a small Three.Scene purely for BVH generation and call the parts of your map loader that generate the merged BVH geometry, then call physicsController.setCollider(collider).
-  //
-  // Below I call your function but temporarily pass a *hidden* Three.Scene. If your create function
-  // strictly requires adding to the visible Three.js scene, adapt as needed.
-
-  // Create an offscreen Three.Scene for BVH & collider (don't attach a renderer to it)
-  const threeSceneForBVH = new THREE.Scene();
-  // call your map loader with the offscreen scene and your physicsController so it builds the BVH
-  // (this will run the GLTFLoader and create the BVH collider and call physicsController.setCollider)
-  const spawnPoints = await createCrocodilosConstruction(threeSceneForBVH, physicsController);
-
-  // --- 6) Load the visual GLB into PlayCanvas (separate from Three-only BVH)
-  let playcanvasMapInstance;
+  // --- 5) Load visual GLB into PlayCanvas ---
+  let playcanvasMapInstance = null;
   try {
-    playcanvasMapInstance = await loadGLBPlayCanvas(GLB_MODEL_URL);
+    playcanvasMapInstance = await loadGLBPlayCanvas(app, GLB_MODEL_URL);
     console.log('PlayCanvas: visual map instantiated.');
   } catch (err) {
-    console.warn('PlayCanvas: failed to load visual GLB', err);
+    console.warn('PlayCanvas visual GLB load failed:', err);
   }
 
-  // --- 7) Audio
+  // --- 6) Audio ---
   if (windSound) {
     try {
-      // if windSound is an HTMLAudioElement or object with play()
       await windSound.play();
       window.windSound = windSound;
     } catch (err) {
-      console.warn('Failed to play wind sound:', err);
+      console.warn('Failed to play windSound:', err);
     }
   } else {
-    console.warn('windSound not provided to PlayCanvas init.');
+    console.warn('No windSound provided.');
   }
 
-  // --- 8) expose spawn points and set initial player position via physicsController
+  // --- 7) Expose spawn points and set initial player position via physicsController ---
   window.spawnPoints = spawnPoints || [];
-  const initialSpawnPoint = (typeof findFurthestSpawn === 'function') ? findFurthestSpawn() : (spawnPoints && spawnPoints[0]) || new THREE.Vector3(0,2,0);
+  const initialSpawnPoint = (typeof findFurthestSpawn === 'function')
+    ? findFurthestSpawn()
+    : (spawnPoints && spawnPoints[0]) || new THREE.Vector3(0,2,0);
+
   if (initialSpawnPoint && physicsController && typeof physicsController.setPlayerPosition === 'function') {
-    // convert THREE.Vector3 to simple object if needed
     const p = initialSpawnPoint;
-    physicsController.setPlayerPosition({ x: p.x, y: p.y, z: p.z });
+    // keep compatibility with your controller's expected format
+    if (typeof p.x !== 'undefined') {
+      physicsController.setPlayerPosition({ x: p.x, y: p.y, z: p.z });
+    } else {
+      // fallback if spawnPoints are plain arrays or objects
+      physicsController.setPlayerPosition(p);
+    }
   }
 
-  // --- 9) Responsive resizing: keep HUD sized to container
+  // --- 8) Resize handling (PlayCanvas auto-resizes, keep HUD synced) ---
   function onResize() {
     const w = container.clientWidth;
     const h = container.clientHeight;
-
-    // PlayCanvas app will auto-resize (we used FILLMODE_FILL_WINDOW), but ensure HUD (HTML overlay) matches
     const hud = document.getElementById('hud');
-    if (hud) {
-      hud.style.width = `${w}px`;
-      hud.style.height = `${h}px`;
-    }
-
-    // if you need to update the projection aspect manually:
-    const cam = cameraEnt.camera;
-    cam.aspectRatio = w / h;
+    if (hud) { hud.style.width = `${w}px`; hud.style.height = `${h}px`; }
+    // PlayCanvas auto-handles camera aspect for RESOLUTION_AUTO + FILL_WINDOW
   }
   window.addEventListener('resize', onResize, false);
   onResize();
 
-  // --- 10) Return a small controller object so caller can hook further
+  // --- 9) Final hooks & return context ---
+  window.playcanvasApp = app;
+  window.playcanvasMapInstance = playcanvasMapInstance;
+  window.threeSceneForBVH = threeSceneForBVH;
+
   return {
     app,
     cameraEntity: cameraEnt,
@@ -1050,6 +1074,7 @@ export async function initSceneCrocodilosConstructionPlayCanvas({
     spawnPoints
   };
 }
+
 
 export async function initSceneSigmaCity() {
   sceneNum = 2;
@@ -3043,6 +3068,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
