@@ -1,5 +1,5 @@
 // voidEnginePlayCanvas.js
-export function voidEnginePlayCanvas({ width = 1280, height = 720, playcanvasAttrs = {} } = {}) {
+export function voidEngine({ width = 1280, height = 720, playcanvasAttrs = {} } = {}) {
   // create overlay canvas (2D) — we'll draw bounding hulls, sprites, markers here
   const canvas = document.createElement('canvas');
   canvas.style.position = 'relative';
