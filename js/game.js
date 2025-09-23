@@ -2251,7 +2251,9 @@ export function playcanvasFrameUpdate(delta, timestamp) {
     if (!window.mapReady) { postFrameCleanup(); return; }
     if (!window.localPlayer) { postFrameCleanup(); return; }
 
+    // -----------------------
     // Death screen handling
+    // -----------------------
     if (window.localPlayer.isDead) {
       const cross = document.getElementById("crosshair");
       if (cross) cross.style.display = "none";
@@ -2270,7 +2272,6 @@ export function playcanvasFrameUpdate(delta, timestamp) {
       }
       if (respawnOverlay) respawnOverlay.style.display = "flex";
 
-      // PlayCanvas auto-renders; nothing explicit to call here for the final frame.
       postFrameCleanup();
       return;
     } else {
@@ -2280,40 +2281,23 @@ export function playcanvasFrameUpdate(delta, timestamp) {
       if (cross) cross.style.display = "block";
     }
 
-    // Normal game updates
+    // -----------------------
+    // Misc updates
+    // -----------------------
     checkForDamagePulse();
 
     if (weaponController.stats && weaponController.stats.speedModifier != null) {
       physicsController.setSpeedModifier(weaponController.stats.speedModifier);
     }
 
-    // --- ensure PlayCanvas camera follows the freshly-updated physics camera ---
-    try {
-      if (typeof window.syncPhysicsCamToPcWithSnapping === "function") {
-        window.syncPhysicsCamToPcWithSnapping();
-      } else {
-        // fallback: direct copy if sync function missing
-        if (physicsController && physicsController.camera && window.camera && typeof window.camera.setLocalPosition === "function") {
-          const phys = physicsController.camera;
-          window.camera.setLocalPosition(phys.position.x, phys.position.y + (window.EYE_OFFSET || -0.6), phys.position.z);
-          const rx = phys.rotation.x * 180/Math.PI;
-          const ry = phys.rotation.y * 180/Math.PI;
-          const rz = phys.rotation.z * 180/Math.PI;
-          window.camera.setLocalEulerAngles(rx, ry, rz);
-        }
-      }
-    } catch (syncErr) {
-      console.warn("playcanvasFrameUpdate: syncPhysicsCam failed:", syncErr);
-    }
-
-      
-    // Remote players falling (works with three or PlayCanvas entities)
+    // -----------------------
+    // Remote players falling (engine-agnostic)
+    // -----------------------
     const GRAVITY = 9.8;
     Object.values(window.remotePlayers || {}).forEach(rp => {
       const g = rp.group;
       if (g?.userData?.isFalling) {
         g.userData.velocityY = (g.userData.velocityY || 0) + GRAVITY * delta;
-        // read/set position in engine-agnostic way
         const pos = getPosition(g);
         pos.y -= g.userData.velocityY * delta;
         setPosition(g, pos);
@@ -2321,15 +2305,16 @@ export function playcanvasFrameUpdate(delta, timestamp) {
         if (pos.y < -20) {
           g.userData.isFalling = false;
           g.userData.velocityY = 0;
-          // hide entity/object whichever API
-          if (typeof g.enabled !== "undefined") g.enabled = false; // PlayCanvas
-          if (g.visible !== undefined) g.visible = false; // THREE
+          if (typeof g.enabled !== "undefined") g.enabled = false;
+          if (g.visible !== undefined) g.visible = false;
           if (g.setLocalPosition) g.setLocalPosition(pos.x, pos.y, pos.z);
         }
       }
     });
 
-    // animate sky / stars / fog (rotation)
+    // -----------------------
+    // Sky / stars / fog animation
+    // -----------------------
     if (window.skyMesh) {
       const e = getEuler(window.skyMesh);
       e.x += 0.0001 * (delta * 1000);
@@ -2340,9 +2325,7 @@ export function playcanvasFrameUpdate(delta, timestamp) {
       e.x += 0.00008 * (delta * 1000);
       setEuler(window.starField, e);
     }
-
     if (window.worldFog) {
-      // rotate about Y
       const we = getEuler(window.worldFog);
       we.y += delta * 0.005;
       setEuler(window.worldFog, we);
@@ -2354,13 +2337,15 @@ export function playcanvasFrameUpdate(delta, timestamp) {
       setPosition(window.worldFog, pos);
     }
 
-    // Physics & Input Update (unchanged)
+    // -----------------------
+    // Physics & Weapon Update
+    // -----------------------
     const physState = physicsController.update(delta, inputState, window.collidables);
 
-    // Weapon Update (unchanged)
     weaponController.update(
       inputState,
-      delta, {
+      delta,
+      {
         velocity: physState.velocity,
         isCrouched: inputState.crouch,
         physicsController,
@@ -2369,7 +2354,9 @@ export function playcanvasFrameUpdate(delta, timestamp) {
       }
     );
 
-    // Active Tracers Update
+    // -----------------------
+    // Tracers
+    // -----------------------
     for (let i = activeTracers.length - 1; i >= 0; i--) {
       const tracer = activeTracers[i];
       tracer.update(delta);
@@ -2379,33 +2366,113 @@ export function playcanvasFrameUpdate(delta, timestamp) {
       }
     }
 
-    // Network Sync
+    // -----------------------
+    // Mouse look + recoil (authoritative on physics camera)
+    // -----------------------
+    const baseSens = parseFloat(localStorage.getItem("sensitivity") || "5.00");
+    const aimMul = inputState.aim ? (window.localPlayer.weapon === "marshal" ? 0.15 : 0.5) : 1;
+    const finalSens = baseSens * aimMul;
+
+    // Ensure physics camera has rotation/quaternion; create if needed
+    if (physicsController && physicsController.camera) {
+      const phys = physicsController.camera;
+
+      // Ensure we have rotation (THREE.Euler) or quaternion available
+      if (!phys.rotation && phys.quaternion && typeof THREE !== "undefined") {
+        phys.rotation = new THREE.Euler().setFromQuaternion(phys.quaternion, 'YXZ');
+      }
+      if (!phys.rotation) {
+        phys.rotation = new (typeof THREE !== "undefined" ? THREE.Euler : function(){})();
+        if (phys.rotation && phys.rotation.order === undefined) phys.rotation.order = 'YXZ';
+      }
+
+      // apply yaw (y) and pitch (x) from mouse deltas
+      phys.rotation.y -= inputState.mouseDX * finalSens * 0.002;
+      let newPitch = phys.rotation.x - inputState.mouseDY * finalSens * 0.002;
+
+      // clamp pitch within slightly inside +/-90deg to avoid singularities
+      const MAX_PITCH = Math.PI / 2 - 0.01;
+      phys.rotation.x = Math.max(-MAX_PITCH, Math.min(MAX_PITCH, newPitch));
+
+      // If physics exposes quaternion, keep it in sync (so other systems that read quaternion are consistent)
+      if (phys.quaternion && typeof THREE !== "undefined") {
+        phys.quaternion.setFromEuler(phys.rotation);
+      }
+    } else if (window.camera) {
+      // fallback: old behavior on PlayCanvas camera if no physics camera present
+      const camEuler = getEuler(window.camera);
+      camEuler.y -= inputState.mouseDX * finalSens * 0.002;
+      let newPitch = camEuler.x - inputState.mouseDY * finalSens * 0.002;
+      camEuler.x = Math.max(-Math.PI / 2 + 0.01, Math.min(Math.PI / 2 - 0.01, newPitch));
+      setEuler(window.camera, camEuler);
+    }
+
+    // Recoil: compute visible offset and attach transient __visibleEuler to physics camera
+    {
+      const now = performance.now() / 1000;
+      let totalOffset = 0;
+      for (let i = activeRecoils.length - 1; i >= 0; i--) {
+        const r = activeRecoils[i];
+        const t = (now - r.start) / r.duration;
+        if (t >= 1) {
+          activeRecoils.splice(i, 1);
+          continue;
+        }
+        totalOffset += r.angle * (1 - t);
+      }
+
+      if (physicsController && physicsController.camera) {
+        const phys = physicsController.camera;
+        // produce a visible Euler: base rotation + recoil
+        if (!phys.rotation) phys.rotation = new THREE.Euler(0,0,0,'YXZ');
+        const vis = (typeof THREE !== "undefined") ? new THREE.Euler().copy(phys.rotation) : { x: phys.rotation.x, y: phys.rotation.y, z: phys.rotation.z };
+        vis.x += totalOffset;
+        phys.__visibleEuler = vis; // transient, consumed by sync function below
+      } else if (window.camera) {
+        const ce = getEuler(window.camera);
+        ce.x += totalOffset;
+        setEuler(window.camera, ce);
+      }
+    }
+
+    // -----------------------
+    // Network Sync (send authoritative physics camera rotation)
+    // -----------------------
     if (dbRefs && dbRefs.playersRef && localPlayerId) {
+      let physRot = null;
+      if (physicsController && physicsController.camera && physicsController.camera.rotation) {
+        physRot = physicsController.camera.rotation;
+      } else {
+        // fallback to PlayCanvas camera euler getter
+        try { physRot = getEuler(window.camera); } catch (e) { physRot = { x: 0, y: 0, z: 0 }; }
+      }
+
       sendPlayerUpdate({
         x: physState.x,
         y: physState.y,
         z: physState.z,
         rotY: round2(physState.rotY),
-        rotX: round2(getEuler(window.camera).x),
-        rotZ: round2(getEuler(window.camera).z),
+        rotX: round2(physRot.x),
+        rotZ: round2(physRot.z),
         weapon: window.localPlayer.weapon,
         knifeSwing: window.localPlayer.knifeSwing || false,
         knifeHeavy: window.localPlayer.knifeHeavy || false
       });
       window.localPlayer.knifeSwing = false;
       window.localPlayer.knifeHeavy = false;
-    } else {
-      // only warn occasionally to avoid spamming console
-      // console.warn("Skipping sendPlayerUpdate: dbRefs, dbRefs.playersRef or localPlayerId is null.");
     }
 
-    // Remote avatars update
+    // -----------------------
+    // Remote avatars update (network received)
+    // -----------------------
     for (const id in window.remotePlayers || {}) {
       const rp = window.remotePlayers[id];
       if (rp.data) updateRemotePlayer(rp.data);
     }
 
-    // Weapon switching
+    // -----------------------
+    // Weapon switching (unchanged)
+    // -----------------------
     if (inputState.weaponSwitch) {
       const oldW = window.localPlayer.weapon;
       weaponAmmo[oldW] = weaponController.getCurrentAmmo();
@@ -2428,58 +2495,26 @@ export function playcanvasFrameUpdate(delta, timestamp) {
       if (newW === "knife") activeRecoils.length = 0;
     }
 
-    // Mouse look + recoil (adapts to PlayCanvas camera entity)
-    const baseSens = parseFloat(localStorage.getItem("sensitivity") || "5.00");
-    const aimMul = inputState.aim ? (window.localPlayer.weapon === "marshal" ? 0.15 : 0.5) : 1;
-    const finalSens = baseSens * aimMul;
-
-    // camera rotation uses Euler helper
-    const camEuler = getEuler(window.camera);
-    camEuler.y -= inputState.mouseDX * finalSens * 0.002;
-    let newPitch = camEuler.x - inputState.mouseDY * finalSens * 0.002;
-    camEuler.x = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, newPitch));
-    setEuler(window.camera, camEuler);
-
-    // Recoil
-    {
-      const now = performance.now() / 1000;
-      let totalOffset = 0;
-      for (let i = activeRecoils.length - 1; i >= 0; i--) {
-        const r = activeRecoils[i];
-        const t = (now - r.start) / r.duration;
-        if (t >= 1) {
-          activeRecoils.splice(i, 1);
-          continue;
-        }
-        totalOffset += r.angle * (1 - t);
-      }
-      const ce = getEuler(window.camera);
-      ce.x += totalOffset;
-      setEuler(window.camera, ce);
-    }
-
-    // Rebuild collidables
+    // -----------------------
+    // Rebuild collidables list (engine-agnostic)
+    // -----------------------
     if (window.mapReady) {
       window.collidables = [...(window.envMeshes || [])];
       for (const otherId in window.remotePlayers || {}) {
         if (otherId === window.localPlayer.id) continue;
         const other = window.remotePlayers[otherId];
         const group = other.group;
-        // traverse compatibility: PlayCanvas entities have traverseHierarchy? we'll do a simple check
         if (!group) continue;
-        // If PlayCanvas entity: it has children array
         if (group.children && group.enabled !== false) {
           const stack = [group];
           while (stack.length) {
             const c = stack.pop();
-            // detect mesh-like / player body part flags
             if (c.meshInstances || c.render || (c.userData && c.userData.isPlayerBodyPart)) {
               if (c.userData?.isPlayerBodyPart) window.collidables.push(c);
             }
             if (c.children) stack.push(...c.children);
           }
         } else if (group.traverse) {
-          // Three.js traverse
           group.traverse(child => {
             if (child.isMesh && child.userData?.isPlayerBodyPart) window.collidables.push(child);
           });
@@ -2487,7 +2522,38 @@ export function playcanvasFrameUpdate(delta, timestamp) {
       }
     }
 
-    // No explicit render call needed: PlayCanvas renders automatically each frame.
+    // -----------------------
+    // Sync physics -> PlayCanvas render camera (handles snapping & recoil)
+    // -----------------------
+    try {
+      if (typeof window.syncPhysicsCamToPcWithSnapping === "function") {
+        window.syncPhysicsCamToPcWithSnapping();
+      } else {
+        // fallback direct copy (keeps prior behavior)
+        if (physicsController && physicsController.camera && window.camera && typeof window.camera.setLocalPosition === "function") {
+          const phys = physicsController.camera;
+          const eye = window.EYE_OFFSET || -0.6;
+          window.camera.setLocalPosition(phys.position.x, phys.position.y + eye, phys.position.z);
+
+          // prefer transient visible Euler (recoil) if present
+          if (phys.__visibleEuler) {
+            const out = phys.__visibleEuler;
+            window.camera.setLocalEulerAngles(out.x * 180/Math.PI, out.y * 180/Math.PI, out.z * 180/Math.PI);
+            delete phys.__visibleEuler;
+          } else if (phys.rotation) {
+            window.camera.setLocalEulerAngles(phys.rotation.x * 180/Math.PI, phys.rotation.y * 180/Math.PI, phys.rotation.z * 180/Math.PI);
+          } else if (phys.quaternion && typeof THREE !== "undefined") {
+            const q = phys.quaternion;
+            const e = new THREE.Euler().setFromQuaternion(q, 'YXZ');
+            window.camera.setLocalEulerAngles(e.x * 180/Math.PI, e.y * 180/Math.PI, e.z * 180/Math.PI);
+          }
+        }
+      }
+    } catch (syncErr) {
+      console.warn("playcanvasFrameUpdate: syncPhysicsCam failed:", syncErr);
+    }
+
+    // No explicit render call needed for PlayCanvas; it auto-renders each frame.
 
   } catch (err) {
     console.error("Error in PlayCanvas frame update:", err);
@@ -2495,6 +2561,7 @@ export function playcanvasFrameUpdate(delta, timestamp) {
     postFrameCleanup();
   }
 }
+
 
 // Backwards-compatible animate export: if other code still calls animate(timestamp),
 // we'll forward to PlayCanvas update once and no-op otherwise (PlayCanvas drives updates).
@@ -3100,6 +3167,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
