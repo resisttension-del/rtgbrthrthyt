@@ -1779,11 +1779,11 @@ minDist = dist;
 // If no remote players were found, all minDist will remain Infinity.
 // In this case, all spawn points are equally "furthest", so we'll assign a very large value.
 // If there are remote players, minDist will be a finite number.
-spawnDistances.push({
-spawnPoint: sp,
-distance: minDist
-});
-}
+//spawnDistances.push({
+//spawnPoint: sp,
+//distance: minDist
+//});
+//}
 
 // Handle case where no remote players exist (all distances are Infinity)
 if (spawnDistances.every(sd => sd.distance === Infinity)) {
@@ -3068,6 +3068,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
