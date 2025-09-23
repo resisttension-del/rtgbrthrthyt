@@ -13,49 +13,7 @@ import { sendBulletHole } from "./network.js";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { Loader } from './Loader.js';
 
-// ---- small transform helpers used by equipWeapon ----
-const DEG_TO_RAD = Math.PI / 180;
-function isPcEntity(ent) {
-  return ent && typeof ent.setLocalPosition === 'function' && typeof ent.setLocalScale === 'function';
-}
-function isThreeObject(ent) {
-  return typeof THREE !== "undefined" && ent && (ent.isObject3D || (ent.position && ent.rotation && ent.scale));
-}
-function isContainerResourceLike(ent) {
-  return ent && Array.isArray(ent.children) && ent.children.length !== undefined;
-}
-function setEntityTransform(ent, pos, rotDeg, scale) {
-  // pos/rotDeg/scale can be pc.Vec3, THREE.Vector3-like, or plain {x,y,z}
-  const toPlain = v => ({ x: (v && v.x) || 0, y: (v && v.y) || 0, z: (v && v.z) || 0 });
-  const p = toPlain(pos), r = toPlain(rotDeg), s = toPlain(scale);
 
-  try {
-    if (isPcEntity(ent)) {
-      ent.setLocalPosition(p.x, p.y, p.z);
-      ent.setLocalEulerAngles(r.x, r.y, r.z);
-      ent.setLocalScale(s.x, s.y, s.z);
-      return;
-    }
-    if (isThreeObject(ent)) {
-      ent.position.set(p.x, p.y, p.z);
-      ent.rotation.set(r.x * DEG_TO_RAD, r.y * DEG_TO_RAD, r.z * DEG_TO_RAD);
-      if (ent.scale) ent.scale.set(s.x, s.y, s.z);
-      return;
-    }
-    if (isContainerResourceLike(ent) && ent.children.length) {
-      // apply to first child (common for container instantiations)
-      return setEntityTransform(ent.children[0], p, r, s);
-    }
-    // best-effort fallback
-    if (ent) {
-      if ('setLocalPosition' in ent) try { ent.setLocalPosition(p.x,p.y,p.z); } catch {}
-      if ('setLocalEulerAngles' in ent) try { ent.setLocalEulerAngles(r.x,r.y,r.z); } catch {}
-      if ('setLocalScale' in ent) try { ent.setLocalScale(s.x,s.y,s.z); } catch {}
-    }
-  } catch (e) {
-    console.warn("setEntityTransform failed", e);
-  }
-}
 
 // ffff
 
