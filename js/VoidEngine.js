@@ -43,7 +43,7 @@ export function voidEngine({ width = 1280, height = 720 } = {}) {
       strictNearClip: true,
       // depth pass options
       useSoftwareDepth: true,          // enable the software depth pass
-      depthDownsample: 2,              // 1 = full res, 2 = half res, 4 = quarter
+      depthDownsample: 8,              // 1 = full res, 2 = half res, 4 = quarter
       depthAutoThreshold: 40,          // if number of drawables < threshold, auto-enable depth pass
       maxSoftwareTriangles: 3000,      // limit triangulation; if exceeded, fallback to painters
       forcePainterIfManyObjects: true, // if objects > N, avoid depth pass to save CPU
