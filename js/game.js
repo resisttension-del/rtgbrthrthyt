@@ -144,6 +144,49 @@ let gameEndTime   = null;   // will be fetched from gameConfigRef
 let gameInterval  = null;   // ID returned by setInterval()
 
 let manager;
+// ---- small transform helpers used by equipWeapon ----
+const DEG_TO_RAD = Math.PI / 180;
+function isPcEntity(ent) {
+  return ent && typeof ent.setLocalPosition === 'function' && typeof ent.setLocalScale === 'function';
+}
+function isThreeObject(ent) {
+  return typeof THREE !== "undefined" && ent && (ent.isObject3D || (ent.position && ent.rotation && ent.scale));
+}
+function isContainerResourceLike(ent) {
+  return ent && Array.isArray(ent.children) && ent.children.length !== undefined;
+}
+function setEntityTransform(ent, pos, rotDeg, scale) {
+  // pos/rotDeg/scale can be pc.Vec3, THREE.Vector3-like, or plain {x,y,z}
+  const toPlain = v => ({ x: (v && v.x) || 0, y: (v && v.y) || 0, z: (v && v.z) || 0 });
+  const p = toPlain(pos), r = toPlain(rotDeg), s = toPlain(scale);
+
+  try {
+    if (isPcEntity(ent)) {
+      ent.setLocalPosition(p.x, p.y, p.z);
+      ent.setLocalEulerAngles(r.x, r.y, r.z);
+      ent.setLocalScale(s.x, s.y, s.z);
+      return;
+    }
+    if (isThreeObject(ent)) {
+      ent.position.set(p.x, p.y, p.z);
+      ent.rotation.set(r.x * DEG_TO_RAD, r.y * DEG_TO_RAD, r.z * DEG_TO_RAD);
+      if (ent.scale) ent.scale.set(s.x, s.y, s.z);
+      return;
+    }
+    if (isContainerResourceLike(ent) && ent.children.length) {
+      // apply to first child (common for container instantiations)
+      return setEntityTransform(ent.children[0], p, r, s);
+    }
+    // best-effort fallback
+    if (ent) {
+      if ('setLocalPosition' in ent) try { ent.setLocalPosition(p.x,p.y,p.z); } catch {}
+      if ('setLocalEulerAngles' in ent) try { ent.setLocalEulerAngles(r.x,r.y,r.z); } catch {}
+      if ('setLocalScale' in ent) try { ent.setLocalScale(s.x,s.y,s.z); } catch {}
+    }
+  } catch (e) {
+    console.warn("setEntityTransform failed", e);
+  }
+}
 
 
 export function initGlobalFogAndShadowParams() {
@@ -1323,7 +1366,7 @@ export function addRemotePlayer(data) {
   if (!data || data.id == null) return;
   window.remotePlayers = window.remotePlayers || {};
 
-  // Remove stale entry if present
+  // If exists, remove stale
   const existing = window.remotePlayers[data.id];
   if (existing) {
     try { if (existing.rootEnt) existing.rootEnt.destroy(); } catch (e) {}
@@ -1339,19 +1382,18 @@ export function addRemotePlayer(data) {
   const initialColor = (typeof data.trueColor === 'number') ? data.trueColor
     : (typeof data.bodyColor === 'number' ? data.bodyColor : 0xffffff);
 
-  // Root entity (world-space)
+  // Create root
   const root = new pc.Entity(`remotePlayer_${data.id}`);
   root.setLocalPosition(data.x || 0, data.y || 0, data.z || 0);
   root.setLocalEulerAngles(0, (data.rotY || 0) * (180/Math.PI), 0);
   root.enabled = true;
   pcApp.root.addChild(root);
 
-  // Body entity (box)
+  // Body
   const body = new pc.Entity(`rp_body_${data.id}`);
   body.addComponent('model', { type: 'box' });
-  // scale and offset to approximate humanoid
   body.setLocalScale(0.6, 1.9, 0.6);
-  body.setLocalPosition(0, -0.95, 0); // so feet roughly at root position
+  body.setLocalPosition(0, -0.95, 0);
   try {
     const mat = new pc.StandardMaterial();
     mat.diffuse = new pc.Color(((initialColor >> 16) & 0xff) / 255, ((initialColor >> 8) & 0xff) / 255, (initialColor & 0xff) / 255);
@@ -1359,7 +1401,7 @@ export function addRemotePlayer(data) {
     body.model.material = mat;
   } catch (e) {}
 
-  // Head entity
+  // Head
   const head = new pc.Entity(`rp_head_${data.id}`);
   head.addComponent('model', { type: 'box' });
   head.setLocalScale(0.35, 0.35, 0.35);
@@ -1371,53 +1413,25 @@ export function addRemotePlayer(data) {
     head.model.material = m2;
   } catch (e) {}
 
-  // weaponRoot and placeholder weaponEnt (box) — will be replaced when attachWeaponToPlayer is called
+  // Weapon root + placeholder weapon (box). attachWeaponToPlayer will replace this when invoked.
   const weaponRoot = new pc.Entity(`rp_weaponRoot_${data.id}`);
-  weaponRoot.setLocalPosition(0.35, -0.35, 0.15); // approximate hand area relative to body
+  weaponRoot.setLocalPosition(0.35, -0.35, 0.15);
   const weaponMesh = new pc.Entity(`rp_weapon_${data.id}`);
   weaponMesh.addComponent('model', { type: 'box' });
   weaponMesh.setLocalScale(0.05, 0.5, 0.02);
   weaponMesh.setLocalPosition(0, 0, 0);
   try {
     const m3 = new pc.StandardMaterial();
-    m3.diffuse = new pc.Color(0.1, 0.1, 0.1);
+    m3.diffuse = new pc.Color(0.1,0.1,0.1);
     m3.update();
     weaponMesh.model.material = m3;
   } catch (e) {}
-
   weaponRoot.addChild(weaponMesh);
 
-  // Health bar (simple element used as placeholder)
-  let healthBarObj = null;
-  try {
-    const hb = new pc.Entity(`rp_health_${data.id}`);
-    hb.addComponent('element', {
-      type: pc.ELEMENTTYPE_IMAGE,
-      anchor: [0.5, 0.5, 0.5, 0.5],
-      pivot: [0.5, 0.5],
-      width: 60,
-      height: 6
-    });
-    hb.setLocalPosition(0, 1.6, 0);
-    hb.setLocalScale(0.25, 0.75, 1);
-    healthBarObj = {
-      group: hb,
-      update: function (health = 100, shield = 0) {
-        // simple placeholder: hide if full health, show otherwise (user may implement a better visual)
-        if (!hb || !hb.element) return;
-        // A real implementation could adjust element.color or texture UVs
-        // Keep no-op to avoid console spam
-      }
-    };
-  } catch (e) {
-    healthBarObj = { group: null, update: () => {} };
-  }
-
-  // Assemble
+  // assemble
   root.addChild(body);
   root.addChild(head);
   root.addChild(weaponRoot);
-  if (healthBarObj && healthBarObj.group) root.addChild(healthBarObj.group);
 
   // store
   window.remotePlayers[data.id] = {
@@ -1427,7 +1441,6 @@ export function addRemotePlayer(data) {
     headEnt: head,
     weaponRoot: weaponRoot,
     weaponEnt: weaponMesh,
-    healthBarObj,
     data: { ...data },
     currentWeapon: data.weapon || null,
     swingAnim: { active: false, timerId: null, startTime: 0, duration: 0 },
@@ -1435,10 +1448,15 @@ export function addRemotePlayer(data) {
     originalColor: initialColor
   };
 
-  console.log(`Added remote player ${data.id}`);
+  console.log(`Added remote player ${data.id} (${data.username || "unknown"})`);
+
+  // Immediately attach the weapon if provided
+  if (data.weapon) {
+    try { attachWeaponToPlayer(data.id, data.weapon); } catch (e) { console.warn("attachWeaponToPlayer failed in addRemotePlayer", e); }
+  }
+
   return window.remotePlayers[data.id];
 }
-
 
 
 
@@ -3029,6 +3047,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
