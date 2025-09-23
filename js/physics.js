@@ -883,29 +883,35 @@ update(deltaTime, input) {
 }
 
 
-// Put this after you have THREE available and after physicsController is constructed.
-// Exposes: window.syncPhysicsCamToPcWithSnapping()
-// Exposes runtime tunables on window: EYE_OFFSET, SNAP_DISTANCE, POSITION_LERP, SNAP_ANGLE_DEG, ROT_LERP
 window.syncPhysicsCamToPcWithSnapping = function syncPhysicsCamToPcWithSnapping() {
   try {
     if (!window.playcanvasApp) return;
-    if (!physicsController) return;
-    if (!physicsController.camera) return;
+    if (!physicsController || !physicsController.camera) return;
     if (!window.camera || typeof window.camera.setLocalPosition !== "function") return;
+    if (typeof THREE === "undefined") {
+      // still try the simple copy as fallback
+      const phys = physicsController.camera;
+      try {
+        window.camera.setLocalPosition(phys.position.x, phys.position.y + (window.EYE_OFFSET || -0.6), phys.position.z);
+        const rx = (phys.rotation?.x || 0) * 180/Math.PI;
+        const ry = (phys.rotation?.y || 0) * 180/Math.PI;
+        const rz = (phys.rotation?.z || 0) * 180/Math.PI;
+        window.camera.setLocalEulerAngles(rx, ry, rz);
+      } catch (e) { /* ignore */ }
+      return;
+    }
 
-    const physCam = physicsController.camera;
-
-    // Tunables (you can tweak these in console, e.g. window.POSITION_LERP = 0.3)
+    const phys = physicsController.camera;
     const EYE_OFFSET    = (typeof window.EYE_OFFSET !== "undefined") ? window.EYE_OFFSET : -0.6;
     const SNAP_DISTANCE = (typeof window.SNAP_DISTANCE !== "undefined") ? window.SNAP_DISTANCE : 2.0;
     const POSITION_LERP = (typeof window.POSITION_LERP !== "undefined") ? window.POSITION_LERP : 0.18;
     const SNAP_ANGLE_DEG= (typeof window.SNAP_ANGLE_DEG !== "undefined") ? window.SNAP_ANGLE_DEG : 45;
     const ROT_LERP      = (typeof window.ROT_LERP !== "undefined") ? window.ROT_LERP : 0.22;
 
-    // ---------- Position sync ----------
-    const targetPos = { x: physCam.position.x, y: physCam.position.y + EYE_OFFSET, z: physCam.position.z };
+    // --- Position sync (same as before) ---
+    const targetPos = { x: phys.position.x, y: phys.position.y + EYE_OFFSET, z: phys.position.z };
 
-    // Read current PlayCanvas camera position (try several getters)
+    // Read current PlayCanvas camera position (robust)
     let currPosVec = { x: 0, y: 0, z: 0 };
     try {
       if (typeof window.camera.getLocalPosition === "function") {
@@ -914,13 +920,8 @@ window.syncPhysicsCamToPcWithSnapping = function syncPhysicsCamToPcWithSnapping(
       } else if (typeof window.camera.getPosition === "function") {
         const p = window.camera.getPosition();
         currPosVec = { x: p.x, y: p.y, z: p.z };
-      } else if (window.camera.getPositionSync) {
-        const p = window.camera.getPositionSync();
-        currPosVec = { x: p.x, y: p.y, z: p.z };
       }
-    } catch (e) {
-      // ignore read issue; we'll snap if necessary
-    }
+    } catch (e) { /* ignore */ }
 
     const dx = targetPos.x - currPosVec.x;
     const dy = targetPos.y - currPosVec.y;
@@ -928,69 +929,92 @@ window.syncPhysicsCamToPcWithSnapping = function syncPhysicsCamToPcWithSnapping(
     const dist = Math.hypot(dx, dy, dz);
 
     if (dist > SNAP_DISTANCE || physicsController._forceCameraSnap) {
-      // big jump -> snap immediately
       window.camera.setLocalPosition(targetPos.x, targetPos.y, targetPos.z);
       if (physicsController._forceCameraSnap) physicsController._forceCameraSnap = false;
     } else {
-      // smooth follow
-      const nx = currPosVec.x + dx * POSITION_LERP;
-      const ny = currPosVec.y + dy * POSITION_LERP;
-      const nz = currPosVec.z + dz * POSITION_LERP;
-      window.camera.setLocalPosition(nx, ny, nz);
-    }
-
-    // ---------- Quaternion-based rotation sync (avoids Euler seam flips) ----------
-    try {
-      if (typeof THREE === "undefined") throw new Error("THREE is required for quaternion rotation sync");
-
-      // Target quaternion from physics camera Euler (physCam.rotation assumed a THREE.Euler)
-      const targetQuat = new THREE.Quaternion().setFromEuler(physCam.rotation);
-
-      // Read current PlayCanvas Euler (degrees)
-      let currRotDeg = { x: 0, y: 0, z: 0 };
-      try {
-        if (typeof window.camera.getLocalEulerAngles === "function") {
-          const e = window.camera.getLocalEulerAngles();
-          currRotDeg = { x: e.x || 0, y: e.y || 0, z: e.z || 0 };
-        } else if (typeof window.camera.getEuler === "function") {
-          const e = window.camera.getEuler();
-          if (e) currRotDeg = { x: e.x * 180/Math.PI, y: e.y * 180/Math.PI, z: e.z * 180/Math.PI };
-        }
-      } catch (ee) {
-        // ignore read errors
-      }
-
-      const DEG2RAD = Math.PI / 180;
-      // Use same Euler order as physics camera ('YXZ' by default in your controller)
-      const currEulerRad = new THREE.Euler(
-        (currRotDeg.x || 0) * DEG2RAD,
-        (currRotDeg.y || 0) * DEG2RAD,
-        (currRotDeg.z || 0) * DEG2RAD,
-        'YXZ'
+      window.camera.setLocalPosition(
+        currPosVec.x + dx * POSITION_LERP,
+        currPosVec.y + dy * POSITION_LERP,
+        currPosVec.z + dz * POSITION_LERP
       );
-      const currQuat = new THREE.Quaternion().setFromEuler(currEulerRad);
-
-      // Angle between quaternions
-      const dot = Math.max(-1, Math.min(1, currQuat.dot(targetQuat)));
-      const angleDeg = (2 * Math.acos(Math.abs(dot))) * (180 / Math.PI);
-
-      if (angleDeg > SNAP_ANGLE_DEG || physicsController._forceCameraSnap) {
-        // snap
-        const outEuler = new THREE.Euler().setFromQuaternion(targetQuat, 'YXZ');
-        window.camera.setLocalEulerAngles(outEuler.x * 180 / Math.PI, outEuler.y * 180 / Math.PI, outEuler.z * 180 / Math.PI);
-        if (physicsController._forceCameraSnap) physicsController._forceCameraSnap = false;
-      } else {
-        // smooth slerp
-        currQuat.slerp(targetQuat, ROT_LERP);
-        const outEuler = new THREE.Euler().setFromQuaternion(currQuat, 'YXZ');
-        window.camera.setLocalEulerAngles(outEuler.x * 180 / Math.PI, outEuler.y * 180 / Math.PI, outEuler.z * 180 / Math.PI);
-      }
-    } catch (rotErr) {
-      console.warn("syncPhysicsCam: rotation sync failed:", rotErr);
     }
+
+    // --- Rotation sync using explicit per-axis shortest-angle interpolation ---
+    // Read target Euler from physics camera in consistent order 'YXZ'
+    const targetQuat = (phys.quaternion instanceof THREE.Quaternion)
+      ? phys.quaternion.clone()
+      : new THREE.Quaternion().setFromEuler(phys.rotation || new THREE.Euler(0,0,0,'YXZ'));
+
+    // get target Euler in radians, order 'YXZ'
+    const targetEuler = new THREE.Euler().setFromQuaternion(targetQuat, 'YXZ');
+    // clamp pitch slightly inside +/- 90deg to avoid flip
+    const MAX_PITCH_RAD = Math.PI / 2 - 0.01;
+    targetEuler.x = Math.max(-MAX_PITCH_RAD, Math.min(MAX_PITCH_RAD, targetEuler.x));
+
+    // Read current PlayCanvas Euler (degrees -> radians)
+    let currRotDeg = { x: 0, y: 0, z: 0 };
+    try {
+      if (typeof window.camera.getLocalEulerAngles === "function") {
+        const e = window.camera.getLocalEulerAngles();
+        currRotDeg = { x: e.x || 0, y: e.y || 0, z: e.z || 0 };
+      } else if (typeof window.camera.getEuler === "function") {
+        const e = window.camera.getEuler();
+        if (e) currRotDeg = { x: e.x * 180/Math.PI, y: e.y * 180/Math.PI, z: e.z * 180/Math.PI };
+      }
+    } catch (ee) { /* ignore */ }
+
+    const DEG2RAD = Math.PI / 180;
+    const RAD2DEG = 180 / Math.PI;
+    const currEulerRad = new THREE.Euler(
+      (currRotDeg.x || 0) * DEG2RAD,
+      (currRotDeg.y || 0) * DEG2RAD,
+      (currRotDeg.z || 0) * DEG2RAD,
+      'YXZ'
+    );
+
+    // Convert both to degrees for easier shortest-angle math
+    const curDeg = { x: currEulerRad.x * RAD2DEG, y: currEulerRad.y * RAD2DEG, z: currEulerRad.z * RAD2DEG };
+    const tgtDeg = { x: targetEuler.x * RAD2DEG, y: targetEuler.y * RAD2DEG, z: targetEuler.z * RAD2DEG };
+
+    // If we have transient visible Euler (recoil) prefer that over raw phys.rotation
+    if (phys.__visibleEuler) {
+      tgtDeg.x = phys.__visibleEuler.x * RAD2DEG;
+      tgtDeg.y = phys.__visibleEuler.y * RAD2DEG;
+      tgtDeg.z = phys.__visibleEuler.z * RAD2DEG;
+    }
+
+    // normalize angle diff to [-180,180]
+    function shortestDiff(aDeg, bDeg) {
+      let d = (bDeg - aDeg) % 360;
+      if (d < -180) d += 360;
+      if (d > 180) d -= 360;
+      return d;
+    }
+
+    const diffX = shortestDiff(curDeg.x, tgtDeg.x);
+    const diffY = shortestDiff(curDeg.y, tgtDeg.y);
+    const diffZ = shortestDiff(curDeg.z, tgtDeg.z);
+
+    const maxAngleDelta = Math.max(Math.abs(diffX), Math.abs(diffY), Math.abs(diffZ));
+
+    if (maxAngleDelta > SNAP_ANGLE_DEG || physicsController._forceCameraSnap) {
+      // snap to target
+      window.camera.setLocalEulerAngles(tgtDeg.x, tgtDeg.y, tgtDeg.z);
+      if (physicsController._forceCameraSnap) physicsController._forceCameraSnap = false;
+    } else {
+      // smooth step per-axis by ROT_LERP proportion of the shortest diff
+      const outX = curDeg.x + diffX * ROT_LERP;
+      const outY = curDeg.y + diffY * ROT_LERP;
+      const outZ = curDeg.z + diffZ * ROT_LERP;
+      window.camera.setLocalEulerAngles(outX, outY, outZ);
+    }
+
+    // cleanup transient visibleEuler once consumed
+    if (phys.__visibleEuler) delete phys.__visibleEuler;
 
   } catch (e) {
     console.warn("syncPhysicsCamToPcWithSnapping failed:", e);
   }
-}; // end sync function
+};
+
 
