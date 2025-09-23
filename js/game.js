@@ -659,7 +659,7 @@ export async function startGame(username, mapName, initialDetailsEnabled, ffaEna
     if (mapName === 'CrocodilosConstruction') {
     // wherever you used initSceneCrocodilosConstruction()
 initSceneCrocodilosConstructionPlayCanvas({
-  physicsController: yourPhysicsController,
+  physicsController: window.physicsController,
   GLB_MODEL_URL: 'https://raw.githubusercontent.com/thearthd/3d-models/main/newmaptest.glb',
   FIXED_WIDTH: FIXED_WIDTH,
   FIXED_HEIGHT: FIXED_HEIGHT,
@@ -3043,6 +3043,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
