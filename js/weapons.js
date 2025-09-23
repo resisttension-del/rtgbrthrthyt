@@ -33,7 +33,7 @@ function createGlassMaterial(color, opacity) {
 
 const DEG_TO_RAD = Math.PI / 180;
 const RAD_TO_DEG = 180 / Math.PI;
-
+export const _prototypeModels = window._prototypeModels = window._prototypeModels || {};
 // Detection helpers
 function isPcEntity(ent) {
   return !!ent && typeof ent.setLocalPosition === 'function' && typeof ent.setLocalScale === 'function';
