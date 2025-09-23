@@ -1646,55 +1646,58 @@ addDebugMuzzleDot(muzzleObject3D, dotSize = 0.5) {
         muzzleObject3D.add(debugDot);
     }
   
-    buildDeagle(onProgressRegistrar) {
-        const loader = new GLTFLoader();
-        const url = 'https://raw.githubusercontent.com/thearthd/3d-models/main/Weapon/voidffa_deagle.glb';
-        let prog = () => {};
-        const promise = new Promise((res, rej) => {
-            loader.load(
-                url,
-                gltf => {
-                    this.weaponModel = new THREE.Group();
-                    this.parts = {};
-                    if (this.viewModel) this.viewModel.add(this.weaponModel);
-                    const model = gltf.scene;
-                    const box = new THREE.Box3().setFromObject(model);
-                    const center = box.getCenter(new THREE.Vector3());
-                    model.position.sub(center);
-                    this.weaponModel.add(model);
-                    this.weaponModel.scale.set(5, 5, 5);
-                    this.weaponModel.rotation.set(
-                        THREE.MathUtils.degToRad(7),
-                        THREE.MathUtils.degToRad(180),
-                        0
-                    );
-                    const sw = window.innerWidth, sh = window.innerHeight;
-                    this.weaponModel.position.set(
-                        0.15 * (sw/1920),
-                        0.1 * (sh/1080),
-                        -0.1 * (sw/1920)
-                    );
-                    const box2 = new THREE.Box3().setFromObject(model);
-                    const muzzle = new THREE.Object3D();
-                    muzzle.name = 'Muzzle';
-                    // These coordinates are relative to the 'model's' local space after centering
-                    // You'll likely need to adjust these values (`-box2.max.x, box2.max.y, 1`)
-                    // until the debug dot appears at the very tip of your gun's muzzle.
-                    muzzle.position.set(-box2.max.x, box2.max.y, 1);
-                    this.weaponModel.add(muzzle);
-                    this.parts.muzzle = muzzle;
+// inside PCWeaponBuilder
+buildDeagle(onProgressRegistrar) {
+  const pcApp = PC.app();
+  const url = 'https://raw.githubusercontent.com/thearthd/3d-models/main/Weapon/voidffa_deagle.glb';
+  return new Promise((resolve, reject) => {
+    if (!pcApp) return reject('No PlayCanvas app');
 
-                    // --- ADD THE DEBUG DOT HERE ---
+    pcApp.assets.loadFromUrl(url, "container", (err, asset) => {
+      if (err) return reject(err);
 
+      // instantiate a PlayCanvas entity root for the model
+      let rootEnt = null;
+      try {
+        if (asset.resource.instantiateRenderEntity) rootEnt = asset.resource.instantiateRenderEntity();
+        else if (asset.resource.instantiateModelEntity) rootEnt = asset.resource.instantiateModelEntity();
+        else rootEnt = asset.resource.instantiate();
+      } catch (e) {
+        console.warn('instantiate failed', e);
+        return reject(e);
+      }
+      if (!rootEnt) return reject('instantiate returned null');
 
-                    res(this.weaponModel);
-                },
-                evt => { if (evt.lengthComputable) prog(evt); },
-                err => rej(err)
-            );
-        });
-        return { promise, register: cb => prog = cb };
-    }
+      // make safe / local transform
+      try { if (rootEnt.parent) rootEnt.parent.removeChild(rootEnt); } catch (e) {}
+      rootEnt.enabled = true;
+      // attach to viewModel (vm passed via this.viewModel from equipWeapon)
+      if (this.viewModel && this.viewModel.addChild) {
+        this.viewModel.addChild(rootEnt);
+      } else {
+        // fallback if viewModel isn't a pc.Entity (shouldn't happen in PlayCanvas mode)
+        pcApp.root.addChild(rootEnt);
+      }
+
+      // create a muzzle empty entity and attach to model root (pos adjust later)
+      const muzzle = new pc.Entity('Muzzle');
+      muzzle.setLocalPosition(0, 0, 0);
+      muzzle.enabled = true;
+      rootEnt.addChild(muzzle);
+      this.parts.muzzle = muzzle;
+
+      // apply reasonable defaults — tune these numbers if needed
+      rootEnt.setLocalScale(0.4, 0.4, 0.4);
+      rootEnt.setLocalEulerAngles(7, 180, 0);
+      const sw = window.innerWidth, sh = window.innerHeight;
+      rootEnt.setLocalPosition(0.15 * (sw/1920), 0.1 * (sh/1080), -0.1 * (sw/1920));
+
+      this.weaponModel = rootEnt;
+      resolve(rootEnt);
+    });
+  });
+}
+
 
     buildLegion(onProgressRegistrar) {
         const loader = new GLTFLoader();
