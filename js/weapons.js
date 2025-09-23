@@ -433,384 +433,359 @@ this._recoil = {
 };
   }
 
+// PlayCanvas version of equipWeapon — drop into your PC WeaponController class
 equipWeapon(weaponKey) {
-  if (!WeaponController.WEAPONS[weaponKey]) {
-    console.warn(`[WeaponController] Unknown weapon: ${weaponKey}`);
-    return;
-  }
+    // Validate
+    if (!WeaponController.WEAPONS || !WeaponController.WEAPONS[weaponKey]) {
+        console.warn(`[WeaponController] Unknown weapon: ${weaponKey}`);
+        return;
+    }
 
-  // ---- Save current ammo ----
-  if (this.currentKey) {
-    this.ammoStore[this.currentKey] = this.ammoInMagazine;
-  }
+    const app = this.app || window.playcanvasApp;
+    if (!app) console.warn("[WeaponController] playcanvas app not found on this.app or window.playcanvasApp");
 
-  // ---- Helper: inline disposal logic (local functions) ----
-  // Dispose textures referenced by a material
-  const disposeMaterialTextures = (material) => {
-    try {
-      for (const prop in material) {
-        if (!Object.prototype.hasOwnProperty.call(material, prop)) continue;
-        const value = material[prop];
-        if (value && value.isTexture) {
-          try { value.dispose(); } catch (e) { /* ignore */ }
+    // ---- Save current ammo ----
+    if (this.currentKey) {
+        this.ammoStore = this.ammoStore || {};
+        this.ammoStore[this.currentKey] = this.ammoInMagazine;
+    }
+
+    // ---- Helpers: disposal for PlayCanvas resources ----
+    // Try to safely destroy a PlayCanvas material and its textures
+    const disposeMaterial = (mat) => {
+        if (!mat) return;
+        try {
+            // If model uses meshInstance.material instances, we'll destroy those separately.
+            if (typeof mat.destroy === "function") mat.destroy();
+        } catch (e) { /* ignore */ }
+    };
+
+    // Recursively destroy an entity and attempt to release model/meshInstance materials & textures
+    const disposeEntityRecursive = (ent) => {
+        if (!ent) return;
+        // walk children first
+        const children = ent.children ? ent.children.slice() : [];
+        for (let ch of children) {
+            disposeEntityRecursive(ch);
         }
-      }
-    } catch (e) { /* ignore */ }
-  };
 
-  // Dispose a material (array or single)
-  const disposeMaterial = (mat) => {
-    if (!mat) return;
-    if (Array.isArray(mat)) {
-      mat.forEach(m => {
-        try { disposeMaterialTextures(m); } catch {}
-        try { m.dispose(); } catch {}
-      });
-    } else {
-      try { disposeMaterialTextures(mat); } catch {}
-      try { mat.dispose(); } catch {}
-    }
-  };
+        // handle model component (destroy meshInstance materials)
+        try {
+            if (ent.model && ent.model.model && ent.model.model.meshInstances) {
+                const mis = ent.model.model.meshInstances;
+                for (let mi of mis) {
+                    try {
+                        if (mi.material) {
+                            disposeMaterial(mi.material);
+                            // set to null to help GC
+                            mi.material = null;
+                        }
+                    } catch (e) {}
+                }
+            }
+        } catch (e) {}
 
-  // Recursively dispose geometries/materials and stop mixers on a root object
-  const disposeThreeObject = (root) => {
-    if (!root) return;
-    root.traverse((child) => {
-      // stop animation mixer if stored on userData
-      if (child.userData && child.userData.mixer) {
-        try { child.userData.mixer.stopAllAction(); } catch (e) {}
-        try { child.userData.mixer.uncacheRoot(child); } catch (e) {}
-        delete child.userData.mixer;
-      }
+        // Finally remove/destroy this entity
+        try {
+            if (ent.parent) ent.parent.removeChild(ent);
+        } catch (e) {}
+        try {
+            // entity.destroy() cleans up components & unlinks resources
+            if (typeof ent.destroy === "function") ent.destroy();
+        } catch (e) {}
+    };
 
-      if (child.geometry) {
-        try { child.geometry.dispose(); } catch (e) {}
-        child.geometry = undefined;
-      }
+    // Helper to check cached prototype equality
+    if (typeof window._pcWeaponInstanceCache === "undefined") window._pcWeaponInstanceCache = {};
+    const isCachedInstance = (obj) => {
+        if (!obj) return false;
+        for (const k in window._pcWeaponInstanceCache) {
+            if (window._pcWeaponInstanceCache[k] === obj) return true;
+        }
+        return false;
+    };
 
-      if (child.material) {
-        try { disposeMaterial(child.material); } catch (e) {}
-        child.material = undefined;
-      }
-    });
-  };
-
-  // ---- Cleanup tracer objects (remove + dispose geometry/material) ----
-  if (this.state && Array.isArray(this.state.tracerObjects)) {
-    this.state.tracerObjects.forEach(entry => {
-      const lm = entry.lineMesh;
-      if (!lm) return;
-      try {
-        if (lm.parent) lm.parent.remove(lm);
-      } catch (e) {}
-      if (lm.geometry) {
-        try { lm.geometry.dispose(); } catch (e) {}
-        lm.geometry = undefined;
-      }
-      if (lm.material) {
-        try { disposeMaterial(lm.material); } catch (e) {}
-        lm.material = undefined;
-      }
-    });
-    // keep the array but empty it
-    this.state.tracerObjects.length = 0;
-  }
-
-  // ---- Remove & dispose previous viewModel ----
-  // Ensure global cache exists
-  if (typeof window._weaponInstanceCache === "undefined") window._weaponInstanceCache = {};
-
-  // Helper to check if an object is one of our cached prototypes (we should not dispose cached instances)
-  const isCachedInstance = (obj) => {
-    if (!obj) return false;
-    for (const k in window._weaponInstanceCache) {
-      if (window._weaponInstanceCache[k] === obj) return true;
-    }
-    return false;
-  };
-
-  // If a previous viewModel exists, remove it from camera and dispose if it's not cached
-  if (this.viewModel) {
+    // ---- Cleanup tracer objects (PlayCanvas tracer cleanup: window.activeTracers) ----
     try {
-      if (this.viewModel.parent === this.camera) this.camera.remove(this.viewModel);
-    } catch (e) {}
+        if (window.activeTracers && Array.isArray(window.activeTracers)) {
+            for (let i = window.activeTracers.length - 1; i >= 0; i--) {
+                try {
+                    const tr = window.activeTracers[i];
+                    if (tr && typeof tr.dispose === "function") tr.dispose();
+                } catch (e) {}
+                window.activeTracers.splice(i, 1);
+            }
+        }
+    } catch (e) { /* ignore */ }
 
-    // If the weaponModel inside viewModel is a cached instance, don't dispose shared resources —
-    // just remove and hide it so the cache remains intact.
-    if (this.weaponModel && isCachedInstance(this.weaponModel)) {
-      try { this.weaponModel.visible = false; } catch (e) {}
-      try {
-        // remove from any parent just in case
-        if (this.weaponModel.parent) this.weaponModel.parent.remove(this.weaponModel);
-      } catch (e) {}
-      // We still clear references so GC can collect viewModel container
-      this.weaponModel = null;
-      this.parts = {};
-      this.viewModel = null;
+    // ---- Remove & dispose previous viewModel (PlayCanvas entities) ----
+    if (this.viewModel) {
+        try {
+            if (this.viewModel.parent && this.viewModel.parent === this.camera) {
+                this.camera.removeChild(this.viewModel);
+            } else if (this.viewModel.parent) {
+                // detach from any parent gracefully
+                this.viewModel.parent.removeChild(this.viewModel);
+            }
+        } catch (e) {}
+
+        // If weaponModel is a cached instance, we should not destroy shared resources — just detach and hide
+        if (this.weaponModel && isCachedInstance(this.weaponModel)) {
+            try { this.weaponModel.enabled = false; } catch (e) {}
+            try { if (this.weaponModel.parent) this.weaponModel.parent.removeChild(this.weaponModel); } catch (e) {}
+            // clear only controller references (cached model stays in window._pcWeaponInstanceCache)
+            this.weaponModel = null;
+            this.parts = {};
+            try { this.viewModel.destroy(); } catch (e) {} // destroy container only
+            this.viewModel = null;
+        } else {
+            // Fully dispose the viewModel and its children
+            try { disposeEntityRecursive(this.viewModel); } catch (e) {}
+            this.weaponModel = null;
+            this.parts = {};
+            this.viewModel = null;
+        }
+    }
+
+    // ---- Reset core state and create fresh viewModel container (PlayCanvas) ----
+    this.currentKey = weaponKey;
+    this.stats = WeaponController.WEAPONS[weaponKey];
+    this.isReloadingFlag = false;
+    this.lastShotTime = 0;
+    this.burstCount = 0;
+    this.speedModifier = this.stats.speedModifier;
+    this.ammoStore = this.ammoStore || {};
+    this.ammoInMagazine = (this.ammoStore[weaponKey] != null) ? this.ammoStore[weaponKey] : this.stats.magazineSize;
+
+    // fresh state object (mirrors your THREE state fields but using pc.Vec3)
+    this.state = {
+        pulling: false,
+        pullStart: 0,
+        pullFrom: new pc.Vec3(),
+        pullTo: new pc.Vec3(),
+        recoiling: false,
+        recoilStart: 0,
+        reloading: false,
+        reloadStart: 0,
+        knifeSwing: false,
+        knifeSwingStart: 0,
+        knifeHeavy: false,
+        tracerObjects: []
+    };
+
+    // Create new PlayCanvas container entity to hold the viewmodel
+    this.viewModel = new pc.Entity("ViewModelRoot");
+    // ensure it has a transform and is ready to be parented to the camera
+    this.viewModel.setLocalPosition(0, 0, 0);
+    this.viewModel.setLocalEulerAngles(0, 0, 0);
+    this.viewModel.setLocalScale(1, 1, 1);
+
+    // helper to attach the player arm or any arm entity you expect
+    if (typeof this.createPlayerArm === "function") {
+        try { this.createPlayerArm(); } catch (e) { /* ignore */ }
+    }
+
+    // ---- Build normalized key and pick source (cached clone or prototype or fallback) ----
+    const key = weaponKey.replace(/-/g, "").toLowerCase();
+    const proto = window._pcPrototypeModels && window._pcPrototypeModels[key]; // assume you may have set prototypes here
+
+    // ensure parts object is reset
+    this.parts = {};
+
+    // Inline attachModel that adapts PlayCanvas entity into our viewModel
+    const attachModel = (modelEntity) => {
+        if (!modelEntity) return;
+
+        // detach model from any parent
+        try { if (modelEntity.parent) modelEntity.parent.removeChild(modelEntity); } catch (e) {}
+
+        // make visible/enabled and add to viewModel
+        try {
+            modelEntity.enabled = true;
+            this.viewModel.addChild(modelEntity);
+            this.weaponModel = modelEntity;
+        } catch (e) {
+            console.warn("[WeaponController] attachModel addChild failed:", e);
+        }
+
+        // find muzzle child (traverse)
+        let muzzle = null;
+        const findMuzzle = (ent) => {
+            if (!ent) return;
+            if ((ent.name || "") === "Muzzle") { muzzle = ent; return; }
+            if (ent.children) {
+                for (let ch of ent.children) {
+                    if (muzzle) break;
+                    findMuzzle(ch);
+                }
+            }
+        };
+        findMuzzle(modelEntity);
+        if (muzzle) this.parts.muzzle = muzzle;
+
+        // add viewModel to camera
+        try {
+            if (this.camera && typeof this.camera.addChild === "function") {
+                this.camera.addChild(this.viewModel);
+            } else if (app && app.root) {
+                app.root.addChild(this.viewModel);
+            }
+        } catch (e) {}
+
+        // set up "pull" state (animation initiation)
+        this.state.pulling = true;
+        this.state.pullStart = performance.now() / 1000;
+        if (this.offPos) this.state.pullFrom.copy(this.offPos);
+        if (this.readyPos) this.state.pullTo.copy(this.readyPos);
+
+        // play pull sound if available (assumes HTMLAudio style objects)
+        try {
+            const pullSnd = this.audio && this.audio[this.currentKey] && this.audio[this.currentKey].pull;
+            if (pullSnd) { pullSnd.currentTime = 0; pullSnd.play(); }
+            // optional: sendSoundEvent fallback if you have it
+            if (typeof sendSoundEvent === "function") {
+                const pos = this.camera ? this.camera.getPosition() : new pc.Vec3();
+                sendSoundEvent(this.currentKey, "pull", pos);
+            }
+        } catch (e) {}
+        // Update UI (hooks)
+        try { if (typeof updateAmmoDisplay === "function") updateAmmoDisplay(this.ammoInMagazine, this.stats.magazineSize); } catch (e) {}
+        try { if (typeof updateInventory === "function") updateInventory(this.currentKey); } catch (e) {}
+    };
+
+    // ---- If prototype exists, try to get or create cached instance ----
+    if (proto) {
+        if (!window._pcWeaponInstanceCache[key]) {
+            try {
+                // attempt deep clone
+                const cached = proto.clone(true);
+                cached.enabled = false;
+                try { if (cached.parent) cached.parent.removeChild(cached); } catch (e) {}
+                window._pcWeaponInstanceCache[key] = cached;
+            } catch (e) {
+                console.warn(`[WeaponController] Failed to clone proto for ${key}:`, e);
+                window._pcWeaponInstanceCache[key] = null;
+            }
+        }
+
+        const cachedInstance = window._pcWeaponInstanceCache[key];
+
+        if (cachedInstance) {
+            // Reset transforms (local)
+            try {
+                cachedInstance.setLocalScale(1, 1, 1);
+                cachedInstance.setLocalEulerAngles(0, 0, 0);
+                cachedInstance.setLocalPosition(0, 0, 0);
+            } catch (e) {}
+
+            // apply per-weapon transforms (using PlayCanvas methods)
+            switch (key) {
+                case "knife":
+                    cachedInstance.setLocalScale(0.001, 0.001, 0.001);
+                    cachedInstance.setLocalEulerAngles(90, 160, 0);
+                    cachedInstance.setLocalPosition(0.5, -0.1, -0.7);
+                    break;
+                case "deagle":
+                case "legion":
+                case "m79":
+                    cachedInstance.setLocalScale(0.3, 0.3, 0.3);
+                    cachedInstance.setLocalEulerAngles(7, 180, 0);
+                    cachedInstance.setLocalPosition(
+                        0.15 * (window.innerWidth / 1920),
+                        0.10 * (window.innerHeight / 1080),
+                        -0.1 * (window.innerWidth / 1920)
+                    );
+                    break;
+                case "ak47":
+                    cachedInstance.setLocalScale(0.4, 0.4, 0.4);
+                    cachedInstance.setLocalEulerAngles(4, 180, 0);
+                    cachedInstance.setLocalPosition(
+                        0.35 * (window.innerWidth / 1920),
+                        -0.15 * (window.innerHeight / 1080),
+                        -0.3 * (window.innerWidth / 1920)
+                    );
+                    break;
+                case "viper":
+                    cachedInstance.setLocalScale(0.4, 0.4, 0.4);
+                    cachedInstance.setLocalEulerAngles(4, 180, 0);
+                    cachedInstance.setLocalPosition(
+                        0.35 * (window.innerWidth / 1920),
+                        -0.15 * (window.innerHeight / 1080),
+                        0
+                    );
+                    break;
+                case "marshal":
+                    cachedInstance.setLocalScale(1, 1, 1);
+                    cachedInstance.setLocalEulerAngles(0, 0, 0);
+                    cachedInstance.setLocalPosition(
+                        0.15 * (window.innerWidth / 1920),
+                        0.15 * (window.innerHeight / 1080),
+                        -0.1 * (window.innerWidth / 1920)
+                    );
+                    break;
+                default:
+                    console.warn(`[WeaponController] No transform logic for "${key}"`);
+            }
+
+            attachModel(cachedInstance);
+        } else {
+            // fallback: use PCWeaponBuilder to build
+            console.warn(`[WeaponController] cached proto missing for "${key}" → falling back to PCWeaponBuilder.`);
+            const builder = new PCWeaponBuilder({ app, viewModel: this.viewModel });
+            // choose appropriate builder call
+            let result;
+            switch (key) {
+                case "knife": result = builder.buildKnife(); break;
+                case "deagle": result = builder.buildDeagle(); break;
+                case "legion": result = builder.buildLegion(); break;
+                case "ak47": result = builder.buildAK47(); break;
+                case "marshal": result = builder.buildMarshal(); break;
+                case "viper": result = builder.buildViper(); break;
+                case "m79": result = builder.buildM79(); break;
+                default: result = null; break;
+            }
+            if (result && result.promise) {
+                result.promise.then(({ weaponRoot, parts }) => {
+                    // PCWeaponBuilder returns { weaponRoot, parts } in this implementation
+                    // attach weaponRoot to viewModel
+                    attachModel(weaponRoot);
+                    // store parts if provided
+                    if (parts) this.parts = parts;
+                }).catch(err => {
+                    console.error("[WeaponController] builder failed:", err);
+                });
+            } else {
+                console.error(`[WeaponController] No build method for "${key}"`);
+            }
+        }
     } else {
-      // Fully dispose the viewModel and its children (buildX fallback objects typically fall here)
-      try { disposeThreeObject(this.viewModel); } catch (e) {}
-      this.weaponModel = null;
-      this.parts = {};
-      this.viewModel = null;
+        // No prototype at all — attempt builder
+        console.warn(`[WeaponController] Prototype for "${key}" missing → running PCWeaponBuilder fallback.`);
+        const builder = new PCWeaponBuilder({ app, viewModel: this.viewModel });
+        let result;
+        switch (key) {
+            case "knife": result = builder.buildKnife(); break;
+            case "deagle": result = builder.buildDeagle(); break;
+            case "legion": result = builder.buildLegion(); break;
+            case "ak47": result = builder.buildAK47(); break;
+            case "marshal": result = builder.buildMarshal(); break;
+            case "viper": result = builder.buildViper(); break;
+            case "m79": result = builder.buildM79(); break;
+            default: result = null; break;
+        }
+        if (result && result.promise) {
+            result.promise.then(({ weaponRoot, parts }) => {
+                attachModel(weaponRoot);
+                if (parts) this.parts = parts;
+            }).catch(err => {
+                console.error("[WeaponController] builder failed:", err);
+            });
+        } else {
+            console.error(`[WeaponController] No build method for "${key}"`);
+        }
     }
-  }
+} // end equipWeapon
 
-  // ---- Reset core state and create fresh viewModel container ----
-  this.currentKey = weaponKey;
-  this.stats = WeaponController.WEAPONS[weaponKey];
-  this.isReloadingFlag = false;
-  this.lastShotTime = 0;
-  this.burstCount = 0;
-  this.speedModifier = this.stats.speedModifier;
-  this.ammoInMagazine = this.ammoStore[weaponKey] != null
-      ? this.ammoStore[weaponKey]
-      : this.stats.magazineSize;
-
-  this.state = {
-    pulling: false,
-    pullStart: 0,
-    pullFrom: new THREE.Vector3(),
-    pullTo: new THREE.Vector3(),
-    recoiling: false,
-    recoilStart: 0,
-    reloading: false,
-    reloadStart: 0,
-    knifeSwing: false,
-    knifeSwingStart: 0,
-    knifeHeavy: false,
-    tracerObjects: [] // fresh array
-  };
-
-  this.viewModel = new THREE.Group();
-  this.viewModel.name = "ViewModelRoot";
-  this.createPlayerArm();
-
-  // ---- Build normalized key and pick source (cached clone or prototype or fallback) ----
-  const key = weaponKey.replace(/-/g, "").toLowerCase();
-  const proto = _prototypeModels[key];
-
-  // ensure parts object is reset
-  this.parts = {};
-
-  // Inline function to prepare and attach a modelGroup to the viewModel (keeps everything local)
-  const attachModel = (modelGroup) => {
-    if (!modelGroup) return;
-
-    // ensure model is not parented elsewhere
-    try { if (modelGroup.parent) modelGroup.parent.remove(modelGroup); } catch (e) {}
-
-    // Make the model visible and attach
-    modelGroup.visible = true;
-    this.viewModel.add(modelGroup);
-    this.weaponModel = modelGroup;
-
-    // store animation mixer reference if we need to create one (only if animations exist)
-    if (modelGroup.animations && modelGroup.animations.length) {
-      try {
-        const mixer = new THREE.AnimationMixer(modelGroup);
-        modelGroup.userData.mixer = mixer;
-        // NOTE: we don't start playing any default action here; your code can do that if needed
-      } catch (e) { /* ignore */ }
-    }
-
-    // find muzzle child anywhere under the model
-    let muzzle = null;
-    modelGroup.traverse(child => {
-      if (child.name === "Muzzle") muzzle = child;
-    });
-    if (muzzle) this.parts.muzzle = muzzle;
-
-    // 7) Do animation-in
-    this.viewModel.position.copy(this.offPos);
-    this.viewModel.rotation.copy(this.readyRot);
-    try { this.camera.add(this.viewModel); } catch (e) { /* ignore */ }
-    this.state.pulling = true;
-    this.state.pullStart = performance.now() / 1000;
-    this.state.pullFrom.copy(this.offPos);
-    this.state.pullTo.copy(this.readyPos);
-
-    // 8) Play the pull sound (reuse audio object if available)
-    const pullSnd = this.audio && this.audio[this.currentKey] && this.audio[this.currentKey].pull;
-    if (pullSnd) {
-      try { pullSnd.currentTime = 0; pullSnd.play(); } catch (e) {}
-      try {
-        const pos = new THREE.Vector3();
-        this.camera.getWorldPosition(pos);
-        sendSoundEvent(this.currentKey, "pull", pos);
-      } catch (e) {}
-    }
-
-    // 9) Update UI
-    try { updateAmmoDisplay(this.ammoInMagazine, this.stats.magazineSize); } catch (e) {}
-    try { updateInventory(this.currentKey); } catch (e) {}
-  };
-
-  // ---- If prototype exists, try to get or create cached instance ----
-  if (proto) {
-    // ensure a cache exists and return a single shared instance per key
-    if (!window._weaponInstanceCache[key]) {
-      try {
-        const cached = proto.clone(true);
-        cached.visible = false;
-        // detach just in case
-        try { if (cached.parent) cached.parent.remove(cached); } catch (e) {}
-        window._weaponInstanceCache[key] = cached;
-      } catch (e) {
-        console.warn(`[WeaponController] Failed to clone proto for ${key}:`, e);
-        window._weaponInstanceCache[key] = null;
-      }
-    }
-
-    const cachedInstance = window._weaponInstanceCache[key];
-
-    // Apply deterministic transforms to the instance for this weapon (safe because we always set them)
-    if (cachedInstance) {
-      // Reset transforms first so repeated equips don't compound transforms
-      cachedInstance.scale.set(1, 1, 1);
-      cachedInstance.rotation.set(0, 0, 0);
-      cachedInstance.position.set(0, 0, 0);
-
-      switch (key) {
-        case "knife":
-          cachedInstance.scale.set(0.001, 0.001, 0.001);
-          cachedInstance.rotation.set(
-            THREE.MathUtils.degToRad(90),
-            THREE.MathUtils.degToRad(160),
-            0
-          );
-          cachedInstance.position.set(0.5, -0.1, -0.7);
-          break;
-        case "deagle":
-        case "legion":
-        case "m79":
-          cachedInstance.scale.set(0.3, 0.3, 0.3);
-          cachedInstance.rotation.set(
-            THREE.MathUtils.degToRad(7),
-            THREE.MathUtils.degToRad(180),
-            0
-          );
-          cachedInstance.position.set(
-            0.15 * (window.innerWidth / 1920),
-            0.10 * (window.innerHeight / 1080),
-            -0.1 * (window.innerWidth / 1920)
-          );
-          break;
-        case "ak47":
-          cachedInstance.scale.set(0.4, 0.4, 0.4);
-          cachedInstance.rotation.set(
-            THREE.MathUtils.degToRad(4),
-            THREE.MathUtils.degToRad(180),
-            0
-          );
-          cachedInstance.position.set(
-            0.35 * (window.innerWidth / 1920),
-            -0.15 * (window.innerHeight / 1080),
-            -0.3 * (window.innerWidth / 1920)
-          );
-          break;
-        case "viper":
-          cachedInstance.scale.set(0.4, 0.4, 0.4);
-          cachedInstance.rotation.set(
-            THREE.MathUtils.degToRad(4),
-            THREE.MathUtils.degToRad(180),
-            0
-          );
-          cachedInstance.position.set(
-            0.35 * (window.innerWidth / 1920),
-            -0.15 * (window.innerHeight / 1080),
-            0 * (window.innerWidth / 1920)
-          );
-          break;
-        case "marshal":
-          cachedInstance.scale.set(1, 1, 1);
-          cachedInstance.rotation.set(0, 0, 0);
-          cachedInstance.position.set(
-            0.15 * (window.innerWidth / 1920),
-            0.15 * (window.innerHeight / 1080),
-            -0.1 * (window.innerWidth / 1920)
-          );
-          break;
-        default:
-          console.warn(`[WeaponController] No transform logic for "${key}"`);
-      }
-
-      attachModel(cachedInstance);
-    } else {
-      // fallback to build methods if cache failed or is null
-      console.warn(`[WeaponController] cached proto missing for "${key}" → falling back to build method.`);
-      switch (key) {
-        case "knife":
-          this.buildKnife();
-          attachModel(this.weaponModel);
-          break;
-        case "deagle":
-          this.buildDeagle();
-          attachModel(this.weaponModel);
-          break;
-        case "legion":
-          this.buildLegion();
-          attachModel(this.weaponModel);
-          break;
-        case "ak47":
-          this.buildAK47();
-          attachModel(this.weaponModel);
-          break;
-        case "marshal":
-          this.buildMarshal();
-          attachModel(this.weaponModel);
-          break;
-        case "viper":
-          this.buildViper();
-          attachModel(this.weaponModel);
-          break;
-        case "m79":
-          this.buildM79();
-          attachModel(this.weaponModel);
-          break;
-        default:
-          console.error(`[WeaponController] No build method for "${key}"`);
-          break;
-      }
-    }
-  } else {
-    // No prototype at all — run buildX directly (your original fallback)
-    console.warn(`[WeaponController] Prototype for "${key}" missing → running build${key.charAt(0).toUpperCase()+key.slice(1)}()`);
-    switch (key) {
-      case "knife":
-        this.buildKnife();
-        attachModel(this.weaponModel);
-        break;
-      case "deagle":
-        this.buildDeagle();
-        attachModel(this.weaponModel);
-        break;
-      case "legion":
-        this.buildLegion();
-        attachModel(this.weaponModel);
-        break;
-      case "ak47":
-        this.buildAK47();
-        attachModel(this.weaponModel);
-        break;
-      case "marshal":
-        this.buildMarshal();
-        attachModel(this.weaponModel);
-        break;
-      case "viper":
-        this.buildViper();
-        attachModel(this.weaponModel);
-        break;
-      case "m79":
-        this.buildM79();
-        attachModel(this.weaponModel);
-        break;
-      default:
-        console.error(`[WeaponController] No build method for "${key}"`);
-        break;
-    }
-  }
-}
 
 
 
@@ -1904,150 +1879,42 @@ addDebugMuzzleDot(muzzleObject3D, dotSize = 0.5) {
 
 
 export async function preloadWeaponPrototypes(onComplete) {
-  const names = ['knife','deagle','ak47','marshal','m79','viper','legion'];
+  const names = ['knife','deagle','ak47','marshal','m79','viper','legion',];
   const dummyCam = new THREE.Group();
   const loaderUI = new Loader();
   const itemPercentages = names.map(() => 1 / names.length);
 
-  // Ensure storage for prototypes
-  window._prototypeModels = window._prototypeModels || {};
-
-  loaderUI.show('Loading weapon prototypes...', itemPercentages);
+  loaderUI.show('Loading...', itemPercentages);
   loaderUI.onComplete(() => {
     console.log('▶️ ALL weapon prototypes ready');
     onComplete?.();
   });
 
-  const pcApp = window.playcanvasApp;
-
-  // helper: export a THREE.Group -> ArrayBuffer (binary GLB)
-  function exportThreeGroupToGlbArrayBuffer(group) {
-    return new Promise((resolve, reject) => {
-      if (typeof THREE === 'undefined' || typeof THREE.GLTFExporter === 'undefined') {
-        return reject(new Error('THREE.GLTFExporter not available'));
-      }
-      const exporter = new THREE.GLTFExporter();
-      try {
-        exporter.parse(group, result => {
-          if (result instanceof ArrayBuffer) {
-            resolve(result);
-          } else {
-            // Normally we request binary; if we get JSON, tell user to enable binary exporter
-            reject(new Error('GLTFExporter returned non-binary result; ensure { binary: true } support.'));
-          }
-        }, { binary: true });
-      } catch (err) {
-        reject(err);
-      }
-    });
-  }
-
   for (let i = 0; i < names.length; i++) {
     const name = names[i];
     const wc = new WeaponController(dummyCam);
     const method = 'build' + (name === 'ak47' ? 'AK47' : name[0].toUpperCase() + name.slice(1));
-    console.log(`Preloading ${name}, weight ${(itemPercentages[i] * 100).toFixed(2)}%`);
+    console.log(`Preloading ${name}, weight ${itemPercentages[i] * 100}%`);
 
-    // builder returns { promise, register }
+    // get { promise, register } from buildX()
     const { promise, register } = wc[method]();
-
-    // wrappedPromise covers: wait for THREE builder -> export to GLB -> load into PlayCanvas -> store prototype
-    const wrappedPromise = (async () => {
-      // 1) wait for the THREE model
-      const threeModel = await promise;
-
-      // remove from dummy parent (same as your original code)
-      try { if (threeModel.parent) threeModel.parent.remove(threeModel); } catch (e) {}
-      try { threeModel.visible = false; } catch (e) {}
-
-      // If PlayCanvas is not available, keep the THREE model as fallback prototype
-      if (!pcApp || !pcApp.assets || typeof pcApp.assets.loadFromUrl !== 'function') {
-        console.warn('PlayCanvas not available — storing THREE.Group prototype for', name);
-        window._prototypeModels[name] = threeModel;
-        return threeModel;
-      }
-
-      // 2) export THREE.Group -> ArrayBuffer (GLB)
-      let arrayBuffer;
-      try {
-        arrayBuffer = await exportThreeGroupToGlbArrayBuffer(threeModel);
-      } catch (err) {
-        console.warn(`Failed to export THREE model "${name}" to GLB:`, err);
-        // fallback: store threeModel and continue
-        window._prototypeModels[name] = threeModel;
-        return threeModel;
-      }
-
-      // 3) create blob URL and load into PlayCanvas as 'container'
-      const blob = new Blob([arrayBuffer], { type: 'model/gltf-binary' });
-      const blobUrl = URL.createObjectURL(blob);
-
-      return new Promise((resolve, reject) => {
-        try {
-          pcApp.assets.loadFromUrl(blobUrl, 'container', (err, asset) => {
-            // revoke blob URL ASAP (PlayCanvas has fetched the binary)
-            try { URL.revokeObjectURL(blobUrl); } catch (e) {}
-
-            if (err) {
-              console.warn(`PlayCanvas failed to load exported GLB for "${name}":`, err);
-              // fallback: store threeModel
-              window._prototypeModels[name] = threeModel;
-              return resolve(threeModel);
-            }
-
-            try {
-              // instantiate prototype entity (do not add to scene root)
-              let protoEnt = null;
-              if (asset.resource && typeof asset.resource.instantiateModelEntity === 'function') {
-                protoEnt = asset.resource.instantiateModelEntity();
-              } else if (asset.resource && typeof asset.resource.instantiateRenderEntity === 'function') {
-                protoEnt = asset.resource.instantiateRenderEntity();
-              } else if (asset.resource && typeof asset.resource.instantiate === 'function') {
-                protoEnt = asset.resource.instantiate();
-              }
-
-              if (!protoEnt) {
-                console.warn(`Loaded container for "${name}" has no instantiate helper. Storing THREE prototype instead.`);
-                window._prototypeModels[name] = threeModel;
-                return resolve(threeModel);
-              }
-
-              // detach from any parent and disable so it's a safe prototype
-              try { if (protoEnt._parent) protoEnt._parent.removeChild(protoEnt); } catch (e) {}
-              protoEnt.enabled = false;
-
-              // store PlayCanvas prototype entity
-              window._prototypeModels[name] = protoEnt;
-              console.log(`Preloaded PlayCanvas prototype for "${name}"`);
-              resolve(protoEnt);
-            } catch (e) {
-              console.warn('Error instantiating PlayCanvas prototype for', name, e);
-              window._prototypeModels[name] = threeModel;
-              resolve(threeModel);
-            }
-          });
-        } catch (e) {
-          try { URL.revokeObjectURL(blobUrl); } catch (e2) {}
-          console.warn('pcApp.assets.loadFromUrl threw', e);
-          window._prototypeModels[name] = threeModel;
-          resolve(threeModel);
-        }
-      });
-    })();
-
-    // Link the builder's progress reporter into loaderUI.track (keeps original progress UX)
-    try {
-      // loaderUI.track(weight, promiseOrThenable, registerProgressFn)
-      // we pass the wrappedPromise so progress encompasses export+pc load as well
-      await loaderUI.track(itemPercentages[i], wrappedPromise, (cb) => { try { register && register(cb); } catch (e) {} });
-    } catch (err) {
-      // ensure failures don't stop the rest
-      console.warn(`preloadWeaponPrototypes: loading "${name}" failed:`, err);
-    }
-  } // end for
-
-  // loaderUI.onComplete will trigger on its own (we registered earlier)
+    // track with live progress
+    await loaderUI.track(itemPercentages[i], promise, cb => register(cb));
+    // post-load housekeeping
+    const model = await promise;
+    dummyCam.remove(model);
+    model.visible = false;
+    _prototypeModels[name] = model;
+    console.log(`Loaded ${name}`);
+  }
 }
+
+
+// Call once at startup:
+preloadWeaponPrototypes(() => {
+  console.log("✅ All prototypes including knife have been preloaded!");
+  // Now it's safe to start letting players swap weapons.
+});
 
 
 // factory to clone
@@ -2296,4 +2163,385 @@ export class AnimatedTracer {
         }
     }
 }
+
+
+
+
+
+// PlayCanvas helpers: WeaponBuilder + BulletHoleManager + debug dot
+// Usage:
+//   const app = window.playcanvasApp; // ensure set
+//   const wb = new PCWeaponBuilder({ app, viewModel: someParentEntity });
+//   wb.buildAK47().promise.then(entity => { /* entity added to viewModel by default */ });
+//   PCBulletHoleManager.addBulletHole(holeData, firebaseKey);
+//   PCBulletHoleManager.removeBulletHole(firebaseKey);
+
+(function (global) {
+  // Ensure pc exists
+  if (typeof pc === "undefined") {
+    console.warn("PlayCanvas (pc) not found. Include these helpers only inside PlayCanvas context.");
+  }
+
+  const DEFAULT_APP = () => window.playcanvasApp || (pc && pc.Application && pc.Application.getApplication && pc.Application.getApplication());
+
+  // ---------- BulletHoleManager ----------
+  const PCBulletHoleManager = {
+    bulletHoles: {},
+
+    /**
+     * holeData: { x,y,z, nx,ny,nz, timeCreated } in world coordinates
+     * firebaseKey: unique key to avoid duplicates
+     */
+    addBulletHole: function (holeData, firebaseKey, opts = {}) {
+      const app = DEFAULT_APP();
+      if (!app) {
+        console.warn("PCBulletHoleManager: PlayCanvas app not found.");
+        return;
+      }
+      if (!holeData || !firebaseKey) return;
+      if (!this.bulletHoles) this.bulletHoles = {};
+      if (this.bulletHoles[firebaseKey]) return; // already added
+
+      const { x = 0, y = 0, z = 0, nx = 0, ny = 1, nz = 0, timeCreated = Date.now() } = holeData;
+      const fadeDuration = typeof opts.fadeDuration === "number" ? opts.fadeDuration : 5.0; // seconds
+      const size = typeof opts.size === "number" ? opts.size : 0.15;
+
+      // create bullet hole entity (a thin plane facing its normal)
+      const hole = new pc.Entity("bulletHole");
+      // create plane model primitive
+      hole.addComponent("model", { type: "plane" });
+      // rotate plane so its normal points +Z (we will reorient via lookAt)
+      hole.setLocalScale(size, size, 1);
+
+      // material
+      const mat = new pc.StandardMaterial();
+      mat.emissive = new pc.Color(0.07, 0.07, 0.07); // slightly visible even in dark
+      mat.blendType = pc.BLEND_NORMAL;
+      mat.opacity = 0.85;
+      mat.alphaTest = 0; // fully transparent fallback
+      mat.useMetalness = false;
+      mat.update();
+
+      // assign material (safe single-instance per decal; we will clone if needed)
+      try {
+        hole.model.material = mat;
+      } catch (e) {
+        // In some PlayCanvas versions, model assignment needs walking children; try fallback
+        if (hole.model && hole.model.meshInstances) {
+          for (let mi of hole.model.meshInstances) {
+            mi.material = mat;
+          }
+        }
+      }
+
+      // position
+      hole.setPosition(x, y, z);
+
+      // orient to normal
+      const normal = new pc.Vec3(nx, ny, nz).normalize();
+      // Create a temporary lookAt target: pos + normal
+      const target = new pc.Vec3(x + normal.x, y + normal.y, z + normal.z);
+      hole.lookAt(target);
+
+      // offset slightly along normal to avoid z-fighting
+      const ZFIGHT_OFFSET = 0.002;
+      hole.translate(normal.scale(ZFIGHT_OFFSET));
+
+      // add to root (or to a dedicated bullet-hole group on root)
+      app.root.addChild(hole);
+
+      // store
+      this.bulletHoles[firebaseKey] = { entity: hole, material: mat };
+
+      // handle fade-out accounting for 'age' (timeCreated possibly in the past)
+      const age = (Date.now() - timeCreated) / 1000;
+      const start = performance.now() / 1000 - age;
+      const animate = () => {
+        const now = performance.now() / 1000;
+        const elapsed = now - start;
+        if (!this.bulletHoles[firebaseKey] || !hole || !hole.parent) {
+          // clean up if removed elsewhere
+          if (hole && hole.parent) hole.parent.removeChild(hole);
+          if (mat && typeof mat.destroy === "function") mat.destroy();
+          delete this.bulletHoles[firebaseKey];
+          return;
+        }
+        if (elapsed >= fadeDuration) {
+          // remove and destroy
+          if (hole && hole.parent) hole.parent.removeChild(hole);
+          try { hole.destroy(); } catch (e) {}
+          try { if (mat && typeof mat.destroy === "function") mat.destroy(); } catch (e) {}
+          delete this.bulletHoles[firebaseKey];
+        } else {
+          const o = pc.math.lerp(0.85, 0.0, elapsed / fadeDuration);
+          if (mat) {
+            mat.opacity = o;
+            mat.update();
+          }
+          requestAnimationFrame(animate);
+        }
+      };
+      requestAnimationFrame(animate);
+      return hole;
+    },
+
+    removeBulletHole: function (firebaseKey) {
+      if (!this.bulletHoles || !this.bulletHoles[firebaseKey]) return;
+      const entry = this.bulletHoles[firebaseKey];
+      try {
+        if (entry.entity && entry.entity.parent) entry.entity.parent.removeChild(entry.entity);
+        if (entry.entity) entry.entity.destroy();
+      } catch (e) {}
+      try { if (entry.material && typeof entry.material.destroy === "function") entry.material.destroy(); } catch (e) {}
+      delete this.bulletHoles[firebaseKey];
+    }
+  };
+
+  // Put manager on window for easy access (matches your tracer pattern)
+  window.pcBulletHoleManager = PCBulletHoleManager;
+  window.pcBulletHoles = PCBulletHoleManager.bulletHoles;
+
+  // ---------- Debug muzzle dot ----------
+  function addDebugMuzzleDot(muzzleEntity, dotSize = 0.02, colorHex = 0xff0000) {
+    const app = DEFAULT_APP();
+    if (!app) {
+      console.warn("addDebugMuzzleDot: PlayCanvas app not found.");
+      return null;
+    }
+    if (!muzzleEntity) return null;
+    const dot = new pc.Entity("DebugMuzzleDot");
+    dot.addComponent("model", { type: "sphere" });
+    dot.setLocalScale(dotSize, dotSize, dotSize);
+
+    const mat = new pc.StandardMaterial();
+    const r = ((colorHex >> 16) & 0xff) / 255;
+    const g = ((colorHex >> 8) & 0xff) / 255;
+    const b = (colorHex & 0xff) / 255;
+    mat.emissive = new pc.Color(r * 0.9, g * 0.1, b * 0.1);
+    mat.blendType = pc.BLEND_ADDITIVE;
+    mat.opacity = 1.0;
+    mat.update();
+    try {
+      dot.model.material = mat;
+    } catch (e) {
+      if (dot.model && dot.model.meshInstances) {
+        for (let mi of dot.model.meshInstances) mi.material = mat;
+      }
+    }
+
+    muzzleEntity.addChild(dot);
+    return dot;
+  }
+  window.addPlaycanvasDebugMuzzleDot = addDebugMuzzleDot;
+
+  // ---------- WeaponBuilder ----------
+  class PCWeaponBuilder {
+    /**
+     * @param {object} opts { app: pc.Application (optional), viewModel: pc.Entity (optional) }
+     */
+    constructor(opts = {}) {
+      this.app = opts.app || DEFAULT_APP();
+      this.viewModel = opts.viewModel || null; // parent entity for weapon view-models
+      if (!this.app) console.warn("PCWeaponBuilder: PlayCanvas app not found. You'll need to provide it via opts.app or window.playcanvasApp.");
+    }
+
+    // utility: load a glb container and instantiate a root entity
+    _loadGlb = (url) => {
+      const app = this.app;
+      return new Promise((res, rej) => {
+        if (!app) return rej(new Error("PlayCanvas app not available"));
+        app.assets.loadFromUrl(url, "container", (err, asset) => {
+          if (err) return rej(err);
+          // instantiate render entity group
+          const container = asset.resource; // pc.ContainerResource
+          const inst = container.instantiateRenderEntity();
+          // The instantiated container returns a top-level entity (group). We return that.
+          res(inst);
+        });
+      });
+    }
+
+    // heuristic: compute combined AABB for a model entity (works with container-instantiated entity)
+    _computeCombinedAabb = (rootEntity) => {
+      // Walk children and gather meshInstances aabb if present
+      const INF = Number.POSITIVE_INFINITY;
+      const min = new pc.Vec3(INF, INF, INF);
+      const max = new pc.Vec3(-INF, -INF, -INF);
+      let found = false;
+
+      // recursive traverse
+      const walk = (ent) => {
+        if (!ent) return;
+        // model component -> model -> meshInstances
+        if (ent.model && ent.model.model && ent.model.model.meshInstances) {
+          const mis = ent.model.model.meshInstances;
+          for (let mi of mis) {
+            if (mi.aabb) {
+              // aabb is in node-local space; we approximate by using mi.node.getWorldTransform
+              const aabbMin = mi.aabb.getMin();
+              const aabbMax = mi.aabb.getMax();
+              // transform corners by world transform of the node to get world-space approx
+              const node = mi.node || ent;
+              const wt = node.getWorldTransform(); // pc.Mat4
+              const corners = [
+                new pc.Vec3(aabbMin.x, aabbMin.y, aabbMin.z),
+                new pc.Vec3(aabbMax.x, aabbMin.y, aabbMin.z),
+                new pc.Vec3(aabbMin.x, aabbMax.y, aabbMin.z),
+                new pc.Vec3(aabbMin.x, aabbMin.y, aabbMax.z),
+                new pc.Vec3(aabbMax.x, aabbMax.y, aabbMin.z),
+                new pc.Vec3(aabbMax.x, aabbMin.y, aabbMax.z),
+                new pc.Vec3(aabbMin.x, aabbMax.y, aabbMax.z),
+                new pc.Vec3(aabbMax.x, aabbMax.y, aabbMax.z),
+              ];
+              for (let c of corners) {
+                const wc = wt.transformPoint(c);
+                min.x = Math.min(min.x, wc.x);
+                min.y = Math.min(min.y, wc.y);
+                min.z = Math.min(min.z, wc.z);
+                max.x = Math.max(max.x, wc.x);
+                max.y = Math.max(max.y, wc.y);
+                max.z = Math.max(max.z, wc.z);
+                found = true;
+              }
+            }
+          }
+        }
+        // children
+        const children = ent.children ? ent.children.slice() : [];
+        for (let ch of children) walk(ch);
+      };
+
+      walk(rootEntity);
+
+      if (!found) return null;
+      return { min, max, center: new pc.Vec3((min.x + max.x) / 2, (min.y + max.y) / 2, (min.z + max.z) / 2) };
+    }
+
+    // generic loader pattern used by specific weapon builders
+    _buildGeneric(url, opts = {}) {
+      let progCb = () => {};
+      const promise = this._loadGlb(url).then((entity) => {
+        // `entity` is group root
+        const weaponRoot = new pc.Entity("weaponModel");
+        weaponRoot.addChild(entity);
+
+        // optional parent
+        if (this.viewModel) this.viewModel.addChild(weaponRoot);
+        else if (this.app && this.app.root) this.app.root.addChild(weaponRoot);
+
+        // compute bounding box and center the model so rotation origin is sensible
+        const aabb = this._computeCombinedAabb(entity);
+        if (aabb && entity.translate) {
+          // shift entity so center is at origin (local transform)
+          const center = aabb.center;
+          // compute world->local offset: transform world center into rootEntity local space
+          const inv = new pc.Mat4();
+          entity.getLocalTransform().invert(inv); // may fail for some nodes but attempt
+          const localCenter = inv.transformPoint(center);
+          entity.translate(-localCenter.x, -localCenter.y, -localCenter.z);
+        }
+
+        // attempt to create a muzzle point using AABB max
+        const parts = {};
+        const aabb2 = this._computeCombinedAabb(entity);
+        const muzzle = new pc.Entity("Muzzle");
+        muzzle.setLocalPosition(0, 0, 0);
+        weaponRoot.addChild(muzzle);
+        parts.muzzle = muzzle;
+
+        if (aabb2) {
+          // put muzzle at the max corner in world space, then convert to weaponRoot local
+          const worldMax = aabb2.max;
+          // convert worldMax into weaponRoot local space
+          const invRoot = weaponRoot.getWorldTransform().invert();
+          const local = invRoot.transformPoint(worldMax);
+          muzzle.setLocalPosition(local.x, local.y, local.z);
+        } else {
+          // default small offset forward (user will adjust)
+          muzzle.setLocalPosition(0, 0.5, 0);
+        }
+
+        // find named parts heuristically (blade, handle, etc.)
+        const names = { blade: ["ater", "blade", "blade"], handle: ["ahva", "handle", "grip"], ring: ["sormensi", "ring", "guard"] };
+        const search = (ent) => {
+          if (!ent) return;
+          const n = (ent.name || "").toLowerCase();
+          if (n) {
+            if (!parts.blade && (n.includes("ater") || n.includes("blade") || n.includes("blade"))) parts.blade = ent;
+            if (!parts.handle && (n.includes("ahva") || n.includes("handle") || n.includes("grip"))) parts.handle = ent;
+            if (!parts.ring && (n.includes("sormensi") || n.includes("ring") || n.includes("guard"))) parts.ring = ent;
+          }
+          if (ent.children) for (let ch of ent.children) search(ch);
+        };
+        search(entity);
+
+        // make small performance/visibility defaults
+        weaponRoot.enabled = true;
+
+        return { weaponRoot, parts };
+      });
+
+      return {
+        promise,
+        register: (cb) => { progCb = cb; } // placeholder for parity with your original API
+      };
+    }
+
+    // Concrete builders matching original names (URLs copied from your snippet)
+    buildKnife(onProgressRegistrar) {
+      const url = 'https://raw.githubusercontent.com/thearthd/3d-models/main/Weapon/voidffa_knife_V6.glb';
+      return this._buildGeneric(url);
+    }
+    buildDeagle(onProgressRegistrar) {
+      const url = 'https://raw.githubusercontent.com/thearthd/3d-models/main/Weapon/voidffa_deagle.glb';
+      return this._buildGeneric(url);
+    }
+    buildLegion(onProgressRegistrar) {
+      const url = 'https://raw.githubusercontent.com/thearthd/3d-models/main/Legion1212.glb';
+      return this._buildGeneric(url);
+    }
+    buildAK47(onProgressRegistrar) {
+      const url = 'https://raw.githubusercontent.com/thearthd/3d-models/main/Weapon/voidffa_AK47_V2.glb';
+      return this._buildGeneric(url);
+    }
+    buildViper(onProgressRegistrar) {
+      const url = 'https://raw.githubusercontent.com/thearthd/3d-models/main/Viper.glb';
+      return this._buildGeneric(url);
+    }
+    buildMarshal(onProgressRegistrar) {
+      const url = 'https://raw.githubusercontent.com/thearthd/3d-models/main/svd_sniper_rfile.glb';
+      return this._buildGeneric(url);
+    }
+    buildM79(onProgressRegistrar) {
+      const url = 'https://raw.githubusercontent.com/thearthd/3d-models/main/M-79.glb';
+      return this._buildGeneric(url);
+    }
+  }
+
+  // Expose to global
+  global.PCWeaponBuilder = PCWeaponBuilder;
+  global.PCBulletHoleManager = PCBulletHoleManager;
+  global.addPlaycanvasDebugMuzzleDot = addDebugMuzzleDot;
+
+})(window);
+
+/* ---------------------------
+   Example usage:
+
+// ensure your PlayCanvas app is in window.playcanvasApp
+const wb = new PCWeaponBuilder({ app: window.playcanvasApp, viewModel: window.playcanvasApp.root });
+
+// load and view the AK47
+wb.buildAK47().promise.then(({ weaponRoot, parts }) => {
+  // optional: add a debug dot at the muzzle
+  const dot = addPlaycanvasDebugMuzzleDot(parts.muzzle, 0.02);
+  // tweak muzzle position if the dot is not perfectly at the tip:
+  // parts.muzzle.translate(0.1, 0.02, 0); // experiment
+});
+
+// add a bullet hole:
+PCBulletHoleManager.addBulletHole({ x:10, y:1.5, z:-5, nx:0, ny:1, nz:0, timeCreated: Date.now() }, "uniqueKey123");
+
+--------------------------- */
+
 
