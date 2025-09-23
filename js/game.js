@@ -1783,7 +1783,7 @@ minDist = dist;
 //spawnPoint: sp,
 //distance: minDist
 //});
-//}
+}
 
 // Handle case where no remote players exist (all distances are Infinity)
 if (spawnDistances.every(sd => sd.distance === Infinity)) {
@@ -3068,6 +3068,7 @@ lastDamageSourcePosition = null;
 prevHealth = health;
 prevShield = shield;
 }
+
 
 
 
