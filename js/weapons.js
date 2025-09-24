@@ -1525,3 +1525,94 @@ export function addDebugMuzzleDotForParts(parts, size = 0.02) {
   } catch (e) {}
   return null;
 }
+
+
+
+// -------------------- Safe bullet-hole wrappers (fixes missing addBulletHole errors) --------------------
+(function(global){
+  if (!global) return;
+
+  global._threeBulletHoles = global._threeBulletHoles || {};
+
+  function createThreeBulletHole(holeData, key, opts = {}) {
+    try {
+      if (typeof THREE === "undefined") return null;
+      const size = (typeof opts.size === "number") ? opts.size : (opts.defaultSize || 0.15);
+      const fadeDuration = (typeof opts.fadeDuration === "number") ? opts.fadeDuration : (opts.defaultFade || 5.0);
+      const geom = new THREE.PlaneGeometry(size, size);
+      const mat = new THREE.MeshBasicMaterial({ color: 0x111111, transparent: true, opacity: 0.85, side: THREE.DoubleSide });
+      const mesh = new THREE.Mesh(geom, mat);
+      const px = (holeData.x !== undefined) ? holeData.x : 0;
+      const py = (holeData.y !== undefined) ? holeData.y : 0;
+      const pz = (holeData.z !== undefined) ? holeData.z : 0;
+      const nx = (holeData.nx !== undefined) ? holeData.nx : 0;
+      const ny = (holeData.ny !== undefined) ? holeData.ny : 1;
+      const nz = (holeData.nz !== undefined) ? holeData.nz : 0;
+      mesh.position.set(px, py, pz);
+      // orient plane to face the normal
+      const normal = new THREE.Vector3(nx, ny, nz).normalize();
+      const target = mesh.position.clone().add(normal);
+      mesh.lookAt(target);
+      // tiny offset to reduce z-fighting
+      mesh.position.add(normal.clone().multiplyScalar(0.002));
+      // add to scene (robust lookup)
+      const scene = global.scene || (global.window && global.window.scene) || (global.THREE && global.THREE.Scene && null);
+      if (scene && typeof scene.add === "function") scene.add(mesh);
+      else if (global.camera && typeof global.camera.add === "function") global.camera.add(mesh);
+      else if (global.scene && typeof global.scene.add === "function") global.scene.add(mesh);
+      // store for removal
+      if (key) global._threeBulletHoles[key] = mesh;
+
+      // fade and remove
+      const start = performance.now();
+      const animate = () => {
+        const now = performance.now();
+        const t = (now - start) / (fadeDuration * 1000);
+        if (!mesh.parent || t >= 1) {
+          try { if (mesh.parent) mesh.parent.remove(mesh); } catch(e){}
+          try { geom.dispose(); mat.dispose(); } catch(e){}
+          if (key && global._threeBulletHoles[key] === mesh) delete global._threeBulletHoles[key];
+          return;
+        }
+        mat.opacity = 0.85 * (1 - t);
+        requestAnimationFrame(animate);
+      };
+      requestAnimationFrame(animate);
+      return mesh;
+    } catch(e) {
+      console.warn("createThreeBulletHole failed", e);
+      return null;
+    }
+  }
+
+  // addBulletHole wrapper: prefer PlayCanvas manager, else fallback to THREE implementation
+  global.addBulletHole = global.addBulletHole || function(holeData, firebaseKey, opts = {}) {
+    try {
+      if (global.PCBulletHoleManager && typeof global.PCBulletHoleManager.addBulletHole === 'function') {
+        return global.PCBulletHoleManager.addBulletHole(holeData, firebaseKey, opts);
+      }
+      // some code expects addBulletHole(payload, key) signature, so we accept both
+      return createThreeBulletHole(holeData || {}, firebaseKey, opts);
+    } catch (e) {
+      console.warn("addBulletHole wrapper failed", e);
+      try { return createThreeBulletHole(holeData || {}, firebaseKey, opts); } catch(e2){}
+    }
+    return null;
+  };
+
+  // removeBulletHole wrapper: mirror PlayCanvas manager or Three fallback
+  global.removeBulletHole = global.removeBulletHole || function(firebaseKey) {
+    try {
+      if (global.PCBulletHoleManager && typeof global.PCBulletHoleManager.removeBulletHole === 'function') {
+        return global.PCBulletHoleManager.removeBulletHole(firebaseKey);
+      }
+      const mesh = global._threeBulletHoles && global._threeBulletHoles[firebaseKey];
+      if (mesh) {
+        try { if (mesh.parent) mesh.parent.remove(mesh); } catch(e){}
+        if (global._threeBulletHoles) delete global._threeBulletHoles[firebaseKey];
+      }
+    } catch(e) { console.warn("removeBulletHole wrapper failed", e); }
+  };
+
+})(window);
+
