@@ -33,7 +33,6 @@ import {
     removeTracer,
     updateHealthShieldUI,
     setUIDbRefs, // This will be used to pass the game-specific dbRefs to UI
-    addBulletHole,
     removeBulletHole
 } from "./ui.js";
 
