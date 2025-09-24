@@ -116,6 +116,16 @@ function applyCommonTransforms(ent, key) {
   }
 }
 
+// Robust PlayCanvas getter (returns app or null)
+function getPlayCanvasApp() {
+  if (typeof window !== "undefined" && window.playcanvasApp) return window.playcanvasApp;
+  if (typeof pc !== "undefined" && pc.Application && typeof pc.Application.getApplication === "function") {
+    try { return pc.Application.getApplication(); } catch (e) { return null; }
+  }
+  return null;
+}
+
+
 // -------------------- Tracer (PlayCanvas-friendly) --------------------
 export const activeTracers = [];
 
@@ -336,7 +346,7 @@ export class AnimatedTracer {
 // -------------------- PCWeaponBuilder (generic GLB loader -> weaponRoot + parts) --------------------
 class PCWeaponBuilder {
   constructor(opts = {}) {
-    this.app = opts.app || (window.playcanvasApp || (typeof pc !== 'undefined' && pc.Application && pc.Application.getApplication && pc.Application.getApplication()));
+       this.app = opts.app || getPlayCanvasApp();
     this.viewModel = opts.viewModel || null;
     if (!this.app) console.warn("PCWeaponBuilder: PlayCanvas app not found.");
   }
@@ -679,6 +689,51 @@ export class WeaponController {
     } catch (e) { console.warn("setCameraFov failed", e); }
   }
 
+  createFallbackViewModel() {
+    try {
+      const pcApp = getPlayCanvasApp();
+      if (pcApp && typeof pc !== "undefined") {
+        // PlayCanvas fallback: create a small box entity and parent to camera
+        try {
+          const boxEnt = new pc.Entity("vm_debug_box");
+          boxEnt.addComponent("model", { type: "box" });
+          boxEnt.setLocalScale(0.1, 0.1, 0.3);
+          // position in front of camera
+          boxEnt.setLocalPosition(0.2, -0.2, -0.6);
+          if (this.camera && typeof this.camera.addChild === "function") {
+            this.camera.addChild(boxEnt);
+          } else if (pcApp.root) {
+            pcApp.root.addChild(boxEnt);
+          }
+          this.viewModel = boxEnt;
+          this.weaponModel = boxEnt;
+          return boxEnt;
+        } catch (e) { /* fallthrough to three fallback */ }
+      }
+    } catch (e) {}
+
+    // THREE fallback
+    try {
+      if (typeof THREE !== "undefined") {
+        const g = new THREE.BoxGeometry(0.12, 0.12, 0.3);
+        const m = new THREE.MeshStandardMaterial({ color: 0x00ffcc });
+        const mesh = new THREE.Mesh(g, m);
+        mesh.name = "vm_debug_box";
+        // position local to camera
+        mesh.position.set(0.2, -0.2, -0.6);
+        if (this.camera && typeof this.camera.add === "function") this.camera.add(mesh);
+        else if (window.scene && typeof window.scene.add === "function") window.scene.add(mesh);
+        this.viewModel = mesh;
+        this.weaponModel = mesh;
+        return mesh;
+      }
+    } catch (e) {}
+
+    // last-resort: create a tiny placeholder object so other code has something to reference
+    this.viewModel = this.viewModel || { position: { x: 0, y: 0, z: 0 }, scale: { x:1,y:1,z:1 } };
+    return this.viewModel;
+  }
+
   // ------------------ equipWeapon (robust) ------------------
   equipWeapon(weaponKey) {
     if (!WeaponController.WEAPONS || !WeaponController.WEAPONS[weaponKey]) {
@@ -686,8 +741,11 @@ export class WeaponController {
       return;
     }
 
-    // save ammo
-    if (this.currentKey) this.ammoStore = this.ammoStore || {}, this.ammoStore[this.currentKey] = this.ammoInMagazine;
+    // save ammo for previous weapon
+    if (this.currentKey) {
+      this.ammoStore = this.ammoStore || {};
+      this.ammoStore[this.currentKey] = this.ammoInMagazine;
+    }
 
     this.currentKey = weaponKey;
     this.stats = WeaponController.WEAPONS[weaponKey];
@@ -699,119 +757,288 @@ export class WeaponController {
     this.ammoInMagazine = (this.ammoStore[weaponKey] != null) ? this.ammoStore[weaponKey] : this.stats.magazineSize;
 
     const normalized = (weaponKey || "").replace(/-/g,'').toLowerCase();
-    const isPc = (typeof pc !== "undefined") && isPcEntity(this.camera);
 
-    // create viewModel container attached to camera if missing or if not same engine
+    // Helper: robust PlayCanvas app lookup (works even if getPlayCanvasApp helper exists elsewhere)
+    const pcApp = (typeof getPlayCanvasApp === 'function')
+      ? getPlayCanvasApp()
+      : (window.playcanvasApp || ((typeof pc !== 'undefined' && pc.Application && typeof pc.Application.getApplication === 'function') ? (pc.Application.getApplication() || null) : null));
+
+    // Guess engine context from camera and app
+    const isPcContext = !!pcApp || ((typeof pc !== 'undefined') && isPcEntity(this.camera));
+
+    // Helper: create a visible fallback viewmodel if prototypes/builders aren't ready
+    const ensureFallbackViewModel = () => {
+      try {
+        if (typeof this.createFallbackViewModel === 'function') {
+          return this.createFallbackViewModel();
+        }
+      } catch (e) {}
+      // Inline fallback creation (PlayCanvas)
+      try {
+        if (pcApp && typeof pc !== 'undefined') {
+          const boxEnt = new pc.Entity("vm_debug_box");
+          boxEnt.addComponent("model", { type: "box" });
+          boxEnt.setLocalScale(0.1, 0.1, 0.3);
+          try { boxEnt.setLocalPosition(0.2, -0.2, -0.6); } catch(e){}
+          try {
+            if (this.camera && typeof this.camera.addChild === "function") this.camera.addChild(boxEnt);
+            else if (pcApp.root) pcApp.root.addChild(boxEnt);
+          } catch(e){}
+          this.viewModel = boxEnt;
+          this.weaponModel = boxEnt;
+          return boxEnt;
+        }
+      } catch (e) {}
+      // THREE fallback
+      try {
+        if (typeof THREE !== 'undefined') {
+          const g = new THREE.BoxGeometry(0.12, 0.12, 0.3);
+          const m = new THREE.MeshStandardMaterial({ color: 0x00ffcc });
+          const mesh = new THREE.Mesh(g, m);
+          mesh.name = "vm_debug_box";
+          mesh.position.set(0.2, -0.2, -0.6);
+          try {
+            if (this.camera && typeof this.camera.add === "function") this.camera.add(mesh);
+            else if (window.scene && typeof window.scene.add === "function") window.scene.add(mesh);
+          } catch (e) {}
+          this.viewModel = mesh;
+          this.weaponModel = mesh;
+          return mesh;
+        }
+      } catch (e) {}
+      // final minimal fallback
+      this.viewModel = this.viewModel || { position: { x: 0, y: 0, z: 0 }, scale: { x:1,y:1,z:1 } };
+      return this.viewModel;
+    };
+
+    // create viewModel container attached to camera if missing or if engine context differs
     try {
       if (!this.viewModel) {
-        if (isPc) {
-          const vm = new pc.Entity("ViewModelRoot");
-          vm.enabled = true;
-          vm.setLocalPosition(0,0,0);
-          vm.setLocalEulerAngles(0,0,0);
-          vm.setLocalScale(1,1,1);
-          try { if (this.camera && typeof this.camera.addChild === "function") this.camera.addChild(vm); else if (window.playcanvasApp && window.playcanvasApp.root) window.playcanvasApp.root.addChild(vm); } catch (e) {}
-          this.viewModel = vm;
+        if (isPcContext) {
+          try {
+            const vm = new pc.Entity("ViewModelRoot");
+            vm.enabled = true;
+            vm.setLocalPosition(0,0,0);
+            vm.setLocalEulerAngles(0,0,0);
+            vm.setLocalScale(1,1,1);
+            if (this.camera && typeof this.camera.addChild === "function") this.camera.addChild(vm);
+            else if (pcApp && pcApp.root) pcApp.root.addChild(vm);
+            this.viewModel = vm;
+          } catch (e) {
+            // fallback to simple debug vm if pc entity creation fails
+            ensureFallbackViewModel();
+          }
         } else {
-          const vm = new THREE.Group();
-          vm.name = "ViewModelRoot";
-          try { if (this.camera && typeof this.camera.add === "function") this.camera.add(vm); else if (window.scene && typeof window.scene.add === "function") window.scene.add(vm); } catch (e) {}
-          this.viewModel = vm;
+          try {
+            const vm = new THREE.Group();
+            vm.name = "ViewModelRoot";
+            if (this.camera && typeof this.camera.add === "function") this.camera.add(vm);
+            else if (window.scene && typeof window.scene.add === "function") window.scene.add(vm);
+            this.viewModel = vm;
+          } catch (e) {
+            ensureFallbackViewModel();
+          }
         }
       } else {
         // ensure it's parented to camera (if possible)
         try {
-          if (isPc && this.viewModel && this.viewModel.parent !== this.camera && typeof this.camera.addChild === "function") {
+          if (isPcContext && this.viewModel && this.viewModel.parent !== this.camera && typeof this.camera.addChild === "function") {
             try { if (this.viewModel.parent) this.viewModel.parent.removeChild(this.viewModel); } catch (e) {}
             this.camera.addChild(this.viewModel);
-          } else if (!isPc && this.viewModel && this.viewModel.parent !== this.camera && this.camera && typeof this.camera.add === "function") {
+          } else if (!isPcContext && this.viewModel && this.viewModel.parent !== this.camera && this.camera && typeof this.camera.add === "function") {
             try { if (this.viewModel.parent && typeof this.viewModel.parent.remove === "function") this.viewModel.parent.remove(this.viewModel); } catch (e) {}
             this.camera.add(this.viewModel);
           }
         } catch (e) {}
       }
-    } catch (e) { console.warn("equipWeapon create viewModel failed", e); }
+    } catch (e) {
+      console.warn("equipWeapon create viewModel failed", e);
+      ensureFallbackViewModel();
+    }
+
+    // defensive: ensure viewModel scale non-zero
+    try {
+      if (this.viewModel) {
+        if (typeof this.viewModel.getLocalScale === 'function') {
+          const s = this.viewModel.getLocalScale();
+          if ((s.x||0) === 0 || (s.y||0) === 0 || (s.z||0) === 0) this.viewModel.setLocalScale(1,1,1);
+        } else if (this.viewModel.scale) {
+          if ((this.viewModel.scale.x||0) === 0 || (this.viewModel.scale.y||0) === 0 || (this.viewModel.scale.z||0) === 0) this.viewModel.scale.set(1,1,1);
+        }
+      }
+    } catch(e){}
 
     // clear previous weaponModel if present
     try {
       if (this.weaponModel) {
-        if (isPc && isPcEntity(this.weaponModel)) {
-          try { if (this.weaponModel.parent) this.weaponModel.parent.removeChild(this.weaponModel); } catch {}
-        } else if (!isPc && isThreeObject(this.weaponModel)) {
-          try { if (this.weaponModel.parent) this.weaponModel.parent.remove(this.weaponModel); } catch {}
+        if (isPcContext && isPcEntity(this.weaponModel)) {
+          try { if (this.weaponModel.parent) this.weaponModel.parent.removeChild(this.weaponModel); } catch (e) {}
+        } else if (!isPcContext && isThreeObject(this.weaponModel)) {
+          try { if (this.weaponModel.parent) this.weaponModel.parent.remove(this.weaponModel); } catch (e) {}
         }
         this.weaponModel = null;
+        this.parts = { slide: null, muzzle: null };
       }
     } catch (e) {}
 
-    // Try PlayCanvas prototype first (when in PC environment)
-    if (isPc && window._pcPrototypeModels && window._pcPrototypeModels[normalized]) {
-      try {
-        const proto = window._pcPrototypeModels[normalized];
-        const clone = (typeof proto.clone === "function") ? proto.clone(true) : null;
-        if (clone) {
-          clone.enabled = true;
-          try { if (clone.parent) clone.parent.removeChild(clone); } catch {}
-          this.viewModel.addChild(clone);
-          this.weaponModel = clone;
-          applyCommonTransforms(clone, normalized);
-          // find muzzle
-          const findMuzzlePc = (ent) => {
-            if (!ent) return null;
-            if ((ent.name || "").toLowerCase() === "muzzle") return ent;
-            if (ent.children) for (let c of ent.children) { const r = findMuzzlePc(c); if (r) return r; }
-            return null;
-          };
-          const muzzle = findMuzzlePc(clone);
-          if (muzzle) this.parts.muzzle = muzzle;
-          return;
+    // Try PlayCanvas prototype first (when in PC environment and prototypes exist)
+    try {
+      if (pcApp && window._pcPrototypeModels && window._pcPrototypeModels[normalized]) {
+        try {
+          const proto = window._pcPrototypeModels[normalized];
+          const clone = (typeof proto.clone === "function") ? proto.clone(true) : null;
+          if (clone) {
+            clone.enabled = true;
+            try { if (clone.parent) clone.parent.removeChild(clone); } catch (e) {}
+            // parent into viewModel
+            try { if (this.viewModel && typeof this.viewModel.addChild === 'function') this.viewModel.addChild(clone); else if (this.viewModel && this.viewModel.add) this.viewModel.add(clone); } catch(e){}
+            this.weaponModel = clone;
+            applyCommonTransforms(clone, normalized);
+
+            // find muzzle
+            const findMuzzlePc = (ent) => {
+              if (!ent) return null;
+              if ((ent.name || "").toLowerCase() === "muzzle") return ent;
+              if (ent.children) for (let c of ent.children) { const r = findMuzzlePc(c); if (r) return r; }
+              return null;
+            };
+            const muzzle = findMuzzlePc(clone);
+            if (muzzle) this.parts.muzzle = muzzle;
+            return;
+          }
+        } catch (e) {
+          console.warn("equipWeapon pc prototype clone failed", e);
         }
-      } catch (e) { console.warn("equipWeapon pc prototype clone failed", e); }
-    }
+      }
+    } catch (e) { console.warn("equipWeapon pc prototype check failed", e); }
 
     // Try THREE prototypes if available (for THREE-mode)
-    if (!isPc && window._prototypeModels && window._prototypeModels[normalized]) {
-      try {
-        const clone = getWeaponModel(normalized);
-        try { if (clone.parent) clone.parent.remove(clone); } catch {}
-        this.viewModel.add(clone);
-        this.weaponModel = clone;
-        applyCommonTransforms(clone, normalized);
-        const findMuzzleThree = (o) => {
-          if (!o) return null;
-          if ((o.name || "").toLowerCase() === "muzzle") return o;
-          if (o.children) for (let c of o.children) { const r = findMuzzleThree(c); if (r) return r; }
-          return null;
-        };
-        const muzzle = findMuzzleThree(clone);
-        if (muzzle) this.parts.muzzle = muzzle;
-        return;
-      } catch (e) { console.warn("equipWeapon THREE prototype failed", e); }
+    try {
+      if ((!pcApp || !isPcEntity(this.camera)) && window._prototypeModels && window._prototypeModels[normalized]) {
+        try {
+          const clone = getWeaponModel(normalized);
+          try { if (clone.parent) clone.parent.remove(clone); } catch (e) {}
+          // add to viewModel (which should be a THREE Group)
+          try { if (this.viewModel && typeof this.viewModel.add === 'function') this.viewModel.add(clone); else if (this.camera && typeof this.camera.add === 'function') this.camera.add(clone); } catch(e){}
+          this.weaponModel = clone;
+          applyCommonTransforms(clone, normalized);
+          const findMuzzleThree = (o) => {
+            if (!o) return null;
+            if ((o.name || "").toLowerCase() === "muzzle") return o;
+            if (o.children) for (let c of o.children) { const r = findMuzzleThree(c); if (r) return r; }
+            return null;
+          };
+          const muzzle = findMuzzleThree(clone);
+          if (muzzle) this.parts.muzzle = muzzle;
+          return;
+        } catch (e) {
+          console.warn("equipWeapon THREE prototype failed", e);
+        }
+      }
+    } catch (e) { console.warn("equipWeapon three prototype check failed", e); }
+
+    // If PlayCanvas app isn't ready but this is a PlayCanvas context: create fallback and schedule a retry
+    if (!pcApp && isPcContext) {
+      console.warn(`[equipWeapon] PlayCanvas app not ready for ${normalized}. Creating visible fallback and scheduling retry.`);
+      ensureFallbackViewModel();
+
+      // schedule retry to attempt builder once pcApp becomes available (cleared on success)
+      if (!this._equipRetryInterval) {
+        let tries = 0;
+        this._equipRetryInterval = setInterval(() => {
+          tries++;
+          const appNow = (typeof getPlayCanvasApp === 'function') ? getPlayCanvasApp() : (window.playcanvasApp || (typeof pc !== 'undefined' && pc.Application && pc.Application.getApplication ? pc.Application.getApplication() : null));
+          if (appNow) {
+            clearInterval(this._equipRetryInterval);
+            this._equipRetryInterval = null;
+            // re-run equipWeapon to try the builder/prototypes now that the app exists
+            try { this.equipWeapon(this.currentKey); } catch (e) { console.warn("retry equipWeapon failed", e); }
+            return;
+          }
+          if (tries > 20) { // ~10s of attempts
+            clearInterval(this._equipRetryInterval);
+            this._equipRetryInterval = null;
+            console.warn("[equipWeapon] timed out waiting for PlayCanvas app; leaving fallback in place.");
+          }
+        }, 500);
+      }
+      return;
     }
 
-    // Fallback to builder
+    // Fallback to builder when PlayCanvas app is present (or if we explicitly want to use builder)
     try {
-      const builder = new PCWeaponBuilder({ app: window.playcanvasApp, viewModel: this.viewModel });
+      const builder = new PCWeaponBuilder({ app: pcApp, viewModel: this.viewModel });
       const buildMap = { knife: 'buildKnife', deagle: 'buildDeagle', ak47: 'buildAK47', marshal: 'buildMarshal', m79: 'buildM79', viper: 'buildViper', legion: 'buildLegion' };
       const method = buildMap[normalized];
       if (method && typeof builder[method] === "function") {
         const { promise } = builder[method]();
         promise.then((res) => {
-          if (!res) return;
+          if (!res) {
+            console.warn(`[equipWeapon] builder returned null for ${normalized}; using fallback viewmodel`);
+            if (!this.viewModel) ensureFallbackViewModel();
+            return;
+          }
+          // If builder returned a structured weaponRoot + parts object, use it
           if (res.weaponRoot && res.parts) {
+            try {
+              // remove any fallback added earlier
+              if (this.viewModel && this.viewModel.name === "vm_debug_box" && typeof this.viewModel.parent !== 'undefined') {
+                try { if (isPcContext && this.viewModel.parent) this.viewModel.parent.removeChild(this.viewModel); else if (!isPcContext && this.viewModel.parent && typeof this.viewModel.parent.remove === 'function') this.viewModel.parent.remove(this.viewModel); } catch (e) {}
+              }
+            } catch(e){}
             this.weaponModel = res.weaponRoot;
             this.parts = res.parts || {};
-            applyCommonTransforms(this.weaponModel, normalized);
+            try { applyCommonTransforms(this.weaponModel, normalized); } catch(e){}
           } else {
+            // direct entity/three object returned
+            try {
+              if (this.viewModel && typeof this.viewModel.addChild === 'function') {
+                try { this.viewModel.addChild(res); } catch(e){}
+              } else if (this.viewModel && typeof this.viewModel.add === 'function') {
+                try { this.viewModel.add(res); } catch(e){}
+              }
+            } catch(e){}
             this.weaponModel = res;
-            applyCommonTransforms(this.weaponModel, normalized);
+            try { applyCommonTransforms(this.weaponModel, normalized); } catch(e){}
           }
-        }).catch(err => console.warn("equipWeapon builder failed", err));
+
+          // find muzzle if not set yet
+          try {
+            if (!this.parts || !this.parts.muzzle) {
+              const findMuzzle = (root) => {
+                if (!root) return null;
+                try {
+                  if ((root.name || "").toLowerCase() === "muzzle") return root;
+                } catch(e){}
+                try {
+                  const children = root.children ? root.children : (root.getChildren ? root.getChildren() : null);
+                  if (children && children.length) {
+                    for (let c of children) {
+                      const r = findMuzzle(c);
+                      if (r) return r;
+                    }
+                  }
+                } catch(e){}
+                return null;
+              };
+              const muzzle = findMuzzle(this.weaponModel);
+              if (muzzle) this.parts = this.parts || {}, this.parts.muzzle = muzzle;
+            }
+          } catch (e) {}
+        }).catch(err => {
+          console.warn("equipWeapon builder failed", err);
+          if (!this.viewModel) ensureFallbackViewModel();
+        });
       } else {
-        console.warn(`[equipWeapon] No builder for ${normalized}`);
+        console.warn(`[equipWeapon] No builder method for ${normalized}; creating fallback viewmodel`);
+        if (!this.viewModel) ensureFallbackViewModel();
       }
-    } catch (e) { console.warn("equipWeapon builder error", e); }
+    } catch (e) {
+      console.warn("equipWeapon builder error", e);
+      if (!this.viewModel) ensureFallbackViewModel();
+    }
   }
+
 
   // ------------------ play weapon sound (and network) ------------------
   playWeaponSound(soundType) {
