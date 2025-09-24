@@ -1111,26 +1111,67 @@ export class WeaponController {
 
   // ------------------ update (FULL method) ------------------
   update(inputState, delta, playerState) {
-    // Engine-agnostic helpers
+    // Helpers
     const now = performance.now() / 1000;
     const lerp = (a,b,t)=>a+(b-a)*t;
     const clamp = (v,lo,hi)=>Math.max(lo,Math.min(hi,v));
 
-    // ensure viewModel exists
-    if (!this.viewModel) { this.equipWeapon(this.currentKey || "knife"); return; }
+    // ensure viewModel exists (try to equip if missing)
+    if (!this.viewModel) {
+      this.equipWeapon(this.currentKey || "knife");
+      // give one frame for loader, but still continue (will early-return next frame)
+      return;
+    }
 
-    // justPressed
+    // Make sure viewModel is parented to the camera (robust for PC / THREE)
+    try {
+      const isPc = (typeof pc !== "undefined") && isPcEntity(this.camera);
+      if (isPc && isPcEntity(this.viewModel) && this.camera && typeof this.camera.addChild === "function" && this.viewModel.parent !== this.camera) {
+        try { if (this.viewModel.parent) this.viewModel.parent.removeChild(this.viewModel); } catch(e) {}
+        try { this.camera.addChild(this.viewModel); } catch(e) {}
+      } else if (!isPc && this.camera && this.camera.add && this.viewModel.parent !== this.camera) {
+        try { if (this.viewModel.parent && typeof this.viewModel.parent.remove === 'function') this.viewModel.parent.remove(this.viewModel); } catch(e) {}
+        try { this.camera.add(this.viewModel); } catch(e) {}
+      }
+    } catch(e) {}
+
+    // defensive: ensure viewModel scale not zero (fix invisible-gun cases)
+    try {
+      if (this.viewModel) {
+        if (typeof this.viewModel.getLocalScale === 'function') {
+          const s = this.viewModel.getLocalScale();
+          if ((s.x||0) === 0 || (s.y||0) === 0 || (s.z||0) === 0) this.viewModel.setLocalScale(1,1,1);
+        } else if (this.viewModel.scale) {
+          if ((this.viewModel.scale.x||0) === 0 || (this.viewModel.scale.y||0) === 0 || (this.viewModel.scale.z||0) === 0) this.viewModel.scale.set(1,1,1);
+        }
+      }
+    } catch(e) {}
+
+    // debug: ensure muzzle dot exists and is visible if requested
+    try {
+      if (this._createMuzzleDebug === undefined) this._createMuzzleDebug = true;
+      if (this._createMuzzleDebug && !this._muzzleDebugDot) {
+        this._muzzleDebugDot = addDebugMuzzleDotForParts(this.parts, 0.03);
+        if (this._muzzleDebugDot) {
+          try { this._muzzleDebugDot.name = "vm_muzzle_debug"; } catch(e){}
+        }
+      }
+    } catch(e){}
+
+    // input & simple state
     const rawFire = !!inputState.fire;
     const justPressed = rawFire && !this._prevFire; this._prevFire = rawFire;
 
-    // player state
     const velocity = playerState?.velocity || (typeof pc !== "undefined" ? new pc.Vec3(0,0,0) : {x:0,y:0,z:0});
     const isCrouched = !!playerState?.isCrouched;
     const wishAim = !!inputState.aim;
     const isGrounded = !!(playerState?.physicsController && playerState.physicsController.isGrounded);
     const sinceLast = now - (this.lastShotTime || 0);
 
-    // aim positions for viewModel (local space offsets relative to camera/viewmodel root)
+    // fallback readyPos if missing
+    if (!this.readyPos) this.readyPos = { x:0.3, y:-0.5, z:-0.7 };
+
+    // target aim offsets local to viewModel root (useable across engines)
     const gunAimPos = {
       "ak-47": { x:0, y:-0.3, z:-0.5 }, "deagle": { x:0, y:-0.3, z:-0.5 }, "m79": { x:0.2, y:-0.4, z:-0.7 },
       "viper": { x:0, y:-0.3, z:-0.5 }, "legion": { x:0, y:-0.15, z:-0.5 }, "marshal": { x:-0.025, y:-0.035, z:-0.2 }
@@ -1141,8 +1182,9 @@ export class WeaponController {
       const tPull = (now - (this.state.pullStart||now)) / (this.stats.pullDuration || 0.001);
       if (tPull >= 1) {
         try {
-          if (this.viewModel.setLocalPosition) this.viewModel.setLocalPosition((this.state.pullTo||{x:0}).x, (this.state.pullTo||{y:0}).y, (this.state.pullTo||{z:0}).z);
-          else if (this.viewModel.position) this.viewModel.position.set((this.state.pullTo||{x:0}).x, (this.state.pullTo||{y:0}).y, (this.state.pullTo||{z:0}).z);
+          const to = this.state.pullTo || {x:0,y:0,z:0};
+          if (this.viewModel.setLocalPosition) this.viewModel.setLocalPosition(to.x,to.y,to.z);
+          else if (this.viewModel.position) this.viewModel.position.set(to.x,to.y,to.z);
         } catch(e){}
         this.state.pulling = false;
       } else {
@@ -1155,6 +1197,21 @@ export class WeaponController {
       }
     }
 
+    // Update muzzle dot world transform each frame (if present)
+    if (this._muzzleDebugDot && this.parts && this.parts.muzzle) {
+      try {
+        // if the dot is an entity/pc object it was already parented in addDebugMuzzleDotForParts, so nothing else required.
+        // for THREE mesh dot also parented. If not parented, attempt manual world-position copy:
+        if (typeof this._muzzleDebugDot.getWorldPosition === 'function' && this.parts.muzzle.getWorldPosition) {
+          // nothing — parent already handles it
+        } else if (this.parts.muzzle.getWorldPosition && this._muzzleDebugDot.position) {
+          const wp = new THREE.Vector3();
+          this.parts.muzzle.getWorldPosition(wp);
+          this._muzzleDebugDot.position.set(wp.x, wp.y, wp.z);
+        }
+      } catch(e){}
+    }
+
     // crosshair
     const spreadAngle = (typeof getSpreadMultiplier === "function") ? getSpreadMultiplier(this.currentKey, velocity, isCrouched, this._aiming, isGrounded, this.burstCount) : 0;
     if (typeof updateCrosshair === "function") updateCrosshair(spreadAngle);
@@ -1162,68 +1219,50 @@ export class WeaponController {
 
     if (!rawFire && (this.currentKey === "ak-47" || this.currentKey === "viper")) this.burstCount = 0;
 
-    // Aim toggle tweening
+    // Aim toggle (ADS) — robust, but DO NOT change camera FOV here (prevents zoom)
     if (wishAim !== this._prevWishAim) {
-      // if mid-pull or reloading, ignore aim toggle to avoid jank
+      // avoid toggling during pull/reload
       if (this.state.pulling || this.isReloadingFlag) { this._prevWishAim = wishAim; return; }
       const aimableGuns = ["ak-47","deagle","m79","viper","legion","marshal"];
       if (wishAim && !aimableGuns.includes(this.currentKey)) { this._prevWishAim = wishAim; return; }
 
-      // read scale & pos (robust across PC/THREE)
+      // robust read of current scale/pos
       const readScale = () => {
         try {
-          if (this.viewModel && typeof this.viewModel.getLocalScale === 'function') {
-            const s = this.viewModel.getLocalScale();
-            return { x: s.x, y: s.y, z: s.z };
-          }
-          if (this.viewModel && this.viewModel.scale) {
-            const s = this.viewModel.scale;
-            return { x: s.x !== undefined ? s.x : s, y: s.y !== undefined ? s.y : s, z: s.z !== undefined ? s.z : s };
-          }
+          if (this.viewModel.getLocalScale) { const s = this.viewModel.getLocalScale(); return {x:s.x,y:s.y,z:s.z}; }
+          if (this.viewModel.scale) { const s = this.viewModel.scale; return {x:s.x||1,y:s.y||1,z:s.z||1}; }
         } catch(e){}
         return {x:1,y:1,z:1};
       };
       const readPos = () => {
         try {
-          if (this.viewModel && typeof this.viewModel.getLocalPosition === 'function') {
-            const p = this.viewModel.getLocalPosition();
-            return { x: p.x, y: p.y, z: p.z };
-          }
-          if (this.viewModel && this.viewModel.position) {
-            const p = this.viewModel.position;
-            return { x: p.x, y: p.y, z: p.z };
-          }
+          if (this.viewModel.getLocalPosition) { const p = this.viewModel.getLocalPosition(); return {x:p.x,y:p.y,z:p.z}; }
+          if (this.viewModel.position) { const p = this.viewModel.position; return {x:p.x||0,y:p.y||0,z:p.z||0}; }
         } catch(e){}
         return {x:0,y:0,z:0};
       };
 
-      const currentScale = readScale();
-      this._baseScale = { x: currentScale.x, y: currentScale.y, z: currentScale.z };
+      this._baseScale = readScale();
       this._fromPos = readPos();
 
-      // NOTE: We intentionally DO NOT change camera FOV for ADS to avoid "zooming" the camera.
-      // The tween below will only animate the viewModel's position/scale/rotation (not camera FOV).
-      const toPos = wishAim ? (gunAimPos[this.currentKey] ? gunAimPos[this.currentKey] : (this.readyPos || {x:0,y:0,z:0})) : (this.readyPos ? this.readyPos : {x:0,y:0,z:0});
-
-      // Keep scale consistent while ADS (avoid scaling the viewmodel to invisible sizes)
-      const toScale = { x: this._baseScale.x, y: this._baseScale.y, z: this._baseScale.z };
+      // target pos in local viewmodel space
+      const toPos = wishAim ? (gunAimPos[this.currentKey] ? gunAimPos[this.currentKey] : this.readyPos) : this.readyPos;
+      // keep scale consistent to avoid disappearing
+      const toScale = { x:this._baseScale.x, y:this._baseScale.y, z:this._baseScale.z };
 
       this._fovTween = {
         active: true,
-        // camera fov will be preserved — store only for reference
         fromFov: this.getCameraFov(),
         toFov: this.getCameraFov(),
-        fromScale: { ...this._baseScale },
+        fromScale: {...this._baseScale},
         toScale,
-        fromPos: { ...this._fromPos },
+        fromPos: {...this._fromPos},
         toPos,
         startTime: now,
-        duration: 0.2,
-        // flag to indicate we should NOT apply camera FOV change
+        duration: 0.18,
         applyFovToCamera: false
       };
 
-      // hide scope overlay only when necessary (sniper handled later)
       if (this.currentKey !== "marshal" && typeof scopeOverlay !== "undefined" && scopeOverlay) scopeOverlay.style.display = 'none';
     }
     this._prevWishAim = wishAim;
@@ -1238,7 +1277,7 @@ export class WeaponController {
       if (clamped >= 1) {
         this._fovTween.active = false;
         this._aiming = wishAim;
-        // sniper special handling: show/hide overlay and optionally hide viewmodel
+        // sniper special handling
         if (this.currentKey === "marshal") {
           if (this._aiming) {
             if (typeof scopeOverlay !== "undefined" && scopeOverlay) scopeOverlay.style.display = 'block';
@@ -1254,36 +1293,35 @@ export class WeaponController {
         }
       }
 
-      // NOTE: do NOT change camera FOV here to avoid zooming effect.
-      // const newFov = lerp(this._fovTween.fromFov, this._fovTween.toFov, s);
-      // this.setCameraFov(newFov);
-
-      // animate scale (kept equal to base to avoid disappearing models)
+      // DO NOT change camera FOV here. We intentionally keep camera projection unchanged.
+      // animate scale (kept equal to base to avoid disappearing)
       try {
         const fs = this._fovTween.fromScale || {x:1,y:1,z:1}; const ts = this._fovTween.toScale || {x:1,y:1,z:1};
         const sx = fs.x + (ts.x - fs.x) * s; const sy = fs.y + (ts.y - fs.y) * s; const sz = fs.z + (ts.z - fs.z) * s;
-        if (this.viewModel && typeof this.viewModel.setLocalScale === 'function') this.viewModel.setLocalScale(sx,sy,sz);
-        else if (this.viewModel && this.viewModel.scale) this.viewModel.scale.set(sx,sy,sz);
-      } catch (e) {}
+        if (this.viewModel.setLocalScale) this.viewModel.setLocalScale(sx,sy,sz);
+        else if (this.viewModel.scale) this.viewModel.scale.set(sx,sy,sz);
+      } catch(e){}
 
       // animate position (center the gun relative to camera)
       try {
         const fp = this._fovTween.fromPos || {x:0,y:0,z:0}; const tp = this._fovTween.toPos || {x:0,y:0,z:0};
         const px = fp.x + (tp.x - fp.x) * s, py = fp.y + (tp.y - fp.y) * s, pz = fp.z + (tp.z - fp.z) * s;
-        if (this.viewModel && typeof this.viewModel.setLocalPosition === 'function') this.viewModel.setLocalPosition(px,py,pz);
-        else if (this.viewModel && this.viewModel.position) this.viewModel.position.set(px,py,pz);
-      } catch (e) {}
+        if (this.viewModel.setLocalPosition) this.viewModel.setLocalPosition(px,py,pz);
+        else if (this.viewModel.position) this.viewModel.position.set(px,py,pz);
+      } catch(e){}
     }
 
     // ensure viewModel visible if not aiming (in case sniper branch hid it)
     if (!this._aiming) {
-      if (isPcEntity(this.viewModel)) { try { this.viewModel.enabled = true; } catch (e) {} }
-      else if (this.viewModel && this.viewModel.visible !== undefined) this.viewModel.visible = true;
-      else if (this.viewModel && typeof this.viewModel.setLocalScale === 'function') this.viewModel.setLocalScale(1,1,1);
-      if (typeof scopeOverlay !== "undefined" && scopeOverlay) scopeOverlay.style.display = 'none';
+      try {
+        if (isPcEntity(this.viewModel)) { try { this.viewModel.enabled = true; } catch (e) {} }
+        else if (this.viewModel && this.viewModel.visible !== undefined) this.viewModel.visible = true;
+        else if (this.viewModel && typeof this.viewModel.setLocalScale === 'function') this.viewModel.setLocalScale(1,1,1);
+        if (typeof scopeOverlay !== "undefined" && scopeOverlay) scopeOverlay.style.display = 'none';
+      } catch(e){}
     }
 
-    // FIRE / SWING
+    // FIRE / SWING (rest of your logic left unchanged)
     const isSemi = ["deagle","marshal","m79","legion"].includes(this.currentKey);
     const secsPerShot = 60 / (this.stats.fireRateRPM || 600);
     const canFire = this.stats.isMelee
@@ -1344,6 +1382,10 @@ export class WeaponController {
       }
     }
 
+    // DEAGLE recoil, knife swing and reload handling — keep rest as before
+    // (I intentionally left your existing implementations for those sections unchanged
+    //  since earlier issues were mostly around ADS/FOV/visibility — keep them below)
+    // ---------- existing code continues unchanged from here ----------
     // deagle recoil
     if (this.state.deagleRecoil && this.state.deagleRecoil.active) {
       const dr = this.state.deagleRecoil; const elapsed = now - dr.startTime; const total = dr.durationUp + dr.durationDown;
@@ -1366,7 +1408,7 @@ export class WeaponController {
       }
     }
 
-    // viewmodel recoil kick
+    // viewmodel recoil kick (unchanged)
     if (this.state.recoiling && !this.stats.isMelee) {
       const VIEWER_RECOIL_ANIM_DURATION = 0.15; const tR = (now - this.state.recoilStart) / VIEWER_RECOIL_ANIM_DURATION;
       if (tR >= 1) {
@@ -1383,7 +1425,7 @@ export class WeaponController {
       }
     }
 
-    // knife swing
+    // knife swing (unchanged)
     if (this.state.knifeSwing && this.stats.isMelee) {
       const restX = 90 * DEG_TO_RAD, restY = 160 * DEG_TO_RAD;
       const elapsed = now - this.state.knifeSwingStart; const dur = this.state.knifeHeavy ? (this.stats.heavySwingTime || 0.6) : (this.stats.swingTime || 0.35);
@@ -1395,7 +1437,7 @@ export class WeaponController {
       }
     }
 
-    // reload handling
+    // reload handling (unchanged)
     if (inputState.reload && !this.isReloadingFlag && this.ammoInMagazine < this.stats.magazineSize) {
       this.isReloadingFlag = true; this.state.reloading = true; this.state.reloadStart = now; this._reloadEndPlayed = false;
       if (typeof this.playWeaponSound === "function") this.playWeaponSound("reloadStart");
@@ -1429,7 +1471,7 @@ export class WeaponController {
       }
     }
 
-    // tracer cleanup
+    // tracer cleanup (unchanged)
     if (this.state.tracerObjects && Array.isArray(this.state.tracerObjects)) {
       this.state.tracerObjects = this.state.tracerObjects.filter(entry => {
         if (!entry) return false;
@@ -1441,7 +1483,7 @@ export class WeaponController {
       });
     }
 
-    // camera recoil recovery
+    // camera recoil recovery (unchanged)
     this._recoil = this._recoil || { peakOffset: 0, recoilStartTime: 0, previousRecoilOffset: 0, recoilDuration: 0.25 };
     const elapsedRec = now - (this._recoil.recoilStartTime || 0);
     if (elapsedRec < (this._recoil.recoilDuration || 0)) {
